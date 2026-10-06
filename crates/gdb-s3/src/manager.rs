@@ -6,6 +6,8 @@ use object_store::path::Path as ObjPath;
 use object_store::ObjectStore;
 use std::sync::Arc;
 
+use object_store::aws::AmazonS3Builder;
+
 pub struct S3StorageManager {
     store: Arc<dyn ObjectStore>,
 }
@@ -13,6 +15,27 @@ pub struct S3StorageManager {
 impl S3StorageManager {
     pub fn new(store: Arc<dyn ObjectStore>) -> Self {
         Self { store }
+    }
+
+    pub fn from_config(
+        bucket: &str,
+        endpoint: Option<&str>,
+        region: Option<&str>,
+        access_key: Option<&str>,
+        secret_key: Option<&str>,
+    ) -> GdbResult<Self> {
+        let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+        if let Some(ep) = endpoint {
+            builder = builder.with_endpoint(ep).with_allow_http(true);
+        }
+        if let Some(reg) = region {
+            builder = builder.with_region(reg);
+        }
+        if let (Some(ak), Some(sk)) = (access_key, secret_key) {
+            builder = builder.with_access_key_id(ak).with_secret_access_key(sk);
+        }
+        let store = builder.build().map_err(|e| GdbError::S3(e.to_string()))?;
+        Ok(Self { store: Arc::new(store) })
     }
 
     /// Uploads an immutable snapshot of the partition's CSR topology to S3 in Parquet format.

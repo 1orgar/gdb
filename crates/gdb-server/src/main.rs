@@ -9,6 +9,7 @@ use gdb_flight::GdbFlightService;
 use gdb_gpu::GpuDispatcher;
 use gdb_planner::QueryExecutor;
 use gdb_raft::MultiRaftManager;
+use gdb_s3::S3StorageManager;
 use gdb_storage::PartitionStorageEngine;
 use mimalloc::MiMalloc;
 use parking_lot::RwLock;
@@ -49,6 +50,18 @@ struct Args {
     /// Comma-separated list of peer HTTP endpoints for Raft replication (e.g. "http://127.0.0.1:8846,http://127.0.0.1:8845")
     #[arg(long)]
     peers: Option<String>,
+
+    /// S3 Bucket name for tiered persistence snapshots (e.g. "gdb-snapshots")
+    #[arg(long, env = "AWS_BUCKET")]
+    s3_bucket: Option<String>,
+
+    /// S3 Custom Endpoint URL (e.g. "http://localhost:9000" for MinIO)
+    #[arg(long, env = "AWS_ENDPOINT")]
+    s3_endpoint: Option<String>,
+
+    /// S3 Region (e.g. "us-east-1")
+    #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
+    s3_region: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -79,6 +92,8 @@ struct AppState {
     compactions_count: Arc<AtomicU64>,
     gpu_backend: String,
     gpu_threshold: usize,
+    s3_manager: Option<Arc<S3StorageManager>>,
+    s3_bucket: Option<String>,
 }
 
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
@@ -99,6 +114,8 @@ async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
         "flight_port": state.port,
         "http_port": state.http_port,
         "peers": state.peers,
+        "s3_tiering": if state.s3_manager.is_some() { "Enabled" } else { "Disabled" },
+        "s3_bucket": state.s3_bucket.clone().unwrap_or_default(),
         "status": "UP"
     }))
 }
@@ -128,8 +145,39 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
         "queries_ok": q_ok,
         "queries_error": q_err,
         "uptime_seconds": uptime,
-        "estimated_memory_bytes": estimated_memory
+        "estimated_memory_bytes": estimated_memory,
+        "s3_configured": state.s3_manager.is_some(),
+        "s3_bucket": state.s3_bucket.clone().unwrap_or_default()
     }))
+}
+
+async fn handle_snapshot(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(s3) = &state.s3_manager {
+        let ver = state.storage.next_commit_version();
+        state.storage.compact();
+        match s3.upload_csr_snapshot(state.node_id as u32, ver, &state.storage).await {
+            Ok(key) => {
+                Json(serde_json::json!({
+                    "status": "success",
+                    "key": key,
+                    "version": ver,
+                    "bucket": state.s3_bucket.clone().unwrap_or_default(),
+                    "message": format!("Partition snapshot committed and uploaded to S3: {}", key)
+                }))
+            }
+            Err(e) => {
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": format!("S3 upload error: {}", e)
+                }))
+            }
+        }
+    } else {
+        Json(serde_json::json!({
+            "status": "not_configured",
+            "message": "S3 tiered storage is not configured. Start server with --s3-bucket or set AWS_BUCKET environment variable."
+        }))
+    }
 }
 
 async fn handle_gpu(State(state): State<AppState>) -> impl IntoResponse {
@@ -355,6 +403,48 @@ async fn handle_query(
         }));
     }
 
+    // Check for snapshot command
+    if trimmed.eq_ignore_ascii_case("snapshot")
+        || trimmed.eq_ignore_ascii_case("snapshot;")
+        || trimmed.eq_ignore_ascii_case("backup")
+        || trimmed.eq_ignore_ascii_case("backup;")
+    {
+        state.storage.compact();
+        state.compactions_count.fetch_add(1, Ordering::Relaxed);
+        let elapsed_us = start.elapsed().as_micros();
+        state.queries_ok.fetch_add(1, Ordering::Relaxed);
+        state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
+
+        if let Some(s3) = &state.s3_manager {
+            let ver = state.storage.next_commit_version();
+            match s3.upload_csr_snapshot(state.node_id as u32, ver, &state.storage).await {
+                Ok(key) => {
+                    return Json(serde_json::json!({
+                        "status": "ok",
+                        "message": format!("Parquet snapshot uploaded to S3: {}", key),
+                        "elapsed_us": elapsed_us,
+                        "num_rows": 1,
+                        "columns": ["snapshot_key", "version", "bucket"],
+                        "rows": [[key, ver, state.s3_bucket.clone().unwrap_or_default()]]
+                    }));
+                }
+                Err(e) => {
+                    return Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("S3 upload failed: {}", e),
+                        "elapsed_us": elapsed_us
+                    }));
+                }
+            }
+        } else {
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": "S3 tiered storage is not configured. Start server with --s3-bucket <bucket> or export AWS_BUCKET",
+                "elapsed_us": elapsed_us
+            }));
+        }
+    }
+
     let stmt = match gdb_parser::parse(trimmed) {
         Ok(s) => s,
         Err(e) => {
@@ -492,6 +582,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     storage_p0.compact();
     println!("\x1b[1;32m[+] Graph Catalog:\x1b[0m Initialized schema & bootstrap data");
 
+    // Initialize S3 Storage Manager if configured
+    let s3_manager = if let Some(bucket) = &args.s3_bucket {
+        let access_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        let env_endpoint = std::env::var("AWS_ENDPOINT").ok();
+        let endpoint = args.s3_endpoint.as_deref().or(env_endpoint.as_deref());
+        match S3StorageManager::from_config(
+            bucket,
+            endpoint,
+            Some(&args.s3_region),
+            access_key.as_deref(),
+            secret_key.as_deref(),
+        ) {
+            Ok(mgr) => {
+                println!(
+                    "\x1b[1;32m[+] S3 Tiered Storage:\x1b[0m Bucket '{}' connected (Endpoint: {})",
+                    bucket,
+                    endpoint.unwrap_or("AWS S3 Default")
+                );
+                Some(Arc::new(mgr))
+            }
+            Err(e) => {
+                eprintln!("\x1b[1;31m[!] Warning: Failed to initialize S3 storage manager: {}\x1b[0m", e);
+                None
+            }
+        }
+    } else {
+        println!("\x1b[1;33m[*] S3 Tiered Storage:\x1b[0m Disabled (pass --s3-bucket or set AWS_BUCKET to enable)");
+        None
+    };
+
     let app_state = AppState {
         node_id: args.node_id,
         partitions: args.partitions,
@@ -511,6 +632,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         compactions_count: Arc::new(AtomicU64::new(0)),
         gpu_backend: gpu_dispatcher.backend_name().to_string(),
         gpu_threshold: gpu_dispatcher.threshold_edges,
+        s3_manager,
+        s3_bucket: args.s3_bucket.clone(),
     };
 
     let app = Router::new()
@@ -520,6 +643,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/gpu", get(handle_gpu))
         .route("/metrics", get(handle_metrics))
         .route("/compact", post(handle_compact))
+        .route("/snapshot", post(handle_snapshot))
         .route("/query", post(handle_query))
         .route("/raft/replicate", post(handle_replicate))
         .with_state(app_state);
