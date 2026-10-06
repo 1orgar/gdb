@@ -1,0 +1,13 @@
+[package]
+name = "gdb-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdb-core.workspace = true
+gdb-storage.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

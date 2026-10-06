@@ -1,0 +1,19 @@
+[package]
+name = "gdb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+smallvec.workspace = true
+ahash.workspace = true
+roaring.workspace = true

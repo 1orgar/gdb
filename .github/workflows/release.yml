@@ -1,0 +1,142 @@
+name: Release Assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag name (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build ${{ matrix.asset_name }} (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 1. macOS Apple Silicon (ARM64)
+          - os: macos
+            arch: arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            asset_name: macos-arm64
+            use_cross_action: false
+
+          # 2. macOS Intel (x86_64)
+          - os: macos
+            arch: x86_64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            asset_name: macos-x86_64
+            use_cross_action: false
+
+          # 3. Linux (x86_64)
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: linux-x86_64
+            use_cross_action: false
+
+          # 4. Linux (ARM64)
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            asset_name: linux-arm64
+            use_cross_action: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Release Tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "RELEASE_TAG=${TAG}" >> $GITHUB_ENV
+          echo "Building assets for release tag: ${TAG}"
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Linux Cross Toolchain
+        if: matrix.use_cross_action
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux' && !matrix.use_cross_action
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config
+
+      - name: Build Release Binaries
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            --bin gdb-server \
+            --bin gdb-cli \
+            --bin gdb-studio
+
+      - name: Package Release Assets
+        shell: bash
+        run: |
+          DIST_DIR="gdb-${{ env.RELEASE_TAG }}-${{ matrix.asset_name }}"
+          mkdir -p "${DIST_DIR}"
+          
+          # Copy binaries
+          cp "target/${{ matrix.target }}/release/gdb-server" "${DIST_DIR}/"
+          cp "target/${{ matrix.target }}/release/gdb-cli" "${DIST_DIR}/"
+          cp "target/${{ matrix.target }}/release/gdb-studio" "${DIST_DIR}/"
+          
+          # Copy documentation, license and example assets
+          cp README.md "${DIST_DIR}/"
+          cp LICENSE "${DIST_DIR}/"
+          cp docs/SERVER_AND_QUERY_GUIDE.md "${DIST_DIR}/"
+          cp -r examples "${DIST_DIR}/"
+          cp -r scripts "${DIST_DIR}/"
+          
+          # Create archive
+          ARCHIVE_NAME="${DIST_DIR}.tar.gz"
+          tar -czvf "${ARCHIVE_NAME}" "${DIST_DIR}"
+          
+          # Generate SHA256 checksum
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          else
+            shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          fi
+          
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+
+      - name: Upload Assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "GDB Release ${{ env.RELEASE_TAG }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            ${{ env.ARCHIVE_NAME }}
+            ${{ env.ARCHIVE_NAME }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

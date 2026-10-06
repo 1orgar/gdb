@@ -1,0 +1,32 @@
+[package]
+name = "gdb-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdb-core.workspace = true
+gdb-storage.workspace = true
+gdb-wal.workspace = true
+gdb-raft.workspace = true
+gdb-parser.workspace = true
+gdb-planner.workspace = true
+gdb-flight.workspace = true
+gdb-s3.workspace = true
+gdb-gpu.workspace = true
+gdb-analytics = { path = "../gdb-analytics" }
+object_store.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tonic.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+mimalloc.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+axum = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

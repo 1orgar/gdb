@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  check-and-test:
+    name: Check & Test Workspace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config
+
+      - name: Cargo Check
+        run: cargo check --workspace
+
+      - name: Cargo Test
+        run: cargo test --workspace --no-fail-fast

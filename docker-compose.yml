@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # S3 Object Storage (MinIO)
+  minio:
+    image: minio/minio:latest
+    container_name: gdb-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadminpassword
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  # GDB Storage Node 1 (Coordinator + Multi-Raft Leader)
+  gdb-node1:
+    build: .
+    container_name: gdb-node1
+    command: ["--node-id", "1", "--partitions", "8", "--port", "8848", "--http-port", "8847", "--wal-dir", "/data/wal", "--peers", "http://gdb-node2:8846,http://gdb-node3:8845"]
+    ports:
+      - "8848:8848"
+      - "8847:8847"
+    environment:
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadminpassword
+      - AWS_ENDPOINT=http://minio:9000
+    depends_on:
+      - minio
+    volumes:
+      - gdb_node1_wal:/data/wal
+
+  # GDB Storage Node 2 (Follower)
+  gdb-node2:
+    build: .
+    container_name: gdb-node2
+    command: ["--node-id", "2", "--partitions", "8", "--port", "8849", "--http-port", "8846", "--wal-dir", "/data/wal", "--peers", "http://gdb-node1:8847,http://gdb-node3:8845"]
+    ports:
+      - "8849:8849"
+      - "8846:8846"
+    depends_on:
+      - minio
+    volumes:
+      - gdb_node2_wal:/data/wal
+
+  # GDB Storage Node 3 (Follower)
+  gdb-node3:
+    build: .
+    container_name: gdb-node3
+    command: ["--node-id", "3", "--partitions", "8", "--port", "8850", "--http-port", "8845", "--wal-dir", "/data/wal", "--peers", "http://gdb-node1:8847,http://gdb-node2:8846"]
+    ports:
+      - "8850:8850"
+      - "8845:8845"
+    depends_on:
+      - minio
+    volumes:
+      - gdb_node3_wal:/data/wal
+
+  # GDB Studio Web UI
+  gdb-studio:
+    build: .
+    container_name: gdb-studio
+    entrypoint: ["gdb-studio"]
+    command: ["--port", "3000", "--cluster-url", "http://gdb-node1:8847"]
+    ports:
+      - "3000:3000"
+    depends_on:
+      - gdb-node1
+
+volumes:
+  minio_data:
+  gdb_node1_wal:
+  gdb_node2_wal:
+  gdb_node3_wal:

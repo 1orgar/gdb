@@ -1,0 +1,100 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gdb-core",
+    "crates/gdb-storage",
+    "crates/gdb-wal",
+    "crates/gdb-raft",
+    "crates/gdb-parser",
+    "crates/gdb-planner",
+    "crates/gdb-flight",
+    "crates/gdb-s3",
+    "crates/gdb-gpu",
+    "crates/gdb-server",
+    "crates/gdb-cli",
+    "crates/gdb-analytics",
+    "crates/gdb-studio",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["GDB Team"]
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# Internal workspace crates
+gdb-core = { path = "crates/gdb-core" }
+gdb-storage = { path = "crates/gdb-storage" }
+gdb-wal = { path = "crates/gdb-wal" }
+gdb-raft = { path = "crates/gdb-raft" }
+gdb-parser = { path = "crates/gdb-parser" }
+gdb-planner = { path = "crates/gdb-planner" }
+gdb-flight = { path = "crates/gdb-flight" }
+gdb-s3 = { path = "crates/gdb-s3" }
+gdb-gpu = { path = "crates/gdb-gpu" }
+gdb-analytics = { path = "crates/gdb-analytics" }
+
+# Async & Runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+rayon = "1.10"
+
+# Arrow & Columnar
+arrow = { version = "53.0", features = ["prettyprint", "ffi"] }
+arrow-array = "53.0"
+arrow-schema = "53.0"
+arrow-flight = "53.0"
+parquet = { version = "53.0", features = ["arrow", "async"] }
+
+# Object Store & S3
+object_store = { version = "0.11", features = ["aws"] }
+
+# Networking & RPC
+tonic = "0.12"
+prost = "0.13"
+
+# Raft Consensus
+openraft = { version = "0.9", features = ["serde"] }
+
+# Data Structures & Concurrency
+parking_lot = "0.12"
+crossbeam = "0.8"
+crossbeam-epoch = "0.9"
+dashmap = "6.1"
+bytes = "1.8"
+smallvec = { version = "1.13", features = ["serde"] }
+ahash = "0.8"
+roaring = "0.10"
+
+# Serialization & CLI
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+clap = { version = "4.5", features = ["derive"] }
+reedline = "0.36"
+
+# Observability & Errors
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Memory Allocator
+mimalloc = { version = "0.1", default-features = false }
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1

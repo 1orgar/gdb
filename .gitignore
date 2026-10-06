@@ -1,0 +1,23 @@
+# Rust & Cargo build artifacts
+/target/
+**/*.rs.bk
+*.swp
+*.bak
+
+# Binaries (release assets built by CI or local cargo)
+/bin/
+
+# Runtime cluster data, state & WAL
+/data/
+/logs/
+*.log
+*.pid
+.cluster.pids
+.cluster_amd64.pids
+.studio.pid
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

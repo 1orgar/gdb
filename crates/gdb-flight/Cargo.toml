@@ -1,0 +1,18 @@
+[package]
+name = "gdb-flight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdb-core.workspace = true
+gdb-storage.workspace = true
+arrow.workspace = true
+arrow-flight.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

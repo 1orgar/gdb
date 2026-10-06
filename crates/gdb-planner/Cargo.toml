@@ -1,0 +1,21 @@
+[package]
+name = "gdb-planner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdb-core.workspace = true
+gdb-storage.workspace = true
+gdb-parser.workspace = true
+gdb-analytics = { path = "../gdb-analytics" }
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+serde.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

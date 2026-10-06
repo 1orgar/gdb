@@ -1,0 +1,25 @@
+[package]
+name = "gdb-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdb-core.workspace = true
+tokio.workspace = true
+rayon.workspace = true
+parking_lot.workspace = true
+crossbeam.workspace = true
+crossbeam-epoch.workspace = true
+dashmap.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+parquet.workspace = true
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+roaring.workspace = true
+smallvec.workspace = true
+ahash.workspace = true
