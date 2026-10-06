@@ -289,20 +289,33 @@ fn execute_query(
     }
 
     if input.starts_with(":connect ") {
-        let new_url = input.trim_start_matches(":connect ").trim();
+        let mut raw_url = input.trim_start_matches(":connect ").trim().to_string();
+        // Auto-fix double colon typo (e.g. "localhost::8847" -> "localhost:8847")
+        if raw_url.contains("::") && !raw_url.contains('[') {
+            println!("\x1b[1;33m[*] Notice: Detected '::' typo in URL, normalizing to single ':'\x1b[0m");
+            raw_url = raw_url.replace("::", ":");
+        }
+        // Auto-prepend http:// if protocol scheme is omitted
+        if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
+            raw_url = format!("http://{}", raw_url);
+        }
+        let clean_url = raw_url.trim_end_matches('/').to_string();
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3)).build()?;
-        let health_url = format!("{}/health", new_url.trim_end_matches('/'));
+        let health_url = format!("{}/health", clean_url);
 
         match client.get(&health_url).send() {
             Ok(resp) if resp.status().is_success() => {
-                println!("\x1b[1;32m[✓] Successfully connected to GDB Cluster at {}\x1b[0m", new_url);
+                println!("\x1b[1;32m[✓] Successfully connected to GDB Cluster at {}\x1b[0m", clean_url);
                 *mode = ClientMode::Cluster {
-                    endpoint: new_url.to_string(),
+                    endpoint: clean_url,
                     client,
                 };
             }
-            _ => {
-                eprintln!("\x1b[1;31m[!] Failed to connect to cluster at {}\x1b[0m", new_url);
+            Ok(resp) => {
+                eprintln!("\x1b[1;31m[!] Failed to connect to cluster at {}: HTTP {}\x1b[0m", clean_url, resp.status());
+            }
+            Err(e) => {
+                eprintln!("\x1b[1;31m[!] Failed to connect to cluster at {}: {}\x1b[0m", clean_url, e);
             }
         }
         return Ok(());
