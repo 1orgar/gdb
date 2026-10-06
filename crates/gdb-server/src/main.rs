@@ -62,6 +62,10 @@ struct Args {
     /// S3 Region (e.g. "us-east-1")
     #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
     s3_region: String,
+
+    /// Cluster architecture mode: 'replication' (Full Mirroring / HA) or 'sharding' (Distributed 1D Edge Cut)
+    #[arg(long, default_value = "replication")]
+    cluster_mode: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -94,6 +98,8 @@ struct AppState {
     gpu_threshold: usize,
     s3_manager: Option<Arc<S3StorageManager>>,
     s3_bucket: Option<String>,
+    cluster_mode: String,
+    total_nodes: u64,
 }
 
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
@@ -102,7 +108,8 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
         "service": "GDB Enterprise Graph Database",
         "version": "0.1.0",
         "node_id": state.node_id,
-        "role": if state.node_id == 1 { "Leader" } else { "Follower" }
+        "role": if state.node_id == 1 { "Leader" } else { "Follower" },
+        "cluster_mode": state.cluster_mode
     }))
 }
 
@@ -114,6 +121,13 @@ async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
         "flight_port": state.port,
         "http_port": state.http_port,
         "peers": state.peers,
+        "cluster_mode": state.cluster_mode,
+        "total_nodes": state.total_nodes,
+        "assigned_shards": if state.cluster_mode == "sharding" {
+            format!("Partitions where u % {} == {}", state.total_nodes, state.node_id.saturating_sub(1))
+        } else {
+            "All Partitions (Full Replication)".to_string()
+        },
         "s3_tiering": if state.s3_manager.is_some() { "Enabled" } else { "Disabled" },
         "s3_bucket": state.s3_bucket.clone().unwrap_or_default(),
         "status": "UP"
@@ -136,6 +150,7 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "node_id": state.node_id,
         "role": if state.node_id == 1 { "Leader" } else { "Follower" },
+        "cluster_mode": state.cluster_mode,
         "total_vertices": total_vertices,
         "total_edges": total_edges,
         "memtable_edges": memtable_edges,
@@ -370,6 +385,27 @@ async fn replicate_to_peers(state: &AppState, query: String) {
     }
 }
 
+fn get_node_url(node_id: u64, peers: &[String], my_node_id: u64, my_http_port: u16) -> Option<String> {
+    if node_id == my_node_id {
+        return Some(format!("http://127.0.0.1:{}", my_http_port));
+    }
+    let expected_port = match node_id {
+        1 => "8847",
+        2 => "8846",
+        3 => "8845",
+        _ => "",
+    };
+    for peer in peers {
+        if !expected_port.is_empty() && peer.contains(expected_port) {
+            return Some(peer.clone());
+        }
+    }
+    if (node_id as usize) <= peers.len() {
+        return Some(peers[(node_id - 1) as usize].clone());
+    }
+    peers.first().cloned()
+}
+
 async fn handle_query(
     State(state): State<AppState>,
     body: String,
@@ -457,7 +493,35 @@ async fn handle_query(
         }
     };
 
-    match state.executor.execute(stmt) {
+    // Sharding mode routing
+    if state.cluster_mode == "sharding" {
+        let target_node = match &stmt {
+            gdb_parser::ast::Statement::InsertVertex { id, .. } => {
+                Some((id.0 % state.total_nodes) + 1)
+            }
+            gdb_parser::ast::Statement::InsertEdge { src, .. }
+            | gdb_parser::ast::Statement::DeleteEdge { src, .. } => {
+                Some((src.0 % state.total_nodes) + 1)
+            }
+            _ => None,
+        };
+
+        if let Some(target) = target_node {
+            if target != state.node_id {
+                if let Some(target_url) = get_node_url(target, &state.peers, state.node_id, state.http_port) {
+                    let query_endpoint = format!("{}/query", target_url.trim_end_matches('/'));
+                    let payload = serde_json::json!({ "query": trimmed });
+                    if let Ok(resp) = state.http_client.post(&query_endpoint).json(&payload).send().await {
+                        if let Ok(json_resp) = resp.json::<serde_json::Value>().await {
+                            return Json(json_resp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    match state.executor.execute(stmt.clone()) {
         Ok(res) => {
             let elapsed_us = start.elapsed().as_micros();
             state.queries_ok.fetch_add(1, Ordering::Relaxed);
@@ -465,7 +529,22 @@ async fn handle_query(
 
             // Replicate mutations to peers
             if is_mutating_query(trimmed) {
-                replicate_to_peers(&state, trimmed.to_string()).await;
+                if state.cluster_mode == "sharding" {
+                    // In sharding mode: only DDL schema changes are broadcast to all nodes
+                    let is_ddl = matches!(
+                        stmt,
+                        gdb_parser::ast::Statement::CreateVertexLabel { .. }
+                            | gdb_parser::ast::Statement::CreateEdgeType { .. }
+                    );
+                    if is_ddl {
+                        replicate_to_peers(&state, trimmed.to_string()).await;
+                    }
+                } else {
+                    // In full replication mode: Leader replicates all mutations
+                    if state.node_id == 1 {
+                        replicate_to_peers(&state, trimmed.to_string()).await;
+                    }
+                }
             }
 
             let mut columns = Vec::new();
@@ -613,6 +692,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let total_nodes = 1 + peers.len() as u64;
+    let cluster_mode = args.cluster_mode.to_lowercase();
+    println!(
+        "\x1b[1;32m[+] Cluster Architecture Mode:\x1b[0m {} (Nodes: {})",
+        cluster_mode.to_uppercase(),
+        total_nodes
+    );
+
     let app_state = AppState {
         node_id: args.node_id,
         partitions: args.partitions,
@@ -634,6 +721,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gpu_threshold: gpu_dispatcher.threshold_edges,
         s3_manager,
         s3_bucket: args.s3_bucket.clone(),
+        cluster_mode,
+        total_nodes,
     };
 
     let app = Router::new()

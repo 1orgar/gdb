@@ -177,6 +177,15 @@ fn show_cluster(client: &reqwest::blocking::Client, current_endpoint: &str) {
         }
     }
 
+    let cluster_url = format!("{}/cluster", current_endpoint.trim_end_matches('/'));
+    if let Ok(resp) = client.get(&cluster_url).timeout(Duration::from_millis(600)).send() {
+        if let Ok(info) = resp.json::<Value>() {
+            let mode = info["cluster_mode"].as_str().unwrap_or("replication");
+            let shards = info["assigned_shards"].as_str().unwrap_or("All Partitions");
+            println!("  Architecture Mode: \x1b[1;33m{}\x1b[0m | Shards: \x1b[1;36m{}\x1b[0m\n", mode.to_uppercase(), shards);
+        }
+    }
+
     print_ascii_table(&cols, &rows);
     println!();
 }
@@ -192,9 +201,16 @@ fn show_resources(client: &reqwest::blocking::Client, endpoint: &str) {
                 let mem_mb = data["estimated_memory_bytes"].as_f64().unwrap_or(0.0) / 1024.0 / 1024.0;
                 let uptime_sec = data["uptime_seconds"].as_u64().unwrap_or(0);
                 let uptime_fmt = format!("{}m {}s", uptime_sec / 60, uptime_sec % 60);
+                let mode_str = data["cluster_mode"].as_str().unwrap_or("replication").to_uppercase();
+                let s3_str = if data["s3_configured"].as_bool().unwrap_or(false) {
+                    format!("Enabled (bucket: {})", data["s3_bucket"].as_str().unwrap_or(""))
+                } else {
+                    "Disabled".into()
+                };
 
                 let rows = vec![
                     vec![Value::String("Node Role".into()), Value::String(format!("Node #{} ({})", data["node_id"], data["role"].as_str().unwrap_or("Leader")))],
+                    vec![Value::String("Cluster Mode".into()), Value::String(mode_str)],
                     vec![Value::String("Total Vertices (CSR)".into()), Value::String(data["total_vertices"].to_string())],
                     vec![Value::String("Total Active Edges".into()), Value::String(data["total_edges"].to_string())],
                     vec![Value::String("Chunked-CSR Edges".into()), Value::String(data["csr_edges"].to_string())],
@@ -203,6 +219,7 @@ fn show_resources(client: &reqwest::blocking::Client, endpoint: &str) {
                     vec![Value::String("Total Queries Executed".into()), Value::String(format!("{} (ok: {}, err: {})", data["queries_total"], data["queries_ok"], data["queries_error"]))],
                     vec![Value::String("Process Uptime".into()), Value::String(uptime_fmt)],
                     vec![Value::String("Estimated In-Memory RAM".into()), Value::String(format!("{:.2} MB", mem_mb))],
+                    vec![Value::String("S3 Tiered Storage".into()), Value::String(s3_str)],
                 ];
 
                 print_ascii_table(&cols, &rows);

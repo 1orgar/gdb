@@ -41,18 +41,22 @@ A next-generation, high-performance distributed HTAP graph database engine built
 В проекте подготовлен скрипт автоматического запуска 3 узлов с разделением портов, WAL-каталогов и включением GPU Metal:
 
 ```bash
-# Запуск 3-узлового кластера
+# Запуск в режиме полной репликации (HA, 100% данных на всех нодах, быстрый обход):
 ./scripts/start_cluster.sh
+
+# Запуск в режиме распределенного шардирования (1D Edge Cut для огромных графов):
+./scripts/start_cluster.sh --sharding
 ```
 
 Вывод:
 ```
 ============================================================
        Starting 3-Node GDB Cluster (ARM Mac + GPU)         
+       Mode: REPLICATION (или SHARDING)                    
 ============================================================
-[+] Node 1 started (PID 49972): Flight :8848 | HTTP :8847 | GPU: Apple Metal UMA
-[+] Node 2 started (PID 49973): Flight :8849 | HTTP :8846 | GPU: Apple Metal UMA
-[+] Node 3 started (PID 49974): Flight :8850 | HTTP :8845 | GPU: Apple Metal UMA
+[+] Node 1 started (PID 60915): Flight :8848 | HTTP :8847 | Mode: replication | Role: Leader
+[+] Node 2 started (PID 60916): Flight :8849 | HTTP :8846 | Mode: replication | Role: Follower
+[+] Node 3 started (PID 60917): Flight :8850 | HTTP :8845 | Mode: replication | Role: Follower
 
 [✓] 3-node cluster is healthy and ready for queries!
     CLI connect:   ./bin/gdb-cli
