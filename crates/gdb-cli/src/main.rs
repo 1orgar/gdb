@@ -120,18 +120,44 @@ fn format_cell(val: &Value) -> String {
 }
 
 fn show_cluster(client: &reqwest::blocking::Client, current_endpoint: &str) {
-    println!("\n\x1b[1;36m=== GDB Cluster Topology & Node Status ===\x1b[0m");
+    println!("\n\x1b[1;36m=== GDB Leaderless Ring Cluster Topology ===\x1b[0m");
 
-    // Standard ports for local 3-node cluster or custom endpoint
-    let candidate_endpoints = vec![
-        ("Node 1 (Leader)", "http://127.0.0.1:8847", 8848),
-        ("Node 2 (Follower)", "http://127.0.0.1:8846", 8849),
-        ("Node 3 (Follower)", "http://127.0.0.1:8845", 8850),
-    ];
+    let cluster_url = format!("{}/cluster", current_endpoint.trim_end_matches('/'));
+    let mut rf_str = "3".to_string();
+    let mut mode_str = "SYNC".to_string();
+    let mut ring_nodes_opt: Option<Vec<Value>> = None;
+
+    if let Ok(resp) = client.get(&cluster_url).timeout(Duration::from_millis(600)).send() {
+        if let Ok(info) = resp.json::<Value>() {
+            rf_str = info["replication_factor"].to_string();
+            mode_str = info["replication_mode"].as_str().unwrap_or("SYNC").to_uppercase();
+            ring_nodes_opt = info.get("ring_nodes").and_then(|v| v.as_array().cloned());
+        }
+    }
+
+    println!("  Topology: \x1b[1;32mLeaderless Hash Ring\x1b[0m | Replication Factor: \x1b[1;33mRF={}\x1b[0m | Mode: \x1b[1;35m{}\x1b[0m\n", rf_str, mode_str);
+
+    let candidate_endpoints: Vec<(String, String, u16, u64)> = if let Some(nodes) = ring_nodes_opt {
+        nodes.iter().map(|n| {
+            let id = n["node_id"].as_u64().unwrap_or(1);
+            let url = n["http_url"].as_str().unwrap_or("").to_string();
+            let flight = n["flight_port"].as_u64().unwrap_or(8848) as u16;
+            (format!("Peer Node #{}", id), url, flight, id)
+        }).collect()
+    } else {
+        vec![
+            ("Peer Node #1".to_string(), "http://127.0.0.1:8847".to_string(), 8848, 1),
+            ("Peer Node #2".to_string(), "http://127.0.0.1:8846".to_string(), 8849, 2),
+            ("Peer Node #3".to_string(), "http://127.0.0.1:8845".to_string(), 8850, 3),
+        ]
+    };
+
+    let total_nodes = candidate_endpoints.len();
 
     let cols = vec![
         "Node".to_string(),
         "Role".to_string(),
+        "Ring Token Range".to_string(),
         "HTTP Endpoint".to_string(),
         "Flight Port".to_string(),
         "Status".to_string(),
@@ -139,26 +165,27 @@ fn show_cluster(client: &reqwest::blocking::Client, current_endpoint: &str) {
     ];
     let mut rows: Vec<Vec<Value>> = Vec::new();
 
-    for (label, url, flight_port) in candidate_endpoints {
-        let target_url = if url == "http://127.0.0.1:8847" && current_endpoint != url {
-            current_endpoint
+    for (label, url, flight_port, node_id) in candidate_endpoints {
+        let target_url = if (url == "http://127.0.0.1:8847" || url == "http://localhost:8847") && current_endpoint != url {
+            current_endpoint.to_string()
         } else {
             url
         };
 
         let start = std::time::Instant::now();
         let health_url = format!("{}/health", target_url.trim_end_matches('/'));
+        let token_desc = format!("u % {} == {}", total_nodes, node_id.saturating_sub(1));
 
         match client.get(&health_url).timeout(Duration::from_millis(600)).send() {
             Ok(resp) if resp.status().is_success() => {
                 let elapsed = start.elapsed();
                 let is_current = if target_url == current_endpoint { " (active)" } else { "" };
-                let role = if label.contains("Leader") { "Leader" } else { "Follower" };
 
                 rows.push(vec![
                     Value::String(format!("{}{}", label, is_current)),
-                    Value::String(role.to_string()),
-                    Value::String(target_url.to_string()),
+                    Value::String("Peer".to_string()),
+                    Value::String(token_desc),
+                    Value::String(target_url),
                     Value::Number(flight_port.into()),
                     Value::String("\x1b[1;32mUP\x1b[0m".to_string()),
                     Value::String(format!("{:.2} ms", elapsed.as_secs_f64() * 1000.0)),
@@ -166,23 +193,15 @@ fn show_cluster(client: &reqwest::blocking::Client, current_endpoint: &str) {
             }
             _ => {
                 rows.push(vec![
-                    Value::String(label.to_string()),
-                    Value::String("-".to_string()),
-                    Value::String(target_url.to_string()),
+                    Value::String(label),
+                    Value::String("Peer".to_string()),
+                    Value::String(token_desc),
+                    Value::String(target_url),
                     Value::Number(flight_port.into()),
                     Value::String("\x1b[1;31mDOWN\x1b[0m".to_string()),
                     Value::String("timeout".to_string()),
                 ]);
             }
-        }
-    }
-
-    let cluster_url = format!("{}/cluster", current_endpoint.trim_end_matches('/'));
-    if let Ok(resp) = client.get(&cluster_url).timeout(Duration::from_millis(600)).send() {
-        if let Ok(info) = resp.json::<Value>() {
-            let mode = info["cluster_mode"].as_str().unwrap_or("replication");
-            let shards = info["assigned_shards"].as_str().unwrap_or("All Partitions");
-            println!("  Architecture Mode: \x1b[1;33m{}\x1b[0m | Shards: \x1b[1;36m{}\x1b[0m\n", mode.to_uppercase(), shards);
         }
     }
 
@@ -201,7 +220,9 @@ fn show_resources(client: &reqwest::blocking::Client, endpoint: &str) {
                 let mem_mb = data["estimated_memory_bytes"].as_f64().unwrap_or(0.0) / 1024.0 / 1024.0;
                 let uptime_sec = data["uptime_seconds"].as_u64().unwrap_or(0);
                 let uptime_fmt = format!("{}m {}s", uptime_sec / 60, uptime_sec % 60);
-                let mode_str = data["cluster_mode"].as_str().unwrap_or("replication").to_uppercase();
+                let arch_str = data["cluster_mode"].as_str().unwrap_or("Leaderless Ring");
+                let rf_val = data["replication_factor"].to_string();
+                let mode_val = data["replication_mode"].as_str().unwrap_or("SYNC");
                 let s3_str = if data["s3_configured"].as_bool().unwrap_or(false) {
                     format!("Enabled (bucket: {})", data["s3_bucket"].as_str().unwrap_or(""))
                 } else {
@@ -209,8 +230,10 @@ fn show_resources(client: &reqwest::blocking::Client, endpoint: &str) {
                 };
 
                 let rows = vec![
-                    vec![Value::String("Node Role".into()), Value::String(format!("Node #{} ({})", data["node_id"], data["role"].as_str().unwrap_or("Leader")))],
-                    vec![Value::String("Cluster Mode".into()), Value::String(mode_str)],
+                    vec![Value::String("Node Role".into()), Value::String(format!("Node #{} (Peer)", data["node_id"]))],
+                    vec![Value::String("Cluster Architecture".into()), Value::String(arch_str.to_string())],
+                    vec![Value::String("Replication Factor".into()), Value::String(format!("RF = {}", rf_val))],
+                    vec![Value::String("Replication Mode".into()), Value::String(mode_val.to_string())],
                     vec![Value::String("Total Vertices (CSR)".into()), Value::String(data["total_vertices"].to_string())],
                     vec![Value::String("Total Active Edges".into()), Value::String(data["total_edges"].to_string())],
                     vec![Value::String("Chunked-CSR Edges".into()), Value::String(data["csr_edges"].to_string())],
@@ -438,7 +461,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(resp) if resp.status().is_success() => {
                 let info: Value = resp.json().unwrap_or(Value::Null);
                 let node_id = info["node_id"].as_u64().unwrap_or(1);
-                let role = info["role"].as_str().unwrap_or("Leader");
+                let role = info["role"].as_str().unwrap_or("Peer");
 
                 println!(
                     "\x1b[1;32m[✓] Connected to GDB Cluster:\x1b[0m \x1b[1m{}\x1b[0m",

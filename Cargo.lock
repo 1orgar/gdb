@@ -1276,6 +1276,7 @@ dependencies = [
  "arrow-array",
  "axum",
  "clap",
+ "futures",
  "gdb-analytics",
  "gdb-core",
  "gdb-flight",

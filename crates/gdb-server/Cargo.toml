@@ -17,6 +17,7 @@ gdb-gpu.workspace = true
 gdb-analytics = { path = "../gdb-analytics" }
 object_store.workspace = true
 tokio.workspace = true
+futures.workspace = true
 clap.workspace = true
 tonic.workspace = true
 parking_lot.workspace = true

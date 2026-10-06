@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-GDB Multi-Node Replication Test Suite (Pure Python Standard Library)
-Verifies that DDL, DML and Compaction executed on Node 1 (Leader)
-are consistently replicated to Node 2 and Node 3 (Followers).
+GDB Leaderless Hash Ring Replication Test Suite (Pure Python Standard Library)
+Verifies symmetric peer-to-peer replication: writes accepted by ANY node (as coordinator)
+replicate consistently across the cluster ring.
 """
 
 import sys
@@ -11,11 +11,11 @@ import json
 import urllib.request
 import urllib.error
 
-NODE1_URL = "http://127.0.0.1:8847"
-NODE2_URL = "http://127.0.0.1:8846"
-NODE3_URL = "http://127.0.0.1:8845"
+PEER1_URL = "http://127.0.0.1:8847"
+PEER2_URL = "http://127.0.0.1:8846"
+PEER3_URL = "http://127.0.0.1:8845"
 
-def query(endpoint, q, timeout=3):
+def query(endpoint, q, timeout=5):
     url = f"{endpoint}/query"
     data = json.dumps({"query": q}).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -25,102 +25,112 @@ def query(endpoint, q, timeout=3):
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-def check_health(endpoint):
-    url = f"{endpoint}/health"
+def get_json(url, timeout=3):
     try:
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("status") == "UP"
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
     except Exception:
-        return False
+        return None
 
 def main():
-    print("\033[1;36m" + "=" * 60)
-    print("      GDB Multi-Node Raft Replication Verification Suite     ")
-    print("=" * 60 + "\033[0m")
+    print("\033[1;36m" + "=" * 65)
+    print("      GDB Leaderless Ring Replication Verification Suite     ")
+    print("=" * 65 + "\033[0m")
 
-    # 1. Health check all 3 nodes
-    print("[*] Probing cluster nodes health...")
-    nodes = [("Node 1 (Leader)", NODE1_URL), ("Node 2 (Follower)", NODE2_URL), ("Node 3 (Follower)", NODE3_URL)]
-    for name, url in nodes:
-        if check_health(url):
-            print(f"  \033[1;32m[✓]\033[0m {name} at {url} is UP")
+    # 1. Health & Cluster Check on all 3 peers
+    print("[*] Probing leaderless ring peers and topology...")
+    peers = [("Peer 1", PEER1_URL), ("Peer 2", PEER2_URL), ("Peer 3", PEER3_URL)]
+    for name, url in peers:
+        health = get_json(f"{url}/health")
+        if health and health.get("status") == "UP":
+            rf = health.get("replication_factor", "?")
+            mode = health.get("replication_mode", "?")
+            print(f"  \033[1;32m[✓]\033[0m {name} at {url} is UP | Role: Peer | RF={rf} | Mode={mode}")
         else:
             print(f"  \033[1;31m[✗]\033[0m {name} at {url} is UNREACHABLE!")
             print("\nPlease ensure the 3-node cluster is running via ./scripts/start_cluster.sh")
             sys.exit(1)
 
-    print("\n[1/4] Creating Schema on Leader (Node 1)...")
-    res1 = query(NODE1_URL, "CREATE VERTEX Device (model STRING, ram_gb INT64);")
-    res2 = query(NODE1_URL, "CREATE EDGE LINKED ();")
-    print(f"  -> Leader DDL: {res1.get('status')} | {res2.get('status')}")
+    print("\n[1/4] Creating Schema via Peer 1 (Broadcast DDL)...")
+    res1 = query(PEER1_URL, "CREATE VERTEX Device (model STRING, ram_gb INT64);")
+    res2 = query(PEER1_URL, "CREATE EDGE LINKED ();")
+    print(f"  -> DDL Result: {res1.get('status')} | {res2.get('status')}")
     time.sleep(0.1)
 
-    print("\n[2/4] Ingesting Vertices and Edges on Leader (Node 1)...")
-    num_vertices = 10
-    num_edges = 12
+    print("\n[2/4] Performing Symmetric Ingestion Across Different Peers...")
+    # Insert from Peer 1
+    print("  -> Inserting vertices 101..104 through Peer 1...")
+    for i in range(1, 5):
+        query(PEER1_URL, f"INSERT VERTEX Device (id, model, ram_gb) VALUES ({100 + i}, 'M5_Server_{i}', {16 * i});")
 
-    for i in range(1, num_vertices + 1):
-        q = f"INSERT VERTEX Device (id, model, ram_gb) VALUES ({100 + i}, 'M5_Server_{i}', {16 * i});"
-        res = query(NODE1_URL, q)
-        if res.get("status") != "ok":
-            print(f"  [!] Failed vertex insert on leader: {res.get('error')}")
+    # Insert from Peer 2
+    print("  -> Inserting vertices 105..108 through Peer 2...")
+    for i in range(5, 9):
+        query(PEER2_URL, f"INSERT VERTEX Device (id, model, ram_gb) VALUES ({100 + i}, 'M5_Server_{i}', {16 * i});")
 
-    for i in range(1, num_edges + 1):
-        src = 100 + ((i - 1) % num_vertices) + 1
-        dst = 100 + (i % num_vertices) + 1
-        q = f"INSERT EDGE LINKED FROM {src} TO {dst};"
-        query(NODE1_URL, q)
+    # Insert from Peer 3
+    print("  -> Inserting vertices 109..112 and connecting edges through Peer 3...")
+    for i in range(9, 13):
+        query(PEER3_URL, f"INSERT VERTEX Device (id, model, ram_gb) VALUES ({100 + i}, 'M5_Server_{i}', {16 * i});")
 
-    # Force compaction on leader
-    query(NODE1_URL, "compact;")
-    print(f"  [✓] Inserted {num_vertices} vertices and {num_edges} edges on Node 1, compacted.")
+    for i in range(1, 13):
+        src = 100 + ((i - 1) % 12) + 1
+        dst = 100 + (i % 12) + 1
+        query(PEER3_URL, f"INSERT EDGE LINKED FROM {src} TO {dst};")
 
-    # Small delay for network propagation
+    # Compaction from Peer 2
+    print("  -> Triggering compaction via Peer 2...")
+    query(PEER2_URL, "compact;")
     time.sleep(0.3)
 
-    print("\n[3/4] Validating Replicated State on Followers (Node 2 & Node 3)...")
+    print("\n[3/4] Validating Consistency Across All Ring Peers...")
     read_query = "MATCH (a:Device)-[:LINKED]->(b:Device) RETURN a.model, b.model;"
 
-    # Query Node 1 (Source)
-    n1_res = query(NODE1_URL, read_query)
-    n1_rows = len(n1_res.get("rows", []))
-    print(f"  Node 1 (Source Leader):   {n1_rows} edges found")
+    p1_res = query(PEER1_URL, read_query)
+    p2_res = query(PEER2_URL, read_query)
+    p3_res = query(PEER3_URL, read_query)
 
-    # Query Node 2 (Follower)
-    n2_res = query(NODE2_URL, read_query)
-    n2_rows = len(n2_res.get("rows", []))
-    print(f"  Node 2 (Follower 1):      {n2_rows} edges found")
+    p1_rows = len(p1_res.get("rows", []))
+    p2_rows = len(p2_res.get("rows", []))
+    p3_rows = len(p3_res.get("rows", []))
 
-    # Query Node 3 (Follower)
-    n3_res = query(NODE3_URL, read_query)
-    n3_rows = len(n3_res.get("rows", []))
-    print(f"  Node 3 (Follower 2):      {n3_rows} edges found")
+    print(f"  Peer 1 (:8847): {p1_rows} edges found")
+    print(f"  Peer 2 (:8846): {p2_rows} edges found")
+    print(f"  Peer 3 (:8845): {p3_rows} edges found")
 
-    print("\n[4/4] Verifying Replicated PageRank Analytics across all nodes...")
+    print("\n[4/4] Verifying Parallel PageRank Analytics across All Peers...")
     pr_query = "CALL algo.pageRank({damping: 0.85, max_iter: 10}) YIELD vertex_id, score;"
-    pr1 = query(NODE1_URL, pr_query)
-    pr2 = query(NODE2_URL, pr_query)
-    pr3 = query(NODE3_URL, pr_query)
+    pr1 = query(PEER1_URL, pr_query)
+    pr2 = query(PEER2_URL, pr_query)
+    pr3 = query(PEER3_URL, pr_query)
 
     pr1_len = len(pr1.get("rows", []))
     pr2_len = len(pr2.get("rows", []))
     pr3_len = len(pr3.get("rows", []))
 
-    print(f"  PageRank Result Rows: Node 1 = {pr1_len} | Node 2 = {pr2_len} | Node 3 = {pr3_len}")
+    print(f"  PageRank Result Rows: Peer 1 = {pr1_len} | Peer 2 = {pr2_len} | Peer 3 = {pr3_len}")
 
     # Final assertions
-    success = (n1_rows > 0 and n2_rows == n1_rows and n3_rows == n1_rows and pr2_len == pr1_len and pr3_len == pr1_len)
+    cluster_info = get_json(f"{PEER1_URL}/cluster")
+    rf = cluster_info.get("effective_replication_factor", 3) if cluster_info else 3
 
-    print("\n" + "=" * 60)
-    if success:
-        print("\033[1;32m[PASS] Multi-Node Raft Replication is FULLY OPERATIONAL!\033[0m")
-        print("All mutations and compact actions replicated identically to all followers.")
+    if rf == 3:
+        # Full replication: all peers must have identical edge counts
+        success = (p1_rows == 12 and p2_rows == 12 and p3_rows == 12 and pr1_len > 0 and pr2_len == pr1_len and pr3_len == pr1_len)
     else:
-        print("\033[1;31m[FAIL] Discrepancy detected between Leader and Followers!\033[0m")
-        print(f"Details: N1={n1_rows}, N2={n2_rows}, N3={n3_rows}")
+        # Partitioned / partial replication
+        total_edges = p1_rows + p2_rows + p3_rows
+        success = total_edges >= 12
+
+    print("\n" + "=" * 65)
+    if success:
+        print("\033[1;32m[PASS] Leaderless Ring Replication is FULLY OPERATIONAL!\033[0m")
+        print("Symmetric writes from all peers processed and replicated across the hash ring.")
+    else:
+        print("\033[1;31m[FAIL] Discrepancy detected across cluster peers!\033[0m")
+        print(f"Details: P1={p1_rows}, P2={p2_rows}, P3={p3_rows}")
         sys.exit(1)
-    print("=" * 60 + "\n")
+    print("=" * 65 + "\n")
 
 if __name__ == "__main__":
     main()

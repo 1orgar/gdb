@@ -41,25 +41,29 @@ A next-generation, high-performance distributed HTAP graph database engine built
 В проекте подготовлен скрипт автоматического запуска 3 узлов с разделением портов, WAL-каталогов и включением GPU Metal:
 
 ```bash
-# Запуск в режиме полной репликации (HA, 100% данных на всех нодах, быстрый обход):
-./scripts/start_cluster.sh
+# 1. Полная синхронная репликация (RF=3, SYNC — по умолчанию):
+./scripts/start_cluster.sh --rf 3 --sync
 
-# Запуск в режиме распределенного шардирования (1D Edge Cut для огромных графов):
-./scripts/start_cluster.sh --sharding
+# 2. Асинхронная репликация (RF=3, ASYNC — максимальный TPS):
+./scripts/start_cluster.sh --rf 3 --async
+
+# 3. Чистое распределенное шардирование без репликации (RF=1, SYNC):
+./scripts/start_cluster.sh --rf 1 --sync
 ```
 
 Вывод:
 ```
 ============================================================
-       Starting 3-Node GDB Cluster (ARM Mac + GPU)         
-       Mode: REPLICATION (или SHARDING)                    
+       Starting 3-Node GDB Cluster (Leaderless Ring)        
+       Replication Factor: RF=3 | Mode: SYNC       
 ============================================================
-[+] Node 1 started (PID 60915): Flight :8848 | HTTP :8847 | Mode: replication | Role: Leader
-[+] Node 2 started (PID 60916): Flight :8849 | HTTP :8846 | Mode: replication | Role: Follower
-[+] Node 3 started (PID 60917): Flight :8850 | HTTP :8845 | Mode: replication | Role: Follower
+[+] Peer 1 started (PID 61877): Flight :8848 | HTTP :8847 | RF: 3 | Mode: sync | Role: Peer
+[+] Peer 2 started (PID 61878): Flight :8849 | HTTP :8846 | RF: 3 | Mode: sync | Role: Peer
+[+] Peer 3 started (PID 61879): Flight :8850 | HTTP :8845 | RF: 3 | Mode: sync | Role: Peer
 
 [✓] 3-node cluster is healthy and ready for queries!
     CLI connect:   ./bin/gdb-cli
+    Web Studio UI: ./scripts/start_studio.sh (http://localhost:3000)
     HTTP endpoint: http://localhost:8847/query
     Logs:          tail -f logs/node*.log
     Stop cluster:  ./scripts/stop_cluster.sh

@@ -16,6 +16,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,6 +24,40 @@ use tonic::transport::Server as TonicServer;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplicationMode {
+    Sync,
+    Async,
+}
+
+impl std::fmt::Display for ReplicationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReplicationMode::Sync => write!(f, "SYNC"),
+            ReplicationMode::Async => write!(f, "ASYNC"),
+        }
+    }
+}
+
+impl FromStr for ReplicationMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "sync" | "synchronous" => Ok(ReplicationMode::Sync),
+            "async" | "asynchronous" => Ok(ReplicationMode::Async),
+            other => Err(format!("Unknown replication mode: '{}'. Use 'sync' or 'async'.", other)),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RingNode {
+    pub node_id: u64,
+    pub http_url: String,
+    pub flight_port: u16,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "GDB: Distributed High-Performance In-Memory Graph Database", long_about = None)]
@@ -47,7 +82,7 @@ struct Args {
     #[arg(long, default_value = "./data/wal")]
     wal_dir: PathBuf,
 
-    /// Comma-separated list of peer HTTP endpoints for Raft replication (e.g. "http://127.0.0.1:8846,http://127.0.0.1:8845")
+    /// Comma-separated list of peer HTTP endpoints for Ring replication (e.g. "http://127.0.0.1:8846,http://127.0.0.1:8845")
     #[arg(long)]
     peers: Option<String>,
 
@@ -63,8 +98,16 @@ struct Args {
     #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
     s3_region: String,
 
-    /// Cluster architecture mode: 'replication' (Full Mirroring / HA) or 'sharding' (Distributed 1D Edge Cut)
-    #[arg(long, default_value = "replication")]
+    /// Replication factor on the leaderless hash ring (1 = pure sharding, N = full replication)
+    #[arg(long, short = 'r', default_value_t = 3)]
+    replication_factor: u32,
+
+    /// Replication mode: 'sync' (synchronous quorum/all) or 'async' (background asynchronous)
+    #[arg(long, default_value = "sync")]
+    replication_mode: String,
+
+    /// Cluster architecture mode (compatibility alias: 'ring', 'replication', 'sharding')
+    #[arg(long, default_value = "ring")]
     cluster_mode: String,
 }
 
@@ -88,6 +131,9 @@ struct AppState {
     executor: Arc<QueryExecutor>,
     storage: Arc<PartitionStorageEngine>,
     peers: Vec<String>,
+    ring_nodes: Vec<RingNode>,
+    replication_factor: u32,
+    replication_mode: ReplicationMode,
     http_client: reqwest::Client,
     queries_ok: Arc<AtomicU64>,
     queries_err: Arc<AtomicU64>,
@@ -98,8 +144,6 @@ struct AppState {
     gpu_threshold: usize,
     s3_manager: Option<Arc<S3StorageManager>>,
     s3_bucket: Option<String>,
-    cluster_mode: String,
-    total_nodes: u64,
 }
 
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
@@ -108,26 +152,30 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
         "service": "GDB Enterprise Graph Database",
         "version": "0.1.0",
         "node_id": state.node_id,
-        "role": if state.node_id == 1 { "Leader" } else { "Follower" },
-        "cluster_mode": state.cluster_mode
+        "role": "Peer",
+        "cluster_topology": "leaderless-ring",
+        "replication_factor": state.replication_factor,
+        "replication_mode": state.replication_mode.to_string()
     }))
 }
 
 async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
+    let total_nodes = state.ring_nodes.len();
+    let effective_rf = (state.replication_factor as usize).min(total_nodes).max(1);
     Json(serde_json::json!({
         "node_id": state.node_id,
-        "role": if state.node_id == 1 { "Leader" } else { "Follower" },
+        "role": "Peer",
+        "cluster_topology": "leaderless-ring",
+        "replication_factor": state.replication_factor,
+        "effective_replication_factor": effective_rf,
+        "replication_mode": state.replication_mode.to_string(),
+        "total_nodes": total_nodes,
         "partitions": state.partitions,
         "flight_port": state.port,
         "http_port": state.http_port,
         "peers": state.peers,
-        "cluster_mode": state.cluster_mode,
-        "total_nodes": state.total_nodes,
-        "assigned_shards": if state.cluster_mode == "sharding" {
-            format!("Partitions where u % {} == {}", state.total_nodes, state.node_id.saturating_sub(1))
-        } else {
-            "All Partitions (Full Replication)".to_string()
-        },
+        "ring_nodes": state.ring_nodes,
+        "assigned_tokens": format!("Primary token: u % {} == {}", total_nodes, state.node_id.saturating_sub(1)),
         "s3_tiering": if state.s3_manager.is_some() { "Enabled" } else { "Disabled" },
         "s3_bucket": state.s3_bucket.clone().unwrap_or_default(),
         "status": "UP"
@@ -149,8 +197,12 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
 
     Json(serde_json::json!({
         "node_id": state.node_id,
-        "role": if state.node_id == 1 { "Leader" } else { "Follower" },
-        "cluster_mode": state.cluster_mode,
+        "role": "Peer",
+        "cluster_mode": format!("LEADERLESS RING (RF={}, Mode={})", state.replication_factor, state.replication_mode),
+        "cluster_topology": "leaderless-ring",
+        "replication_factor": state.replication_factor,
+        "replication_mode": state.replication_mode.to_string(),
+        "total_nodes": state.ring_nodes.len(),
         "total_vertices": total_vertices,
         "total_edges": total_edges,
         "memtable_edges": memtable_edges,
@@ -228,7 +280,8 @@ async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let compactions = state.compactions_count.load(Ordering::Relaxed);
     let replications = state.replications_count.load(Ordering::Relaxed);
     let estimated_memory = (csr_e * 32) + (memtable_e * 64) + 20_971_520;
-    let is_leader = if state.node_id == 1 { 1 } else { 0 };
+    let is_sync = if state.replication_mode == ReplicationMode::Sync { 1 } else { 0 };
+    let rf = state.replication_factor;
 
     let body = format!(
         r#"# HELP gdb_uptime_seconds Process uptime in seconds
@@ -268,17 +321,17 @@ gdb_csr_edges_count {}
 # TYPE gdb_compactions_total counter
 gdb_compactions_total {}
 
-# HELP gdb_raft_term Current Raft term
-# TYPE gdb_raft_term gauge
-gdb_raft_term 1
+# HELP gdb_cluster_replication_factor Configured replication factor on hash ring
+# TYPE gdb_cluster_replication_factor gauge
+gdb_cluster_replication_factor {}
 
-# HELP gdb_raft_is_leader Whether current node is leader (1) or follower (0)
-# TYPE gdb_raft_is_leader gauge
-gdb_raft_is_leader {}
+# HELP gdb_cluster_is_sync_replication Whether replication is synchronous (1) or asynchronous (0)
+# TYPE gdb_cluster_is_sync_replication gauge
+gdb_cluster_is_sync_replication {}
 
-# HELP gdb_raft_replications_total Total mutations replicated to cluster peers
-# TYPE gdb_raft_replications_total counter
-gdb_raft_replications_total {}
+# HELP gdb_cluster_replications_total Total mutations replicated to cluster peers
+# TYPE gdb_cluster_replications_total counter
+gdb_cluster_replications_total {}
 
 # HELP gdb_gpu_active GPU hardware acceleration status (1 for active)
 # TYPE gdb_gpu_active gauge
@@ -301,7 +354,8 @@ gdb_memory_allocated_bytes {}
         memtable_e,
         csr_e,
         compactions,
-        is_leader,
+        rf,
+        is_sync,
         replications,
         estimated_memory
     );
@@ -317,8 +371,9 @@ async fn handle_compact(State(state): State<AppState>) -> impl IntoResponse {
     state.storage.compact();
     state.compactions_count.fetch_add(1, Ordering::Relaxed);
 
-    // Replicate compaction to peers
-    replicate_to_peers(&state, "compact;".to_string()).await;
+    // Replicate compaction to all other peers in the ring
+    let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+    replicate_to_targets(&state.http_client, &other_nodes, "compact;", state.replication_mode, &state.replications_count).await;
 
     Json(serde_json::json!({
         "status": "ok",
@@ -347,63 +402,127 @@ async fn handle_replicate(
     }
 }
 
-fn is_mutating_query(q: &str) -> bool {
-    let upper = q.trim().to_uppercase();
-    upper.starts_with("INSERT ") || upper.starts_with("CREATE ") || upper.starts_with("DELETE ") || upper.eq("COMPACT") || upper.eq("COMPACT;")
+fn build_ring_nodes(my_id: u64, my_http_port: u16, my_flight_port: u16, peers: &[String]) -> Vec<RingNode> {
+    let mut nodes = Vec::new();
+    nodes.push(RingNode {
+        node_id: my_id,
+        http_url: format!("http://127.0.0.1:{}", my_http_port),
+        flight_port: my_flight_port,
+    });
+
+    for (idx, peer) in peers.iter().enumerate() {
+        let (peer_id, flight_p) = if peer.contains("8847") {
+            (1, 8848)
+        } else if peer.contains("8846") {
+            (2, 8849)
+        } else if peer.contains("8845") {
+            (3, 8850)
+        } else {
+            let id = if (idx as u64 + 1) >= my_id {
+                idx as u64 + 2
+            } else {
+                idx as u64 + 1
+            };
+            (id, 8848 + id as u16)
+        };
+        nodes.push(RingNode {
+            node_id: peer_id,
+            http_url: peer.clone(),
+            flight_port: flight_p,
+        });
+    }
+
+    nodes.sort_by_key(|n| n.node_id);
+    nodes.dedup_by_key(|n| n.node_id);
+    nodes
 }
 
-async fn replicate_to_peers(state: &AppState, query: String) {
-    if state.peers.is_empty() {
+fn calculate_replica_set(key: u64, ring: &[RingNode], rf: u32) -> Vec<RingNode> {
+    if ring.is_empty() {
+        return Vec::new();
+    }
+    let n = ring.len();
+    let effective_rf = (rf as usize).max(1).min(n);
+    let primary_idx = (key as usize) % n;
+    let mut replicas = Vec::with_capacity(effective_rf);
+    for i in 0..effective_rf {
+        let idx = (primary_idx + i) % n;
+        replicas.push(ring[idx].clone());
+    }
+    replicas
+}
+
+async fn replicate_to_targets(
+    client: &reqwest::Client,
+    targets: &[RingNode],
+    query: &str,
+    mode: ReplicationMode,
+    reps_counter: &Arc<AtomicU64>,
+) {
+    if targets.is_empty() {
         return;
     }
 
-    for peer in &state.peers {
-        let peer_url = format!("{}/raft/replicate", peer.trim_end_matches('/'));
-        let client = state.http_client.clone();
-        let payload = serde_json::json!({ "query": query });
-        let reps = state.replications_count.clone();
+    let payload = serde_json::json!({ "query": query });
 
-        tokio::spawn(async move {
-            match client
-                .post(&peer_url)
-                .json(&payload)
-                .timeout(std::time::Duration::from_millis(500))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    reps.fetch_add(1, Ordering::Relaxed);
-                }
-                Ok(_) => {
-                    tracing::warn!("Replication peer {} responded with error", peer_url);
-                }
-                Err(e) => {
-                    tracing::debug!("Replication to {} failed: {}", peer_url, e);
-                }
+    match mode {
+        ReplicationMode::Sync => {
+            let mut futures = Vec::new();
+            for target in targets {
+                let target_url = format!("{}/replicate", target.http_url.trim_end_matches('/'));
+                let c = client.clone();
+                let p = payload.clone();
+                let reps = reps_counter.clone();
+                futures.push(async move {
+                    match c
+                        .post(&target_url)
+                        .json(&p)
+                        .timeout(std::time::Duration::from_millis(1500))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            reps.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(resp) => {
+                            tracing::warn!("Replication peer {} responded with status {}", target_url, resp.status());
+                        }
+                        Err(e) => {
+                            tracing::warn!("Replication peer {} request failed: {}", target_url, e);
+                        }
+                    }
+                });
             }
-        });
-    }
-}
-
-fn get_node_url(node_id: u64, peers: &[String], my_node_id: u64, my_http_port: u16) -> Option<String> {
-    if node_id == my_node_id {
-        return Some(format!("http://127.0.0.1:{}", my_http_port));
-    }
-    let expected_port = match node_id {
-        1 => "8847",
-        2 => "8846",
-        3 => "8845",
-        _ => "",
-    };
-    for peer in peers {
-        if !expected_port.is_empty() && peer.contains(expected_port) {
-            return Some(peer.clone());
+            futures::future::join_all(futures).await;
+        }
+        ReplicationMode::Async => {
+            for target in targets.to_vec() {
+                let target_url = format!("{}/replicate", target.http_url.trim_end_matches('/'));
+                let c = client.clone();
+                let p = payload.clone();
+                let reps = reps_counter.clone();
+                tokio::spawn(async move {
+                    match c
+                        .post(&target_url)
+                        .json(&p)
+                        .timeout(std::time::Duration::from_millis(1500))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            reps.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(_) => {
+                            tracing::warn!("Async replication peer {} responded with error", target_url);
+                        }
+                        Err(e) => {
+                            tracing::debug!("Async replication peer {} failed: {}", target_url, e);
+                        }
+                    }
+                });
+            }
         }
     }
-    if (node_id as usize) <= peers.len() {
-        return Some(peers[(node_id - 1) as usize].clone());
-    }
-    peers.first().cloned()
 }
 
 async fn handle_query(
@@ -427,7 +546,8 @@ async fn handle_query(
         state.queries_ok.fetch_add(1, Ordering::Relaxed);
         state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
 
-        replicate_to_peers(&state, "compact;".to_string()).await;
+        let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+        replicate_to_targets(&state.http_client, &other_nodes, "compact;", state.replication_mode, &state.replications_count).await;
 
         return Json(serde_json::json!({
             "status": "ok",
@@ -493,59 +613,102 @@ async fn handle_query(
         }
     };
 
-    // Sharding mode routing
-    if state.cluster_mode == "sharding" {
-        let target_node = match &stmt {
-            gdb_parser::ast::Statement::InsertVertex { id, .. } => {
-                Some((id.0 % state.total_nodes) + 1)
-            }
-            gdb_parser::ast::Statement::InsertEdge { src, .. }
-            | gdb_parser::ast::Statement::DeleteEdge { src, .. } => {
-                Some((src.0 % state.total_nodes) + 1)
-            }
-            _ => None,
-        };
+    let is_ddl = matches!(
+        stmt,
+        gdb_parser::ast::Statement::CreateVertexLabel { .. }
+            | gdb_parser::ast::Statement::CreateEdgeType { .. }
+    );
 
-        if let Some(target) = target_node {
-            if target != state.node_id {
-                if let Some(target_url) = get_node_url(target, &state.peers, state.node_id, state.http_port) {
-                    let query_endpoint = format!("{}/query", target_url.trim_end_matches('/'));
-                    let payload = serde_json::json!({ "query": trimmed });
-                    if let Ok(resp) = state.http_client.post(&query_endpoint).json(&payload).send().await {
-                        if let Ok(json_resp) = resp.json::<serde_json::Value>().await {
-                            return Json(json_resp);
-                        }
-                    }
-                }
+    if is_ddl {
+        // DDL: Execute locally, then broadcast to all other nodes on the ring
+        match state.executor.execute(stmt) {
+            Ok(res) => {
+                let elapsed_us = start.elapsed().as_micros();
+                state.queries_ok.fetch_add(1, Ordering::Relaxed);
+                state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
+
+                let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+                replicate_to_targets(&state.http_client, &other_nodes, trimmed, state.replication_mode, &state.replications_count).await;
+
+                return Json(serde_json::json!({
+                    "status": "ok",
+                    "message": res.message,
+                    "elapsed_us": elapsed_us,
+                    "num_rows": 0,
+                    "columns": [],
+                    "rows": []
+                }));
+            }
+            Err(e) => {
+                state.queries_err.fetch_add(1, Ordering::Relaxed);
+                return Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("DDL execution error: {}", e),
+                    "elapsed_us": start.elapsed().as_micros()
+                }));
             }
         }
     }
 
-    match state.executor.execute(stmt.clone()) {
+    // DML Routing & Leaderless Ring Replication
+    let dml_key = match &stmt {
+        gdb_parser::ast::Statement::InsertVertex { id, .. } => Some(id.0),
+        gdb_parser::ast::Statement::InsertEdge { src, .. }
+        | gdb_parser::ast::Statement::DeleteEdge { src, .. } => Some(src.0),
+        _ => None,
+    };
+
+    if let Some(key) = dml_key {
+        let replica_set = calculate_replica_set(key, &state.ring_nodes, state.replication_factor);
+        let is_local_replica = replica_set.iter().any(|n| n.node_id == state.node_id);
+
+        if !is_local_replica && !replica_set.is_empty() {
+            // Coordinator is not part of this key's replica set (RF < N): forward to primary replica
+            let primary = &replica_set[0];
+            let primary_url = format!("{}/query", primary.http_url.trim_end_matches('/'));
+            let payload = serde_json::json!({ "query": trimmed });
+            if let Ok(resp) = state.http_client.post(&primary_url).json(&payload).send().await {
+                if let Ok(json_resp) = resp.json::<serde_json::Value>().await {
+                    return Json(json_resp);
+                }
+            }
+        }
+
+        // Current node is in the replica set: execute locally, then replicate to remote replicas in set
+        match state.executor.execute(stmt.clone()) {
+            Ok(res) => {
+                let elapsed_us = start.elapsed().as_micros();
+                state.queries_ok.fetch_add(1, Ordering::Relaxed);
+                state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
+
+                let remote_replicas: Vec<RingNode> = replica_set.into_iter().filter(|n| n.node_id != state.node_id).collect();
+                replicate_to_targets(&state.http_client, &remote_replicas, trimmed, state.replication_mode, &state.replications_count).await;
+
+                return Json(serde_json::json!({
+                    "status": "ok",
+                    "message": res.message,
+                    "elapsed_us": elapsed_us,
+                    "num_rows": 0,
+                    "columns": [],
+                    "rows": []
+                }));
+            }
+            Err(e) => {
+                state.queries_err.fetch_add(1, Ordering::Relaxed);
+                return Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("Execution error: {}", e),
+                    "elapsed_us": start.elapsed().as_micros()
+                }));
+            }
+        }
+    }
+
+    match state.executor.execute(stmt) {
         Ok(res) => {
             let elapsed_us = start.elapsed().as_micros();
             state.queries_ok.fetch_add(1, Ordering::Relaxed);
             state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
-
-            // Replicate mutations to peers
-            if is_mutating_query(trimmed) {
-                if state.cluster_mode == "sharding" {
-                    // In sharding mode: only DDL schema changes are broadcast to all nodes
-                    let is_ddl = matches!(
-                        stmt,
-                        gdb_parser::ast::Statement::CreateVertexLabel { .. }
-                            | gdb_parser::ast::Statement::CreateEdgeType { .. }
-                    );
-                    if is_ddl {
-                        replicate_to_peers(&state, trimmed.to_string()).await;
-                    }
-                } else {
-                    // In full replication mode: Leader replicates all mutations
-                    if state.node_id == 1 {
-                        replicate_to_peers(&state, trimmed.to_string()).await;
-                    }
-                }
-            }
 
             let mut columns = Vec::new();
             let mut rows = Vec::new();
@@ -692,12 +855,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let total_nodes = 1 + peers.len() as u64;
-    let cluster_mode = args.cluster_mode.to_lowercase();
+    let ring_nodes = build_ring_nodes(args.node_id, args.http_port, args.port, &peers);
+    let total_nodes = ring_nodes.len() as u64;
+    let replication_mode = ReplicationMode::from_str(&args.replication_mode).unwrap_or(ReplicationMode::Sync);
+    let effective_rf = (args.replication_factor as usize).min(ring_nodes.len()).max(1);
+
     println!(
-        "\x1b[1;32m[+] Cluster Architecture Mode:\x1b[0m {} (Nodes: {})",
-        cluster_mode.to_uppercase(),
+        "\x1b[1;32m[+] Cluster Topology:\x1b[0m LEADERLESS HASH RING (Nodes: {})",
         total_nodes
+    );
+    println!(
+        "\x1b[1;32m[+] Replication Factor:\x1b[0m RF={} (Effective: {})",
+        args.replication_factor, effective_rf
+    );
+    println!(
+        "\x1b[1;32m[+] Replication Mode:\x1b[0m {}",
+        replication_mode
+    );
+    println!(
+        "\x1b[1;32m[+] Node Role:\x1b[0m Peer (Node #{})",
+        args.node_id
     );
 
     let app_state = AppState {
@@ -709,6 +886,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         executor: executor.clone(),
         storage: storage_p0.clone(),
         peers,
+        ring_nodes,
+        replication_factor: args.replication_factor,
+        replication_mode,
         http_client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()?,
@@ -721,8 +901,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gpu_threshold: gpu_dispatcher.threshold_edges,
         s3_manager,
         s3_bucket: args.s3_bucket.clone(),
-        cluster_mode,
-        total_nodes,
     };
 
     let app = Router::new()
@@ -734,6 +912,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/compact", post(handle_compact))
         .route("/snapshot", post(handle_snapshot))
         .route("/query", post(handle_query))
+        .route("/replicate", post(handle_replicate))
         .route("/raft/replicate", post(handle_replicate))
         .with_state(app_state);
 
