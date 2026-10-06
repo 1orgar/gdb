@@ -86,7 +86,7 @@ async fn handle_health() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "UP",
         "service": "gdb-studio",
-        "version": "0.1.0"
+        "version": env!("CARGO_PKG_VERSION")
     }))
 }
 

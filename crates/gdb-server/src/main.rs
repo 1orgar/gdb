@@ -150,7 +150,7 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "UP",
         "service": "GDB Enterprise Graph Database",
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "node_id": state.node_id,
         "role": "Peer",
         "cluster_topology": "leaderless-ring",

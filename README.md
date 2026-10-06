@@ -16,9 +16,11 @@ A next-generation, high-performance distributed HTAP graph database engine built
    - Стандартные сопоставления шаблонов: `MATCH (a:User)-[:FOLLOWS]->(b:User) WHERE a.age > 25 RETURN b.name`.
    - Полный пакет **Nebula Enterprise Analytics**: `CALL algo.pageRank(...)`, `CALL algo.louvain(...)`, `CALL algo.wcc(...)`, `CALL algo.triangleCount(...)`, `CALL algo.kCore(...)`, `CALL algo.betweenness(...)`, `CALL algo.sssp(...)`, `CALL algo.similarity(...)`.
 
-3. **Горизонтальное масштабирование и Multi-Raft:**
-   - Шардирование графа по хешу `VertexId` с Source-Colocation (1D Edge Cut).
-   - Независимые Raft-группы на каждую партицию с локальным высокоскоростным журналом `gdb-wal`.
+3. **Горизонтальное масштабирование и Беслидерное кольцо (Leaderless Hash Ring):**
+   - Равноправные узлы (Symmetric Peers) в стиле Dynamo/Cassandra без единой точки отказа (SPOF).
+   - Настраиваемый фактор репликации (`--replication-factor 1..N`) и режим (`--sync` / `--async`).
+   - При RF=1 кластер работает как чистый MPP с распределенным шардированием (1D Edge Cut) без избыточности.
+   - Независимые Raft-партиции с локальным журналом `gdb-wal` (CRC32).
 
 4. **Аппаратное GPU-ускорение (Metal на Mac / CUDA на Linux):**
    - **Apple Silicon (M-серия):** Архитектура единой памяти **Unified Memory Architecture (UMA)** позволяет графическому процессору читать топологию графа из RAM **напрямую с нулевой стоимостью копирования (Zero-Copy)**.
@@ -80,33 +82,43 @@ A next-generation, high-performance distributed HTAP graph database engine built
 
 Если вы хотите запустить ноды вручную и наблюдать за логами каждой ноды в реальном времени:
 
-#### Терминал 1: Нода 1 (Координатор + Шарды 0..7)
+#### Терминал 1: Peer 1 (:8847 / :8848)
 ```bash
 ./bin/gdb-server \
   --node-id 1 \
   --partitions 8 \
   --port 8848 \
   --http-port 8847 \
-  --wal-dir ./data/node1/wal
+  --wal-dir ./data/node1/wal \
+  --peers http://127.0.0.1:8846,http://127.0.0.1:8845 \
+  --replication-factor 3 \
+  --replication-mode sync
 ```
 
-#### Терминал 2: Нода 2 (Хранилище + Multi-Raft)
+#### Терминал 2: Peer 2 (:8846 / :8849)
 ```bash
 ./bin/gdb-server \
   --node-id 2 \
   --partitions 8 \
   --port 8849 \
   --http-port 8846 \
-  --wal-dir ./data/node2/wal
+  --wal-dir ./data/node2/wal \
+  --peers http://127.0.0.1:8847,http://127.0.0.1:8845 \
+  --replication-factor 3 \
+  --replication-mode sync
 ```
 
-#### Терминал 3: Нода 3 (Хранилище + Multi-Raft)
+#### Терминал 3: Peer 3 (:8845 / :8850)
 ```bash
 ./bin/gdb-server \
   --node-id 3 \
   --partitions 8 \
   --port 8850 \
-  --wal-dir ./data/node3/wal
+  --http-port 8845 \
+  --wal-dir ./data/node3/wal \
+  --peers http://127.0.0.1:8847,http://127.0.0.1:8846 \
+  --replication-factor 3 \
+  --replication-mode sync
 ```
 
 ---
@@ -148,14 +160,14 @@ A next-generation, high-performance distributed HTAP graph database engine built
 ### Вариант 2: Ручной запуск 3 нод на AMD64
 
 ```bash
-# Нода 1 (Координатор + Шарды)
-./bin/amd64/gdb-server --node-id 1 --partitions 8 --port 8848 --http-port 8847 --wal-dir ./data/amd64/node1/wal
+# Peer 1 (:8847 / :8848)
+./bin/amd64/gdb-server --node-id 1 --partitions 8 --port 8848 --http-port 8847 --wal-dir ./data/amd64/node1/wal --peers http://127.0.0.1:8846,http://127.0.0.1:8845 --replication-factor 3 --replication-mode sync
 
-# Нода 2 (Хранилище)
-./bin/amd64/gdb-server --node-id 2 --partitions 8 --port 8849 --http-port 8846 --wal-dir ./data/amd64/node2/wal
+# Peer 2 (:8846 / :8849)
+./bin/amd64/gdb-server --node-id 2 --partitions 8 --port 8849 --http-port 8846 --wal-dir ./data/amd64/node2/wal --peers http://127.0.0.1:8847,http://127.0.0.1:8845 --replication-factor 3 --replication-mode sync
 
-# Нода 3 (Хранилище)
-./bin/amd64/gdb-server --node-id 3 --partitions 8 --port 8850 --http-port 8845 --wal-dir ./data/amd64/node3/wal
+# Peer 3 (:8845 / :8850)
+./bin/amd64/gdb-server --node-id 3 --partitions 8 --port 8850 --http-port 8845 --wal-dir ./data/amd64/node3/wal --peers http://127.0.0.1:8847,http://127.0.0.1:8846 --replication-factor 3 --replication-mode sync
 ```
 
 > [!NOTE]
@@ -182,7 +194,7 @@ A next-generation, high-performance distributed HTAP graph database engine built
 4. **Табличное представление (Table View):**
    - Сортируемая сетка данных с фиксацией заголовков для аналитических запросов (`CALL algo.pageRank()`, `CALL algo.louvain()`).
 5. **Мониторинг кластера:**
-   - Отображение статуса нод (Node 1 Leader :8847, Node 2 :8846, Node 3 :8845) и возможность динамической смены URL подключения.
+   - Отображение статуса нод (Peer 1 :8847, Peer 2 :8846, Peer 3 :8845) и возможность динамической смены URL подключения.
 
 ### 🚀 Быстрый запуск GDB Studio:
 
@@ -220,7 +232,7 @@ CLI (`bin/gdb-cli` и `bin/amd64/gdb-cli`) автоматически прове
   / ____/ / __ \/ __ )
  / / __  / / / / __  |
 / /_/ / / /_/ / /_/ / 
-\____(_)_____/_____/  Interactive Cypher Shell v0.1.0
+\____(_)_____/_____/  Interactive Cypher Shell v0.2.0
 
 [✓] Connected to GDB Node at http://localhost:8847 (Latency: 0.8ms)
     Type 'help' or '\?' for help. Press Ctrl+D to exit.
@@ -231,21 +243,21 @@ CLI (`bin/gdb-cli` и `bin/amd64/gdb-cli`) автоматически прове
 
 | Команда | Описание |
 | :--- | :--- |
-| `SHOW CLUSTER` | Таблица всех узлов кластера: Node ID, роль (Leader / Follower), порты Flight и HTTP REST. |
+| `SHOW CLUSTER` | Таблица всех равноправных узлов кольца: Node ID, роль (Peer), порты Flight/HTTP, фактор репликации (RF) и режим (sync/async). |
 | `SHOW RESOURCES` | Метрики потребления: объем памяти (RSS), аптайм, QPS, кол-во вершин и ребер (CSR vs MemTable), компактизации. |
 | `SHOW GPU` | Статус графического ускорителя: активный бэкенд (Apple Metal / CUDA / CPU SIMD), UMA Zero-Copy, порог офлоада. |
-| `:connect <url>` | Динамическое переключение текущей сессии CLI на другой узел (например, `:connect http://localhost:8846`). |
+| `:connect <url>` | Динамическое переключение текущей сессии CLI на любой другой узел кольца (например, `:connect http://localhost:8846`). |
 
 #### Примеры вывода команд:
 ```sql
 gdb> SHOW CLUSTER;
-+---------+----------+-------------+-----------+
-| Node ID | Role     | Flight Port | HTTP Port |
-+---------+----------+-------------+-----------+
-| 1       | Leader   | 8848        | 8847      |
-| 2       | Follower | 8849        | 8846      |
-| 3       | Follower | 8850        | 8845      |
-+---------+----------+-------------+-----------+
++---------+------+-------------+-----------+----+------+
+| Node ID | Role | Flight Port | HTTP Port | RF | Mode |
++---------+------+-------------+-----------+----+------+
+| 1       | Peer | 8848        | 8847      | 3  | sync |
+| 2       | Peer | 8849        | 8846      | 3  | sync |
+| 3       | Peer | 8850        | 8845      | 3  | sync |
++---------+------+-------------+-----------+----+------+
 
 gdb> SHOW RESOURCES;
 +------------------+---------+
@@ -384,9 +396,13 @@ gdb_graph_edges_total{node_id="1"} 100000
 gdb_graph_csr_edges{node_id="1"} 100000
 gdb_graph_memtable_edges{node_id="1"} 0
 
-# HELP gdb_raft_is_leader Whether this node is currently the Raft leader (1=leader, 0=follower)
-# TYPE gdb_raft_is_leader gauge
-gdb_raft_is_leader{node_id="1"} 1
+# HELP gdb_cluster_replication_factor Configured replication factor on hash ring
+# TYPE gdb_cluster_replication_factor gauge
+gdb_cluster_replication_factor 3
+
+# HELP gdb_cluster_is_sync_replication Whether replication is synchronous (1) or asynchronous (0)
+# TYPE gdb_cluster_is_sync_replication gauge
+gdb_cluster_is_sync_replication 1
 
 # HELP gdb_gpu_available Whether GPU acceleration is active and available
 # TYPE gdb_gpu_available gauge
@@ -395,14 +411,52 @@ gdb_gpu_available{node_id="1",backend="metal"} 1
 
 ---
 
-## 🔄 Распределенная Репликация (Multi-Raft)
+## ⚙️ Полный справочник параметров запуска (CLI & Config Reference)
 
-В GDB реализована межузловая репликация операций изменения данных (DDL/DML):
-1. **Флаг `--peers`:** При старте узла передается список адресов пиров (например, `--peers http://localhost:8846,http://localhost:8845`).
-2. **Маршрутизация мутаций:** Все запросы на запись (`CREATE VERTEX/EDGE`, `INSERT`, `compact`), отправленные лидеру, автоматически транслируются через HTTP RPC `POST /raft/replicate` на ведомые ноды.
-3. **Согласованность:** Ведомые ноды фиксируют мутации в локальном хранилище и возвращают подтверждение `{"replicated":true,"target_node":X}`.
+### 1. Параметры запуска серверного узла (`gdb-server`)
 
-Скрипты `start_cluster.sh` и `start_cluster_amd64.sh` автоматически запускают кластер с корректно настроенной топологией репликации между тремя нодами.
+```bash
+gdb-server [OPTIONS]
+```
+
+| Флаг CLI | Короткий | Переменная окружения | Тип | По умолчанию | Описание и назначение |
+| :--- | :---: | :--- | :---: | :---: | :--- |
+| `--node-id` | `-n` | — | `u64` | `1` | Уникальный числовой ID узла в кольце кластера. Первичный токен: $u \pmod N$. |
+| `--partitions` | — | — | `u32` | `4` | Количество независимых Multi-Raft групп и локальных партиций хранилища. |
+| `--port` | `-p` | — | `u16` | `8848` | Сетевой порт **Apache Arrow Flight gRPC** (векторный MPP обмен и межсетевой шаффл). |
+| `--http-port` | — | — | `u16` | `8847` | Сетевой порт **HTTP REST API** (запросы `/query`, репликация `/replicate`, метрики `/metrics`, health-check `/health`). |
+| `--wal-dir` | — | — | `path` | `./data/wal` | Каталог журнала упреждающей записи Write-Ahead Log с верификацией CRC32. |
+| `--peers` | — | — | `string` | *(пусто)* | Список HTTP REST адресов других участников кольца через запятую. |
+| `--replication-factor` | `-r` | `GDB_REPLICATION_FACTOR` | `u32` | `3` | **Фактор репликации кольца (RF):**<br>• `1` — чистое шардирование без дублирования (режим MPP, $\sum\text{RAM}$).<br>• `k` — частичная репликация на $k$ последовательных узлов кольца.<br>• `N` — полное зеркалирование (100% данных на всех узлах). |
+| `--replication-mode` | — | `GDB_REPLICATION_MODE` | `string` | `sync` | **Режим репликации:**<br>• `sync` — синхронный: координатор ожидает подтверждения от всех реплик перед ответом клиенту.<br>• `async` — асинхронный: координатор моментально отвечает клиенту, передавая мутацию в фоновых задачах. |
+| `--s3-bucket` | — | `AWS_BUCKET` | `string` | *(пусто)* | Имя бакета AWS S3 / MinIO для Tiered Storage и команды `snapshot;`. |
+| `--s3-endpoint` | — | `AWS_ENDPOINT` | `string` | *(пусто)* | URL S3-совместимого сервиса (например, `http://localhost:9000`). |
+| `--s3-region` | — | `AWS_REGION` | `string` | `us-east-1` | Регион AWS S3 (например, `eu-central-1`, `us-east-1`). |
+| *(credentials)* | — | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `string` | *(пусто)* | Ключи доступа для аутентификации в S3/MinIO. |
+| *(logging)* | — | `RUST_LOG` | `string` | `info` | Уровень детализации логирования tracing (`error`, `warn`, `info`, `debug`, `trace`). |
+| `--cluster-mode` | — | — | `string` | `ring` | Алиас совместимости (`ring`, `replication`, `sharding`). |
+
+### 2. Параметры скриптов автоматического запуска (`start_cluster.sh` и `start_cluster_amd64.sh`)
+
+| Флаг скрипта | Алиасы | Пример использования | Описание |
+| :--- | :--- | :--- | :--- |
+| `--rf <N>` | `-r <N>`, `--replication-factor <N>` | `./scripts/start_cluster.sh --rf 1` | Устанавливает фактор репликации кольца (`1`, `2`, `3`). |
+| `--sync` | `sync`, `--replication-mode sync` | `./scripts/start_cluster.sh --sync` | Строгая синхронная репликация с немедленной согласованностью. |
+| `--async` | `async`, `--replication-mode async` | `./scripts/start_cluster.sh --async` | Фоновая асинхронная репликация для максимального TPS. |
+| `--sharding` | `--sharded`, `sharding` | `./scripts/start_cluster.sh --sharding` | Алиас для `--rf 1 --sync` (чистый распределенный MPP кластер). |
+| `--replication` | `--replicated`, `replication` | `./scripts/start_cluster.sh --replication` | Алиас для `--rf 3 --sync` (полная синхронная репликация). |
+
+---
+
+## 🔄 Беслидерная кольцевая репликация (Leaderless Hash Ring)
+
+В GDB реализована симметричная архитектура узлов в стиле **Amazon Dynamo / Apache Cassandra**:
+1. **Любая нода — Координатор:** Клиент может отправлять DDL/DML и запросы на любой узел кольца.
+2. **Хэш-кольцо (Hash Ring):** Ключи вершин и ребер распределяются по кольцу по формуле $\text{Primary Node} = u \pmod N$. При $\text{RF} > 1$ запись реплицируется на следующие $\text{RF} - 1$ узлов по часовой стрелке.
+3. **Режимы согласованности:**
+   - **`--sync`**: Координатор ждет параллельных подтверждений от всех целевых реплик перед завершением транзакции.
+   - **`--async`**: Запись немедленно фиксируется локально, а репликация выполняется в фоновых задачах `tokio::spawn`.
+4. **Режим чистого MPP ($\text{RF} = 1$):** Кластер работает без избыточного дублирования, максимально эффективно масштабируя суммарный объем RAM.
 
 ---
 
@@ -447,20 +501,42 @@ python3 scripts/data_loader.py --vertices 50000 --edges 500000 --file data/graph
 python3 scripts/benchmark_suite.py --samples 500 --concurrency 4
 ```
 
-### 3. Сквозная проверка межузловой репликации (`test_replication.py`):
-Скрипт проверяет сквозную репликацию: вставляет данные в Leader (Node 1) и считывает их с Follower (Node 2 и Node 3):
+### 3. Сквозная проверка кольцевой репликации (`test_replication.py`):
+Скрипт проверяет симметричную репликацию: вставляет данные через разные узлы кольца и проверяет консистентность чтения и аналитики со всех пиров:
 ```bash
 python3 scripts/test_replication.py
 ```
 Вывод:
 ```
-[+] Step 1: Writing unique test vertex and edge to Leader (Node 1)...
-[+] Step 2: Triggering compaction on Leader (Node 1)...
-[+] Step 3: Verifying data replication on Follower 1 (Node 2)...
-    [✓] Follower 1 verified successfully!
-[+] Step 4: Verifying data replication on Follower 2 (Node 3)...
-    [✓] Follower 2 verified successfully!
-[✓] SUCCESS: End-to-end Multi-Raft replication verified across all 3 nodes!
+=================================================================
+      GDB Leaderless Ring Replication Verification Suite     
+=================================================================
+[*] Probing leaderless ring peers and topology...
+  [✓] Peer 1 at http://127.0.0.1:8847 is UP | Role: Peer | RF=3 | Mode=SYNC
+  [✓] Peer 2 at http://127.0.0.1:8846 is UP | Role: Peer | RF=3 | Mode=SYNC
+  [✓] Peer 3 at http://127.0.0.1:8845 is UP | Role: Peer | RF=3 | Mode=SYNC
+
+[1/4] Creating Schema via Peer 1 (Broadcast DDL)...
+  -> DDL Result: ok | ok
+
+[2/4] Performing Symmetric Ingestion Across Different Peers...
+  -> Inserting vertices 101..104 through Peer 1...
+  -> Inserting vertices 105..108 through Peer 2...
+  -> Inserting vertices 109..112 and connecting edges through Peer 3...
+  -> Triggering compaction via Peer 2...
+
+[3/4] Validating Consistency Across All Ring Peers...
+  Peer 1 (:8847): 12 edges found
+  Peer 2 (:8846): 12 edges found
+  Peer 3 (:8845): 12 edges found
+
+[4/4] Verifying Parallel PageRank Analytics across All Peers...
+  PageRank Result Rows: Peer 1 = 14 | Peer 2 = 14 | Peer 3 = 14
+
+=================================================================
+[PASS] Leaderless Ring Replication is FULLY OPERATIONAL!
+Symmetric writes from all peers processed and replicated across the hash ring.
+=================================================================
 ```
 
 ### 4. Многопоточный стресс-тест с проверкой Prometheus (`stress_test.py`):
