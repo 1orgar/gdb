@@ -380,7 +380,7 @@ exit / quit               - Выход из консоли.
 
 ---
 
-## Часть 4. Внешний Arrow Flight сервис и клиент Polars (`gdb-py-client`)
+## Часть 4. Внешний Arrow Flight сервис и клиент Polars ([gdb-py-client](https://github.com/1orgar/gdb-py-client))
 
 Для высокоскоростной параллельной загрузки данных с аналитических воркстейшенов в GDB выделен отдельный порт Flight (`--client-flight-port`, по умолчанию `:8860`).
 

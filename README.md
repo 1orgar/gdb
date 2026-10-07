@@ -588,7 +588,7 @@ python3 scripts/graph_analytics_validation.py
 [✓] TEST 10: Common neighbors count passed.
 [✓] ALL 10 GRAPH ANALYTICS GROUND-TRUTH TESTS PASSED!
 ### 6. Высокоскоростной загрузчик на Python и Polars (`gdb-py-client`):
-Для параллельной сверхбыстрой загрузки миллионов вершин и ребер разработан отдельный клиент [`gdb-py-client`](../gdb-py-client):
+Для параллельной сверхбыстрой загрузки миллионов вершин и ребер разработан отдельный клиент [**gdb-py-client**](https://github.com/1orgar/gdb-py-client):
 - **Стек:** **Polars** + **PyArrow Flight**.
 - **Scatter-Ingest по токенам кольца:** клиент автоматически опрашивает топологию кольца через `/cluster`, разбивает Polars DataFrame по формуле `u % N` с помощью векторизованных выражений и стримит пачки RecordBatch параллельно через порт клиентского Arrow Flight (`:8860+`) прямо в целевые ноды.
 - **Пример использования:**
