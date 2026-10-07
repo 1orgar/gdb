@@ -239,7 +239,7 @@ CLI (`bin/gdb-cli` и `bin/amd64/gdb-cli`) автоматически прове
   / ____/ / __ \/ __ )
  / / __  / / / / __  |
 / /_/ / / /_/ / /_/ / 
-\____(_)_____/_____/  Interactive Cypher Shell v0.2.0
+\____(_)_____/_____/  Interactive Cypher Shell v0.3.0
 
 [✓] Connected to GDB Node at http://localhost:8847 (Latency: 0.8ms)
     Type 'help' or '\?' for help. Press Ctrl+D to exit.

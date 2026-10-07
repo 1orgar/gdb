@@ -666,7 +666,7 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span>GDB Studio v0.2.0</span>
+      <span>GDB Studio v0.3.0</span>
       <span>Cluster: Leaderless Ring (3 Peers)</span>
       <span>Acceleration: Apple Metal UMA / CPU SIMD</span>
     </div>
