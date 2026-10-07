@@ -38,6 +38,7 @@ pub enum Token {
     Semicolon,
     Comma,
     Dot,
+    DotDot, // ..
     Eq,
     NotEq,
     Lt,
@@ -99,7 +100,15 @@ impl Lexer {
                 ':' => { self.advance(); tokens.push(Token::Colon); }
                 ';' => { self.advance(); tokens.push(Token::Semicolon); }
                 ',' => { self.advance(); tokens.push(Token::Comma); }
-                '.' => { self.advance(); tokens.push(Token::Dot); }
+                '.' => {
+                    self.advance();
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        tokens.push(Token::DotDot);
+                    } else {
+                        tokens.push(Token::Dot);
+                    }
+                }
                 '*' => { self.advance(); tokens.push(Token::Star); }
                 '+' => { self.advance(); tokens.push(Token::Plus); }
                 '=' => { self.advance(); tokens.push(Token::Eq); }
@@ -429,65 +438,153 @@ impl Parser {
                 }
                 self.expect(&Token::RParen)?;
                 self.expect(&Token::Values)?;
-                self.expect(&Token::LParen)?;
 
-                let mut values = Vec::new();
-                while self.peek() != Some(&Token::RParen) {
-                    values.push(self.parse_literal()?);
+                let mut all_vertices = Vec::new();
+                loop {
+                    self.expect(&Token::LParen)?;
+                    let mut values = Vec::new();
+                    while self.peek() != Some(&Token::RParen) {
+                        values.push(self.parse_literal()?);
+                        if self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+
+                    if prop_names.len() != values.len() {
+                        return Err(GdbError::Parser("Property names and values count mismatch in INSERT VERTEX".into()));
+                    }
+
+                    let mut vid: Option<VertexId> = None;
+                    let mut props = Vec::new();
+
+                    for (name, val) in prop_names.iter().zip(values.into_iter()) {
+                        if name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("_id") {
+                            match val {
+                                DataValue::Int64(i) => vid = Some(VertexId(i as u64)),
+                                DataValue::String(s) => vid = Some(VertexId::from_str_key(&s)),
+                                _ => return Err(GdbError::Parser("Vertex id must be integer or string".into())),
+                            }
+                        } else {
+                            props.push((name.clone(), val));
+                        }
+                    }
+
+                    let id = vid.ok_or_else(|| GdbError::Parser("INSERT VERTEX requires an 'id' column".into()))?;
+                    all_vertices.push((id, props));
+
                     if self.peek() == Some(&Token::Comma) {
                         self.advance();
                     } else {
                         break;
                     }
                 }
-                self.expect(&Token::RParen)?;
 
-                if prop_names.len() != values.len() {
-                    return Err(GdbError::Parser("Property names and values count mismatch in INSERT VERTEX".into()));
+                if all_vertices.len() == 1 {
+                    let (id, properties) = all_vertices.remove(0);
+                    Ok(Statement::InsertVertex { label, id, properties })
+                } else {
+                    Ok(Statement::InsertVertices { label, vertices: all_vertices })
                 }
-
-                let mut vid: Option<VertexId> = None;
-                let mut props = Vec::new();
-
-                for (name, val) in prop_names.into_iter().zip(values.into_iter()) {
-                    if name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("_id") {
-                        match val {
-                            DataValue::Int64(i) => vid = Some(VertexId(i as u64)),
-                            DataValue::String(s) => vid = Some(VertexId::from_str_key(&s)),
-                            _ => return Err(GdbError::Parser("Vertex id must be integer or string".into())),
-                        }
-                    } else {
-                        props.push((name, val));
-                    }
-                }
-
-                let id = vid.ok_or_else(|| GdbError::Parser("INSERT VERTEX requires an 'id' column".into()))?;
-                Ok(Statement::InsertVertex { label, id, properties: props })
             }
             Some(Token::Edge) => {
                 self.advance();
                 let edge_type = self.expect_ident()?;
-                self.expect(&Token::From)?;
-                let src = self.parse_vertex_id()?;
-                self.expect(&Token::To)?;
-                let dst = self.parse_vertex_id()?;
 
-                let mut rank = 0i64;
-                if self.peek() == Some(&Token::Rank) {
+                let mut all_edges = Vec::new();
+
+                if self.peek() == Some(&Token::Values) {
                     self.advance();
-                    match self.advance() {
-                        Some(Token::IntLit(r)) => rank = *r,
-                        _ => return Err(GdbError::Parser("Expected integer after RANK".into())),
+                    loop {
+                        if self.peek() == Some(&Token::LParen) {
+                            self.advance();
+                            let src = self.parse_vertex_id()?;
+                            self.expect(&Token::Comma)?;
+                            let dst = self.parse_vertex_id()?;
+                            let mut rank = 0i64;
+                            if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                                if let Some(Token::IntLit(r)) = self.peek() {
+                                    rank = *r;
+                                    self.advance();
+                                }
+                            }
+                            self.expect(&Token::RParen)?;
+                            all_edges.push((src, dst, rank, Vec::new()));
+                        } else {
+                            let src = self.parse_vertex_id()?;
+                            if self.peek() == Some(&Token::RArrow) {
+                                self.advance();
+                            } else {
+                                self.expect(&Token::To)?;
+                            }
+                            let dst = self.parse_vertex_id()?;
+                            let mut rank = 0i64;
+                            if self.peek() == Some(&Token::Colon) {
+                                self.advance();
+                                if self.peek() == Some(&Token::LParen) {
+                                    self.advance();
+                                    if let Some(Token::IntLit(r)) = self.peek() {
+                                        rank = *r;
+                                        self.advance();
+                                    }
+                                    self.expect(&Token::RParen)?;
+                                } else if let Some(Token::IntLit(r)) = self.peek() {
+                                    rank = *r;
+                                    self.advance();
+                                }
+                            }
+                            all_edges.push((src, dst, rank, Vec::new()));
+                        }
+
+                        if self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                    loop {
+                        self.expect(&Token::From)?;
+                        let src = self.parse_vertex_id()?;
+                        self.expect(&Token::To)?;
+                        let dst = self.parse_vertex_id()?;
+
+                        let mut rank = 0i64;
+                        if self.peek() == Some(&Token::Rank) {
+                            self.advance();
+                            match self.advance() {
+                                Some(Token::IntLit(r)) => rank = *r,
+                                _ => return Err(GdbError::Parser("Expected integer after RANK".into())),
+                            }
+                        }
+                        all_edges.push((src, dst, rank, Vec::new()));
+
+                        if self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
                 }
 
-                Ok(Statement::InsertEdge {
-                    edge_type,
-                    src,
-                    dst,
-                    rank,
-                    properties: Vec::new(),
-                })
+                if all_edges.len() == 1 {
+                    let (src, dst, rank, properties) = all_edges.remove(0);
+                    Ok(Statement::InsertEdge {
+                        edge_type,
+                        src,
+                        dst,
+                        rank,
+                        properties,
+                    })
+                } else {
+                    Ok(Statement::InsertEdges {
+                        edge_type,
+                        edges: all_edges,
+                    })
+                }
             }
             Some(other) => Err(GdbError::Parser(format!("Expected VERTEX or EDGE after INSERT, found {:?}", other))),
             None => Err(GdbError::Parser("Unexpected EOF after INSERT".into())),
@@ -610,6 +707,8 @@ impl Parser {
         self.expect(&Token::Dash)?;
         let mut variable = None;
         let mut edge_type = None;
+        let mut min_hops = 1;
+        let mut max_hops = Some(1);
 
         if self.peek() == Some(&Token::LBracket) {
             self.advance();
@@ -619,7 +718,45 @@ impl Parser {
             }
             if self.peek() == Some(&Token::Colon) {
                 self.advance();
-                edge_type = Some(self.expect_ident()?);
+                if let Some(Token::Ident(_)) = self.peek() {
+                    edge_type = Some(self.expect_ident()?);
+                }
+            }
+            if self.peek() == Some(&Token::Star) {
+                self.advance();
+                match self.peek() {
+                    Some(Token::DotDot) => {
+                        self.advance();
+                        min_hops = 1;
+                        if let Some(Token::IntLit(k)) = self.peek() {
+                            max_hops = Some(*k as usize);
+                            self.advance();
+                        } else {
+                            max_hops = None;
+                        }
+                    }
+                    Some(Token::IntLit(m)) => {
+                        let m_val = *m as usize;
+                        self.advance();
+                        if self.peek() == Some(&Token::DotDot) {
+                            self.advance();
+                            min_hops = m_val;
+                            if let Some(Token::IntLit(k)) = self.peek() {
+                                max_hops = Some(*k as usize);
+                                self.advance();
+                            } else {
+                                max_hops = None;
+                            }
+                        } else {
+                            min_hops = m_val;
+                            max_hops = Some(m_val);
+                        }
+                    }
+                    _ => {
+                        min_hops = 1;
+                        max_hops = None;
+                    }
+                }
             }
             self.expect(&Token::RBracket)?;
         }
@@ -629,6 +766,8 @@ impl Parser {
             variable,
             edge_type,
             direction: Direction::Out,
+            min_hops,
+            max_hops,
         })
     }
 

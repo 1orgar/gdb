@@ -24,9 +24,14 @@ A next-generation, high-performance distributed HTAP graph database engine built
 
 4. **Аппаратное GPU-ускорение (Metal на Mac / CUDA на Linux):**
    - **Apple Silicon (M-серия):** Архитектура единой памяти **Unified Memory Architecture (UMA)** позволяет графическому процессору читать топологию графа из RAM **напрямую с нулевой стоимостью копирования (Zero-Copy)**.
-   - Адаптивный диспетчер: автоматический офлоад тяжелых обходов и аналитики на GPU-ядра Metal Compute.
+   - **Linux NVIDIA (CUDA):** Нативный CudaComputeBackend в `gdb-gpu` для параллельных вычислений BFS и PageRank SpMV на серверных GPU (A100, H100, RTX).
+   - Адаптивный диспетчер: автоматический офлоад тяжелых обходов и аналитики на GPU-ядра Metal Compute или CUDA.
 
-5. **Персистентность в S3 (Tiered Storage):**
+5. **Выделенный транспорт Arrow Flight & Клиентская библиотека Python:**
+   - **Разделение портов:** Межсервисный MPP shuffle (`--port 8848+`) изолирован от внешнего высокоскоростного порта загрузки и запросов (`--client-flight-port 8860+`).
+   - **Python Клиент (`gdb-py-client`):** Параллельный scatter-ingest на основе **Polars** и Arrow Flight Streaming `do_put` напрямую в партиции целевых нод.
+
+6. **Персистентность в S3 (Tiered Storage):**
    - Асинхронный сброс снапшотов партиций в **S3 / MinIO** в сжатом формате **Apache Parquet (ZSTD)**.
    - Быстрое восстановление при сбое: загрузка Parquet из S3 + replay последних записей Raft WAL.
 
@@ -184,13 +189,15 @@ A next-generation, high-performance distributed HTAP graph database engine built
 1. **Интерактивный редактор (openCypher / GQL):**
    - Удобный редактор с историей запросов, каталогом схемы (Vertex Tags / Edge Types) и быстрыми шаблонами (1-Hop/2-Hop обходы, PageRank, Louvain, WCC, SSSP, DDL).
    - Горячая клавиша быстрого запуска: `Cmd+Enter` или `Ctrl+Enter`.
-2. **Физическая визуализация графа (Graph View 60 FPS):**
+2. **Физическая визуализация графа (Graph View 60 FPS & Unity 3D WebGL):**
    - Симуляция силовых полей (Force-Directed Graph) на HTML5 Canvas с поддержкой Retina-дисплеев.
+   - **Unity 3D WebGL Visualizer:** Встроенная трехмерная визуализация графа в пространстве (WebGL Bridge) с физикой отталкивания и интерактивным выбором узлов.
+   - **Защита от зависания UI (Issue #3):** Автоматическое переключение в Table View при аналитических запросах (`CALL algo.*`), ограничение симуляции до 250 узлов и остановка анимационного цикла при скрытой вкладке для нулевой загрузки CPU.
    - Зум (колесико мыши), свободное панорамирование (Pan), перетаскивание узлов (Drag-and-Drop).
    - Направленные стрелки связей с подписями типов отношений (`[:FOLLOWS]`, `[:KNOWS]`).
    - Цветовая палитра по типам сущностей и сообществам алгоритмов.
 3. **Инспектор сущностей (Inspector):**
-   - Клик на любой узел или связь отображает карточку с ID, меткой, свойствами и списком смежных ребер.
+   - Клик на любой узел или связь отображает карточку с ID, меткой, свойствами и списком смежных ребер (двунаправленный мост Canvas/Unity к Inspector).
 4. **Табличное представление (Table View):**
    - Сортируемая сетка данных с фиксацией заголовков для аналитических запросов (`CALL algo.pageRank()`, `CALL algo.louvain()`).
 5. **Мониторинг кластера:**
@@ -292,20 +299,28 @@ gdb> SHOW GPU;
 CREATE VERTEX User (name STRING, age INT64);
 CREATE EDGE FOLLOWS ();
 
--- 2. Вставка данных
+-- 2. Вставка данных (одиночная и пакетная Cypher Bulk Insert)
 INSERT VERTEX User (id, name, age) VALUES (1, 'Alice', 30);
-INSERT VERTEX User (id, name, age) VALUES (2, 'Bob', 25);
-INSERT VERTEX User (id, name, age) VALUES (3, 'Charlie', 35);
+-- Пакетная вставка вершин (Bulk Insert):
+INSERT VERTEX User (id, name, age) VALUES (2, 'Bob', 25), (3, 'Charlie', 35), (4, 'Dave', 28);
+
+-- Одиночная вставка ребер:
 INSERT EDGE FOLLOWS FROM 1 TO 2;
-INSERT EDGE FOLLOWS FROM 2 TO 3;
-INSERT EDGE FOLLOWS FROM 3 TO 1;
+-- Пакетная вставка ребер (Bulk Insert):
+INSERT EDGE FOLLOWS VALUES (2, 3), (3, 1), (3, 4);
 
 -- 3. Принудительная компактизация в Chunked-CSR
 compact;
 
--- 4. Обход графа (k-hop Cypher)
+-- 4. Обход графа (k-hop Cypher & Star Cast Multi-Hop)
+-- Фиксированные переходы:
 MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)
 RETURN a.name, b.name, c.name;
+
+-- Переменная длина пути (Multi-hop Variable-Length traversal 1..3 hops):
+MATCH (a:User)-[:FOLLOWS*1..3]->(b:User)
+WHERE a.id = 1
+RETURN a.name, b.name;
 ```
 
 ### Запуск запросов без входа в REPL (скриптовый режим):
@@ -423,7 +438,8 @@ gdb-server [OPTIONS]
 | :--- | :---: | :--- | :---: | :---: | :--- |
 | `--node-id` | `-n` | — | `u64` | `1` | Уникальный числовой ID узла в кольце кластера. Первичный токен: $u \pmod N$. |
 | `--partitions` | — | — | `u32` | `4` | Количество независимых Multi-Raft групп и локальных партиций хранилища. |
-| `--port` | `-p` | — | `u16` | `8848` | Сетевой порт **Apache Arrow Flight gRPC** (векторный MPP обмен и межсетевой шаффл). |
+| `--port` | `-p` | — | `u16` | `8848` | Сетевой порт **Internal Apache Arrow Flight gRPC** (межсервисный обмен нод, MPP Shuffle). |
+| `--client-flight-port` | — | `GDB_CLIENT_FLIGHT_PORT` | `u16` | `8860` | Сетевой порт **External Client Flight gRPC** (сверхбыстрая пакетная загрузка Polars/Arrow `do_put` и быстрые запросы `do_get`). |
 | `--http-port` | — | — | `u16` | `8847` | Сетевой порт **HTTP REST API** (запросы `/query`, репликация `/replicate`, метрики `/metrics`, health-check `/health`). |
 | `--wal-dir` | — | — | `path` | `./data/wal` | Каталог журнала упреждающей записи Write-Ahead Log с верификацией CRC32. |
 | `--peers` | — | — | `string` | *(пусто)* | Список HTTP REST адресов других участников кольца через запятую. |
@@ -571,7 +587,40 @@ python3 scripts/graph_analytics_validation.py
 [✓] TEST 9: Cosine similarity ground-truth passed (0.7071).
 [✓] TEST 10: Common neighbors count passed.
 [✓] ALL 10 GRAPH ANALYTICS GROUND-TRUTH TESTS PASSED!
+### 6. Высокоскоростной загрузчик на Python и Polars (`gdb-py-client`):
+Для параллельной сверхбыстрой загрузки миллионов вершин и ребер разработан отдельный клиент [`gdb-py-client`](../gdb-py-client):
+- **Стек:** **Polars** + **PyArrow Flight**.
+- **Scatter-Ingest по токенам кольца:** клиент автоматически опрашивает топологию кольца через `/cluster`, разбивает Polars DataFrame по формуле `u % N` с помощью векторизованных выражений и стримит пачки RecordBatch параллельно через порт клиентского Arrow Flight (`:8860+`) прямо в целевые ноды.
+- **Пример использования:**
+```python
+import polars as pl
+from gdb_client import GdbClient
+
+# Подключение к кластеру (автообнаружение кольца и портов)
+client = GdbClient(seed_url="http://localhost:8847")
+
+# Загрузка вершин через Polars Dataframe
+df_v = pl.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"], "age": [30, 25, 35]})
+client.scatter_ingest_vertices(df_v, tag="User")
+
+# Загрузка связей параллельно на целевые ноды
+df_e = pl.DataFrame({"src": [1, 2], "dst": [2, 3]})
+client.scatter_ingest_edges(df_e, edge_type="FOLLOWS")
+
+# Быстрый запрос через Flight do_get
+batch = client.query_flight("MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name;")
+print(batch.to_pandas())
 ```
+
+---
+
+## 🎮 Unity 3D WebGL Визуализатор Графа (`clients/unity-visualizer`)
+Для исследовательской визуализации масштабных графов разработан интерактивный 3D-модуль на Unity WebGL:
+- **Расположение:** [`clients/unity-visualizer`](clients/unity-visualizer).
+- **Скрипт симуляции:** [`GraphVisualizer.cs`](clients/unity-visualizer/Assets/Scripts/GraphVisualizer.cs) с трехмерным силовым алгоритмом (Coulomb repulsion + Hooke spring attraction).
+- **Двунаправленный мост (GdbBridge.jslib):**
+  - Web UI -> Unity: `UpdateGraphData(nodesJson, edgesJson)` передает граф из ответа Cypher.
+  - Unity -> Web UI: `OnNodeSelected(nodeId)` передает фокус на узел, открывая карточку в Inspector.
 
 ---
 

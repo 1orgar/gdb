@@ -107,4 +107,67 @@ mod tests {
         assert_eq!(batch_tri.num_rows(), 3);
         assert_eq!(batch_tri.num_columns(), 2);
     }
+
+    #[test]
+    fn test_bulk_insert_vertices_and_edges() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("bulk")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+
+        executor.execute(parse("CREATE VERTEX User (name STRING, age INT64)").unwrap()).unwrap();
+        executor.execute(parse("CREATE EDGE FOLLOWS ()").unwrap()).unwrap();
+
+        // Multi-tuple VERTEX insert
+        let ins_v = parse("INSERT VERTEX User (id, name, age) VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)").unwrap();
+        let res_v = executor.execute(ins_v).unwrap();
+        assert_eq!(res_v.rows_affected, 3);
+
+        // Multi-tuple EDGE insert
+        let ins_e = parse("INSERT EDGE FOLLOWS VALUES (1, 2), (2, 3)").unwrap();
+        let res_e = executor.execute(ins_e).unwrap();
+        assert_eq!(res_e.rows_affected, 2);
+
+        storage.compact();
+
+        let q = parse("MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name").unwrap();
+        let res = executor.execute(q).unwrap();
+        let batch = res.batch.unwrap();
+        assert_eq!(batch.num_rows(), 2);
+    }
+
+    #[test]
+    fn test_multi_hop_variable_length_traversal() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("multihop")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+
+        // Linear chain: 1 -> 2 -> 3 -> 4
+        executor.execute(parse("CREATE VERTEX Person (name STRING)").unwrap()).unwrap();
+        executor.execute(parse("CREATE EDGE KNOWS ()").unwrap()).unwrap();
+
+        executor.execute(parse("INSERT VERTEX Person (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C'), (4, 'D')").unwrap()).unwrap();
+        executor.execute(parse("INSERT EDGE KNOWS VALUES (1, 2), (2, 3), (3, 4)").unwrap()).unwrap();
+        storage.compact();
+
+        // 1..2 hops from 1
+        let q1 = parse("MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) WHERE a.name = 'A' RETURN b.name").unwrap();
+        let res1 = executor.execute(q1).unwrap();
+        let b1 = res1.batch.unwrap();
+        // Should find 2 (1 hop) and 3 (2 hops)
+        assert_eq!(b1.num_rows(), 2);
+
+        // Exact 2 hops from 1
+        let q2 = parse("MATCH (a:Person)-[:KNOWS*2]->(b:Person) WHERE a.name = 'A' RETURN b.name").unwrap();
+        let res2 = executor.execute(q2).unwrap();
+        let b2 = res2.batch.unwrap();
+        // Should find only 3 (2 hops)
+        assert_eq!(b2.num_rows(), 1);
+
+        // 1..3 hops from 1
+        let q3 = parse("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) WHERE a.name = 'A' RETURN b.name").unwrap();
+        let res3 = executor.execute(q3).unwrap();
+        let b3 = res3.batch.unwrap();
+        // Should find 2, 3, 4 (3 rows)
+        assert_eq!(b3.num_rows(), 3);
+    }
 }

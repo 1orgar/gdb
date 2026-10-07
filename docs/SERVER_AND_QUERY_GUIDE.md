@@ -26,7 +26,8 @@ gdb-server [OPTIONS]
 | :--- | :---: | :--- | :---: | :---: | :--- |
 | `--node-id` | `-n` | — | `u64` | `1` | Уникальный числовой идентификатор узла в кольце кластера. Используется при расчете принадлежности токенов: $\text{Token} = (u \pmod N) + 1$. |
 | `--partitions` | — | — | `u32` | `4` | Количество независимых Multi-Raft групп и локальных партиций графового хранилища на ноде. |
-| `--port` | `-p` | — | `u16` | `8848` | Сетевой порт сервиса **Apache Arrow Flight gRPC**. Обеспечивает векторный MPP обмен RecordBatch и межсетевой шаффл при распределенных запросах. |
+| `--port` | `-p` | — | `u16` | `8848` | Сетевой порт сервиса **Internal Apache Arrow Flight gRPC**. Обеспечивает векторный MPP обмен RecordBatch и межсетевой шаффл при распределенных запросах между узлами кластера. |
+| `--client-flight-port` | — | `GDB_CLIENT_FLIGHT_PORT` | `u16` | `8860` | Сетевой порт **External Client Flight gRPC**. Обеспечивает высокоскоростную потоковую параллельную загрузку (`do_put`) и прямое исполнение Cypher запросов (`do_get`) для внешних клиентов (`gdb-py-client`). |
 | `--http-port` | — | — | `u16` | `8847` | Сетевой порт **HTTP REST API**. Принимает запросы пользователей (`POST /query`), межрепликационные вызовы (`POST /replicate`), отдает метрики Prometheus (`GET /metrics`), статус кластера (`GET /cluster`), статус ресурсов (`GET /resources`) и health-check (`GET /health`). |
 | `--wal-dir` | — | — | `path` | `./data/wal` | Каталог на диске для журнала упреждающей записи **Write-Ahead Log (WAL)** с верификацией контрольных сумм CRC32. |
 | `--peers` | — | — | `string` | *(пусто)* | Список HTTP REST адресов других участников кольца через запятую (например: `"http://127.0.0.1:8846,http://127.0.0.1:8845"`). На основе этого списка нода динамически строит топологию кольца. |
@@ -56,12 +57,12 @@ gdb-server [OPTIONS]
 
 #### Сводная таблица портов стандартного 3-узлового кластера:
 
-| Узел кластера | Роль в кольце | HTTP REST API | Arrow Flight gRPC | Локальный WAL каталог | Файл логов |
-| :--- | :--- | :---: | :---: | :--- | :--- |
-| **Peer 1** | Peer / Coordinator | `http://127.0.0.1:8847` | `:8848` | `./data/node1/wal` | `./logs/node1.log` |
-| **Peer 2** | Peer / Storage | `http://127.0.0.1:8846` | `:8849` | `./data/node2/wal` | `./logs/node2.log` |
-| **Peer 3** | Peer / Storage | `http://127.0.0.1:8845` | `:8850` | `./data/node3/wal` | `./logs/node3.log` |
-| **Web Studio UI**| Графический интерфейс | `http://localhost:3000`| — | — | `./logs/studio.log` |
+| Узел кластера | Роль в кольце | HTTP REST API | Internal Flight | Client Flight Port | Локальный WAL каталог | Файл логов |
+| :--- | :--- | :---: | :---: | :---: | :--- | :--- |
+| **Peer 1** | Peer / Coordinator | `http://127.0.0.1:8847` | `:8848` | `:8860` | `./data/node1/wal` | `./logs/node1.log` |
+| **Peer 2** | Peer / Storage | `http://127.0.0.1:8846` | `:8849` | `:8861` | `./data/node2/wal` | `./logs/node2.log` |
+| **Peer 3** | Peer / Storage | `http://127.0.0.1:8845` | `:8850` | `:8862` | `./data/node3/wal` | `./logs/node3.log` |
+| **Web Studio UI**| Графический интерфейс | `http://localhost:3000`| — | — | — | `./logs/studio.log` |
 
 ---
 
@@ -126,19 +127,20 @@ SHOW RESOURCES;
 
 Сервер автоматически определяет аппаратную платформу при запуске:
 - **Apple Silicon (M1/M2/M3/M4/M5 на macOS):** Активируется **Apple Metal Compute Backend**.
-- **Linux x86_64 / amd64:** Активируется параллельный векторизованный **CPU SIMD Fallback** (Rayon + AVX2/AVX-512) или CUDA.
+- **Linux x86_64 / amd64 c NVIDIA GPU:** Активируется **NVIDIA CUDA Backend** (`crates/gdb-gpu/src/cuda.rs`). Автоматически детектирует устройство через `/dev/nvidia0` или переменную `CUDA_PATH`.
+- **CPU Fallback:** Если GPU не обнаружен, используется параллельный векторизованный **CPU SIMD Fallback** (Rayon + AVX2/AVX-512).
 
 #### Особенности Unified Memory Architecture (UMA Zero-Copy):
 На чипах Apple Silicon оперативная память CPU и графические ядра GPU физически объединены. Буферы топологии `ChunkedCsr` (`offsets`, `targets`) мапятся в память графического конвейера **напрямую без накладных расходов на копирование через PCIe шину**.
 
 #### Адаптивный диспетчер:
 - **Порог диспетчеризации (`threshold_edges`):** По умолчанию **10 000 ребер**.
-- Небольшие OLTP-выборки ($< 10\,000$ ребер) выполняются на CPU без накладных расходов на инициализацию шейдеров Metal.
+- Небольшие OLTP-выборки ($< 10\,000$ ребер) выполняются на CPU без накладных расходов на инициализацию шейдеров Metal/CUDA.
 - Массовые аналитические расчеты ($> 10\,000$ ребер) автоматически перенаправляются на вычислительные ядра GPU.
 
-#### Поддерживаемые GPU-ядра (Metal Shading Language):
-- `parallel_bfs_step` — параллельное расширение фронтира волны BFS.
-- `parallel_pagerank_step` — векторное распределение массы PageRank по ребрам.
+#### Поддерживаемые GPU-ядра (Metal Shading Language & CUDA Kernels):
+- `parallel_bfs_step` / `cuda_bfs_frontier_kernel` — параллельное расширение фронтира волны BFS.
+- `parallel_pagerank_step` / `cuda_pagerank_spmv_kernel` — векторное распределение массы PageRank по ребрам (SpMV).
 - `cosine_jaccard_kernel` — параллельный расчет пересечения множеств соседей.
 
 ---
@@ -218,15 +220,23 @@ CREATE EDGE CONNECTS ();
 ### 2.2. DML: Вставка и управление данными
 
 ```sql
--- 1. Вставка вершин
+-- 1. Вставка вершин (одиночная и пакетная Cypher Bulk Insert)
 INSERT VERTEX User (id, name, age) VALUES (1, 'Alice', 30);
-INSERT VERTEX User (id, name, age) VALUES (2, 'Bob', 25);
-INSERT VERTEX User (id, name, age) VALUES (3, 'Charlie', 35);
 
--- 2. Вставка ребер
+-- Пакетная вставка нескольких вершин в одном операторе (Bulk Insert):
+INSERT VERTEX User (id, name, age) VALUES 
+  (2, 'Bob', 25), 
+  (3, 'Charlie', 35), 
+  (4, 'Dave', 28);
+
+-- 2. Вставка ребер (одиночная и пакетная Cypher Bulk Insert)
 INSERT EDGE FOLLOWS FROM 1 TO 2;
-INSERT EDGE FOLLOWS FROM 2 TO 3;
-INSERT EDGE FOLLOWS FROM 3 TO 1;
+
+-- Пакетная вставка нескольких ребер в одном операторе (Bulk Insert):
+INSERT EDGE FOLLOWS VALUES 
+  (2, 3), 
+  (3, 1), 
+  (3, 4);
 
 -- 3. Принудительная компактизация мутационного буфера в Chunked-CSR
 -- Рекомендуется вызывать после завершения пакетной загрузки данных:
@@ -235,7 +245,7 @@ compact;
 
 ---
 
-### 2.3. openCypher / GQL: Шаблоны и k-hop обходы
+### 2.3. openCypher / GQL: Шаблоны, k-hop и Multi-Hop обходы
 
 ```sql
 -- 1-Hop обход с проекцией свойств:
@@ -245,6 +255,15 @@ RETURN a.name, b.name;
 -- 2-Hop обход (друзья друзей):
 MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)
 RETURN a.name, b.name, c.name;
+
+-- Multi-Hop: Переменная глубина обхода с диапазоном (Star Cast *min..max):
+MATCH (a:User)-[:FOLLOWS*1..3]->(b:User)
+WHERE a.id = 1
+RETURN a.name, b.name;
+
+-- Multi-Hop: Любой тип связи с переменной глубиной:
+MATCH (a:User)-[*1..2]->(b:User)
+RETURN a.id, b.id;
 
 -- Обход с фильтрацией (WHERE) и ограничением объема (LIMIT):
 MATCH (a:User)-[:FOLLOWS]->(b:User)
@@ -358,6 +377,47 @@ exit / quit               - Выход из консоли.
    ```bash
    python3 scripts/stress_test.py --concurrency 8 --duration 5 --write-ratio 0.3
    ```
+
+---
+
+## Часть 4. Внешний Arrow Flight сервис и клиент Polars (`gdb-py-client`)
+
+Для высокоскоростной параллельной загрузки данных с аналитических воркстейшенов в GDB выделен отдельный порт Flight (`--client-flight-port`, по умолчанию `:8860`).
+
+### 4.1. Архитектура взаимодействия:
+1. **Разделение трафика:**
+   - Порт `--port 8848+`: только внутренний MPP shuffle exchange между узлами кластера.
+   - Порт `--client-flight-port 8860+`: внешний клиентский шлюз (в перспективе поддерживает авторизацию и токены).
+2. **Streaming do_put Ingestion:**
+   - Клиент передает дескриптор `GdbFlightDescriptor` (JSON: `{"type": "vertex", "tag": "User"}` или `{"type": "edge", "edge_type": "FOLLOWS"}`).
+   - Данные стримятся в формате Arrow `RecordBatch` и напрямую трансформируются в `DeltaMemTable` без сериализации в текст Cypher.
+3. **Scatter-Ingest на клиенте (`gdb-py-client`):**
+   - Библиотека на Python разбивает Polars DataFrame по формуле `u % N` (Primary token в хеш-кольце).
+   - Векторизованные чанки отправляются параллельно в `client-flight-port` конкретных целевых узлов, минимизируя сетевые пересылки между нодами.
+
+### 4.2. Пример работы с Python клиентом:
+```python
+import polars as pl
+from gdb_client import GdbClient
+
+# Подключение к семени кластера
+client = GdbClient(seed_url="http://localhost:8847")
+
+# Массовая вставка 1,000,000 вершин напрямую через Arrow Flight do_put:
+df_vertices = pl.DataFrame({
+    "id": range(1, 1_000_001),
+    "name": [f"User_{i}" for i in range(1, 1_000_001)],
+    "age": [20 + (i % 50) for i in range(1, 1_000_001)],
+})
+client.scatter_ingest_vertices(df_vertices, tag="User")
+
+# Массовая вставка ребер:
+df_edges = pl.DataFrame({
+    "src": range(1, 1_000_000),
+    "dst": range(2, 1_000_001),
+})
+client.scatter_ingest_edges(df_edges, edge_type="FOLLOWS")
+```
 
 5. **[`scripts/graph_analytics_validation.py`](file:///Users/kirill/Documents/projects/gdb/scripts/graph_analytics_validation.py):**
    Математическая проверка точности всех 12 аналитических алгоритмов на эталонных топологиях.

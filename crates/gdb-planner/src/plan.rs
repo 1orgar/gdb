@@ -18,6 +18,16 @@ pub enum PhysicalOperator {
         dst_var: String,
         edge_type: Option<EdgeType>,
     },
+    /// Variable-length multi-hop path expansion (e.g., [:TYPE*1..3])
+    VarLengthExpand {
+        input: Box<PhysicalOperator>,
+        src_var: String,
+        edge_var: Option<String>,
+        dst_var: String,
+        edge_type: Option<EdgeType>,
+        min_hops: usize,
+        max_hops: Option<usize>,
+    },
     /// Evaluates WHERE predicate.
     Filter {
         input: Box<PhysicalOperator>,

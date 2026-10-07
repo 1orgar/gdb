@@ -27,6 +27,7 @@ anyhow.workspace = true
 mimalloc.workspace = true
 arrow.workspace = true
 arrow-array.workspace = true
+arrow-flight.workspace = true
 axum = "0.7"
 serde.workspace = true
 serde_json.workspace = true

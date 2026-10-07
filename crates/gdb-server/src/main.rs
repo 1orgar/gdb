@@ -5,7 +5,7 @@ use axum::{Json, Router};
 use clap::Parser;
 use gdb_core::schema::GraphSchema;
 use gdb_core::DataValue;
-use gdb_flight::GdbFlightService;
+use gdb_flight::{GdbClientFlightService, GdbFlightService};
 use gdb_gpu::GpuDispatcher;
 use gdb_planner::QueryExecutor;
 use gdb_raft::MultiRaftManager;
@@ -57,6 +57,7 @@ pub struct RingNode {
     pub node_id: u64,
     pub http_url: String,
     pub flight_port: u16,
+    pub client_flight_port: u16,
 }
 
 #[derive(Parser, Debug)]
@@ -70,9 +71,13 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     partitions: u32,
 
-    /// Port for Arrow Flight & Raft RPC
+    /// Port for internal inter-node Arrow Flight & RPC
     #[arg(short, long, default_value_t = 8848)]
     port: u16,
+
+    /// Dedicated Arrow Flight port for external client data ingestion & bulk loading
+    #[arg(long, default_value_t = 8860)]
+    client_flight_port: u16,
 
     /// Port for HTTP REST API
     #[arg(long, default_value_t = 8847)]
@@ -126,6 +131,7 @@ struct AppState {
     node_id: u64,
     partitions: u32,
     port: u16,
+    client_flight_port: u16,
     http_port: u16,
     start_time: Instant,
     executor: Arc<QueryExecutor>,
@@ -172,6 +178,7 @@ async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
         "total_nodes": total_nodes,
         "partitions": state.partitions,
         "flight_port": state.port,
+        "client_flight_port": state.client_flight_port,
         "http_port": state.http_port,
         "peers": state.peers,
         "ring_nodes": state.ring_nodes,
@@ -402,33 +409,41 @@ async fn handle_replicate(
     }
 }
 
-fn build_ring_nodes(my_id: u64, my_http_port: u16, my_flight_port: u16, peers: &[String]) -> Vec<RingNode> {
+fn build_ring_nodes(
+    my_id: u64,
+    my_http_port: u16,
+    my_flight_port: u16,
+    my_client_flight_port: u16,
+    peers: &[String],
+) -> Vec<RingNode> {
     let mut nodes = Vec::new();
     nodes.push(RingNode {
         node_id: my_id,
         http_url: format!("http://127.0.0.1:{}", my_http_port),
         flight_port: my_flight_port,
+        client_flight_port: my_client_flight_port,
     });
 
     for (idx, peer) in peers.iter().enumerate() {
-        let (peer_id, flight_p) = if peer.contains("8847") {
-            (1, 8848)
+        let (peer_id, flight_p, client_p) = if peer.contains("8847") {
+            (1, 8848, 8860)
         } else if peer.contains("8846") {
-            (2, 8849)
+            (2, 8849, 8861)
         } else if peer.contains("8845") {
-            (3, 8850)
+            (3, 8850, 8862)
         } else {
             let id = if (idx as u64 + 1) >= my_id {
                 idx as u64 + 2
             } else {
                 idx as u64 + 1
             };
-            (id, 8848 + id as u16)
+            (id, 8848 + id as u16, 8860 + (id as u16).saturating_sub(1))
         };
         nodes.push(RingNode {
             node_id: peer_id,
             http_url: peer.clone(),
             flight_port: flight_p,
+            client_flight_port: client_p,
         });
     }
 
@@ -650,6 +665,88 @@ async fn handle_query(
         }
     }
 
+    if let gdb_parser::ast::Statement::InsertVertices { vertices, .. } = &stmt {
+        if state.ring_nodes.len() > 1 {
+            let mut targets: Vec<RingNode> = Vec::new();
+            for (vid, _) in vertices {
+                for rep in calculate_replica_set(vid.0, &state.ring_nodes, state.replication_factor) {
+                    if rep.node_id != state.node_id && !targets.iter().any(|t| t.node_id == rep.node_id) {
+                        targets.push(rep);
+                    }
+                }
+            }
+
+            match state.executor.execute(stmt) {
+                Ok(res) => {
+                    let elapsed_us = start.elapsed().as_micros();
+                    state.queries_ok.fetch_add(1, Ordering::Relaxed);
+                    state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
+
+                    replicate_to_targets(&state.http_client, &targets, trimmed, state.replication_mode, &state.replications_count).await;
+
+                    return Json(serde_json::json!({
+                        "status": "ok",
+                        "message": res.message,
+                        "elapsed_us": elapsed_us,
+                        "num_rows": 0,
+                        "rows_affected": res.rows_affected,
+                        "columns": [],
+                        "rows": []
+                    }));
+                }
+                Err(e) => {
+                    state.queries_err.fetch_add(1, Ordering::Relaxed);
+                    return Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("Execution error: {}", e),
+                        "elapsed_us": start.elapsed().as_micros()
+                    }));
+                }
+            }
+        }
+    }
+
+    if let gdb_parser::ast::Statement::InsertEdges { edges, .. } = &stmt {
+        if state.ring_nodes.len() > 1 {
+            let mut targets: Vec<RingNode> = Vec::new();
+            for (src, _, _, _) in edges {
+                for rep in calculate_replica_set(src.0, &state.ring_nodes, state.replication_factor) {
+                    if rep.node_id != state.node_id && !targets.iter().any(|t| t.node_id == rep.node_id) {
+                        targets.push(rep);
+                    }
+                }
+            }
+
+            match state.executor.execute(stmt) {
+                Ok(res) => {
+                    let elapsed_us = start.elapsed().as_micros();
+                    state.queries_ok.fetch_add(1, Ordering::Relaxed);
+                    state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
+
+                    replicate_to_targets(&state.http_client, &targets, trimmed, state.replication_mode, &state.replications_count).await;
+
+                    return Json(serde_json::json!({
+                        "status": "ok",
+                        "message": res.message,
+                        "elapsed_us": elapsed_us,
+                        "num_rows": 0,
+                        "rows_affected": res.rows_affected,
+                        "columns": [],
+                        "rows": []
+                    }));
+                }
+                Err(e) => {
+                    state.queries_err.fetch_add(1, Ordering::Relaxed);
+                    return Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("Execution error: {}", e),
+                        "elapsed_us": start.elapsed().as_micros()
+                    }));
+                }
+            }
+        }
+    }
+
     // DML Routing & Leaderless Ring Replication
     let dml_key = match &stmt {
         gdb_parser::ast::Statement::InsertVertex { id, .. } => Some(id.0),
@@ -689,6 +786,7 @@ async fn handle_query(
                     "message": res.message,
                     "elapsed_us": elapsed_us,
                     "num_rows": 0,
+                    "rows_affected": res.rows_affected,
                     "columns": [],
                     "rows": []
                 }));
@@ -741,6 +839,7 @@ async fn handle_query(
                 "message": res.message,
                 "elapsed_us": elapsed_us,
                 "num_rows": rows.len(),
+                "rows_affected": res.rows_affected,
                 "columns": columns,
                 "rows": rows,
             }))
@@ -855,7 +954,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let ring_nodes = build_ring_nodes(args.node_id, args.http_port, args.port, &peers);
+    let ring_nodes = build_ring_nodes(args.node_id, args.http_port, args.port, args.client_flight_port, &peers);
     let total_nodes = ring_nodes.len() as u64;
     let replication_mode = ReplicationMode::from_str(&args.replication_mode).unwrap_or(ReplicationMode::Sync);
     let effective_rf = (args.replication_factor as usize).min(ring_nodes.len()).max(1);
@@ -881,6 +980,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node_id: args.node_id,
         partitions: args.partitions,
         port: args.port,
+        client_flight_port: args.client_flight_port,
         http_port: args.http_port,
         start_time: Instant::now(),
         executor: executor.clone(),
@@ -925,16 +1025,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         axum::serve(listener, app).await.unwrap();
     });
 
-    // 2. Start Arrow Flight gRPC Server
-    let flight_addr: SocketAddr = format!("0.0.0.0:{}", args.port).parse()?;
-    let flight_svc = GdbFlightService::new();
+    // 2. Start Internal Arrow Flight gRPC Server (for inter-node replication / MPP shuffle)
+    let internal_flight_addr: SocketAddr = format!("0.0.0.0:{}", args.port).parse()?;
+    let internal_flight_svc = GdbFlightService::new();
 
-    println!("\x1b[1;32m[+] Arrow Flight Server:\x1b[0m Listening on {}", flight_addr);
+    tokio::spawn(async move {
+        println!("\x1b[1;32m[+] Internal Flight Server (Inter-Node):\x1b[0m Listening on {}", internal_flight_addr);
+        if let Err(e) = TonicServer::builder()
+            .add_service(internal_flight_svc.into_server())
+            .serve(internal_flight_addr)
+            .await
+        {
+            eprintln!("Internal Flight server error: {}", e);
+        }
+    });
+
+    // 3. Start Dedicated Client Arrow Flight Server (for external fast ingestion & queries)
+    let client_flight_addr: SocketAddr = format!("0.0.0.0:{}", args.client_flight_port).parse()?;
+    let client_flight_svc = GdbClientFlightService::new(storage_p0.clone(), schema.clone(), executor.clone());
+
+    println!("\x1b[1;32m[+] Client Flight Server (Fast Ingestion/Query):\x1b[0m Listening on {}", client_flight_addr);
     println!("\x1b[1;33m[ Ready to process openCypher / GQL / CALL queries ]\x1b[0m\n");
 
     TonicServer::builder()
-        .add_service(flight_svc.into_server())
-        .serve(flight_addr)
+        .add_service(client_flight_svc.into_server())
+        .serve(client_flight_addr)
         .await?;
 
     Ok(())

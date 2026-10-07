@@ -41,6 +41,11 @@ impl VertexPropertyTable {
             .and_then(|map| map.get(prop_name).cloned())
     }
 
+    /// Returns all vertex IDs currently stored in row cache.
+    pub fn vertex_ids(&self) -> Vec<VertexId> {
+        self.row_cache.iter().map(|entry| VertexId(*entry.key())).collect()
+    }
+
     /// Re-builds Arrow RecordBatches from in-memory row cache for vectorized OLAP query execution.
     pub fn rebuild_arrow_batches(&self) -> GdbResult<()> {
         let count = self.row_cache.len();

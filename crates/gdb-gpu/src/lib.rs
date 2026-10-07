@@ -1,8 +1,10 @@
 pub mod backend;
+pub mod cuda;
 pub mod dispatcher;
 pub mod metal;
 
 pub use backend::{BfsResult, CpuFallbackBackend, GpuComputeBackend, PageRankResult};
+pub use cuda::CudaComputeBackend;
 pub use dispatcher::GpuDispatcher;
 pub use metal::MetalComputeBackend;
 
@@ -40,5 +42,22 @@ mod tests {
         for (_, score) in pr_res {
             assert!((score - 0.333).abs() < 0.05);
         }
+    }
+
+    #[test]
+    fn test_cuda_backend_execution() {
+        let edges = vec![
+            EdgeId::simple(VertexId(10), EdgeType(1), VertexId(20)),
+            EdgeId::simple(VertexId(20), EdgeType(1), VertexId(30)),
+        ];
+        let csr = ChunkedCsr::from_edges(edges);
+        let cuda = CudaComputeBackend::new();
+
+        assert_eq!(cuda.device_id(), 0);
+        let bfs = cuda.parallel_bfs(&csr, VertexId(10), 2).unwrap();
+        assert_eq!(bfs.len(), 3);
+
+        let pr = cuda.pagerank(&csr, 0.85, 10).unwrap();
+        assert_eq!(pr.len(), 3);
     }
 }

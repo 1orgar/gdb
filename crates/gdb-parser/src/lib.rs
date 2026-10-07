@@ -50,7 +50,6 @@ mod tests {
             _ => panic!("Expected Query statement"),
         }
     }
-}
 
     #[test]
     fn test_parse_call_algorithm() {
@@ -65,3 +64,70 @@ mod tests {
             _ => panic!("Expected CallAlgorithm"),
         }
     }
+
+    #[test]
+    fn test_parse_batch_insert_vertices_and_edges() {
+        let v_sql = "INSERT VERTEX User (id, name, age) VALUES (1, 'Alice', 30), (2, 'Bob', 25)";
+        let stmt = parse(v_sql).unwrap();
+        match stmt {
+            Statement::InsertVertices { label, vertices } => {
+                assert_eq!(label, "User");
+                assert_eq!(vertices.len(), 2);
+                assert_eq!(vertices[0].0 .0, 1);
+                assert_eq!(vertices[1].0 .0, 2);
+            }
+            _ => panic!("Expected InsertVertices"),
+        }
+
+        let e_sql = "INSERT EDGE FOLLOWS VALUES (1, 2), (2, 3, 10)";
+        let stmt = parse(e_sql).unwrap();
+        match stmt {
+            Statement::InsertEdges { edge_type, edges } => {
+                assert_eq!(edge_type, "FOLLOWS");
+                assert_eq!(edges.len(), 2);
+                assert_eq!(edges[0].0 .0, 1);
+                assert_eq!(edges[0].1 .0, 2);
+                assert_eq!(edges[0].2, 0);
+                assert_eq!(edges[1].0 .0, 2);
+                assert_eq!(edges[1].1 .0, 3);
+                assert_eq!(edges[1].2, 10);
+            }
+            _ => panic!("Expected InsertEdges"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_hop_patterns() {
+        let q1 = "MATCH (a)-[:KNOWS*1..3]->(b) RETURN b";
+        if let Statement::Query(q) = parse(q1).unwrap() {
+            assert_eq!(q.pattern.hops[0].0.min_hops, 1);
+            assert_eq!(q.pattern.hops[0].0.max_hops, Some(3));
+        } else {
+            panic!("Expected Query");
+        }
+
+        let q2 = "MATCH (a)-[:KNOWS*..5]->(b) RETURN b";
+        if let Statement::Query(q) = parse(q2).unwrap() {
+            assert_eq!(q.pattern.hops[0].0.min_hops, 1);
+            assert_eq!(q.pattern.hops[0].0.max_hops, Some(5));
+        } else {
+            panic!("Expected Query");
+        }
+
+        let q3 = "MATCH (a)-[:KNOWS*2]->(b) RETURN b";
+        if let Statement::Query(q) = parse(q3).unwrap() {
+            assert_eq!(q.pattern.hops[0].0.min_hops, 2);
+            assert_eq!(q.pattern.hops[0].0.max_hops, Some(2));
+        } else {
+            panic!("Expected Query");
+        }
+
+        let q4 = "MATCH (a)-[*]->(b) RETURN b";
+        if let Statement::Query(q) = parse(q4).unwrap() {
+            assert_eq!(q.pattern.hops[0].0.min_hops, 1);
+            assert_eq!(q.pattern.hops[0].0.max_hops, None);
+        } else {
+            panic!("Expected Query");
+        }
+    }
+}

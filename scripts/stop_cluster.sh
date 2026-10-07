@@ -8,6 +8,7 @@ if [ -f "$PID_FILE" ]; then
     PIDS=$(cat "$PID_FILE")
     echo "Stopping GDB cluster nodes (PIDs: $PIDS)..."
     kill $PIDS 2>/dev/null
+    pkill -f "$PROJECT_ROOT/bin/gdb-server" 2>/dev/null
     rm -f "$PID_FILE"
     echo "Cluster stopped."
 else

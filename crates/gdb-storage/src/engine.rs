@@ -163,6 +163,30 @@ impl PartitionStorageEngine {
         self.vertex_properties.read().get(&label_id).cloned()
     }
 
+    /// Returns all known vertex IDs combining CSR and in-memory property tables.
+    pub fn get_all_vertex_ids(&self, label_id: Option<LabelId>) -> Vec<VertexId> {
+        let mut ids = HashSet::new();
+        let csr = self.csr.read();
+        for &vid_raw in &csr.reverse_map {
+            ids.insert(VertexId(vid_raw));
+        }
+        let guard = self.vertex_properties.read();
+        if let Some(lid) = label_id {
+            if let Some(table) = guard.get(&lid) {
+                for vid in table.vertex_ids() {
+                    ids.insert(vid);
+                }
+            }
+        } else {
+            for table in guard.values() {
+                for vid in table.vertex_ids() {
+                    ids.insert(vid);
+                }
+            }
+        }
+        ids.into_iter().collect()
+    }
+
     fn get_or_create_property_table(&self, label_id: LabelId) -> GdbResult<Arc<VertexPropertyTable>> {
         {
             let guard = self.vertex_properties.read();

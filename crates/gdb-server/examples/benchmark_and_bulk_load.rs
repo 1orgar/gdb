@@ -1,6 +1,6 @@
 use gdb_analytics::AnalyticsEngine;
 use gdb_core::schema::{DataType, GraphSchema, PropertySpec};
-use gdb_core::{DataValue, EdgeId, EdgeType, VertexId};
+use gdb_core::{DataValue, EdgeId, VertexId};
 use gdb_s3::{csr_to_parquet, S3StorageManager};
 use gdb_storage::PartitionStorageEngine;
 use object_store::memory::InMemory;

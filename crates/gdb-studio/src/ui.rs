@@ -598,9 +598,10 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       <div class="results-pane">
         <div class="results-nav">
           <div class="nav-tabs">
-            <div class="nav-tab active" onclick="switchView('graph', this)">🕸️ Graph View</div>
-            <div class="nav-tab" onclick="switchView('table', this)">📊 Table View</div>
-            <div class="nav-tab" onclick="switchView('json', this)">📜 Raw JSON</div>
+            <div class="nav-tab active" id="tab-btn-graph" onclick="switchView('graph', this)">🕸️ Graph View</div>
+            <div class="nav-tab" id="tab-btn-table" onclick="switchView('table', this)">📊 Table View</div>
+            <div class="nav-tab" id="tab-btn-unity" onclick="switchView('unity', this)">🎮 3D Unity View</div>
+            <div class="nav-tab" id="tab-btn-json" onclick="switchView('json', this)">📜 Raw JSON</div>
           </div>
           <div class="nav-stats" id="query-stats">
             <div>Status: <span class="highlight" id="stat-status">Ready</span></div>
@@ -627,6 +628,19 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
             <thead><tr id="table-header"><th>No Data</th></tr></thead>
             <tbody id="table-body"><tr><td>Execute a query to view tabular results</td></tr></tbody>
           </table>
+        </div>
+
+        <!-- 3D Unity Viewport -->
+        <div id="unity-viewport" class="viewport" style="display:none; width:100%; height:100%; position:relative; background:#080b10;">
+          <div id="unity-container" style="width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative;">
+            <canvas id="unity-canvas" style="width:100%; height:100%; display:none;"></canvas>
+            <div id="unity-hud" style="width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:30px; text-align:center;">
+              <div style="font-size:42px; margin-bottom:14px;">🎮</div>
+              <div style="font-weight:700; font-size:16px; color:#58a6ff; margin-bottom:8px;">Unity 3D WebGL Graph Viewport</div>
+              <div style="font-size:13px; max-width:540px; line-height:1.6; color:#8b949e;">GPU Instancing 3D topology visualizer for massive graphs (&gt;100k nodes) with dynamic 60 FPS spatial Force-Directed simulation and camera orbit.</div>
+              <div id="unity-status-badge" style="margin-top:16px; font-size:12px; background:rgba(88,166,255,0.12); border:1px solid #1f6feb; border-radius:6px; padding:6px 14px; color:#58a6ff;">Ready to render query topology in 3D</div>
+            </div>
+          </div>
         </div>
 
         <!-- JSON Viewport -->
@@ -705,9 +719,12 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       return COLORS[Math.abs(hash) % COLORS.length];
     }
 
+    let currentView = 'graph';
+    let lastLoadedGraphData = null;
+
     // Force Simulation
     function stepSimulation() {
-      if (!physicsRunning || graphNodes.length === 0) return;
+      if (!physicsRunning || graphNodes.length === 0 || currentView !== 'graph') return;
 
       const repulsion = 4000;
       const springLength = 80;
@@ -998,11 +1015,30 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         // Render Table
         renderTable(data);
 
-        // Extract and Render Graph
-        if (data.graph && (data.graph.nodes.length > 0 || data.graph.edges.length > 0)) {
-          buildGraph(data.graph.nodes, data.graph.edges);
+        // Save data for Unity and Graph viewers
+        lastLoadedGraphData = data;
+
+        const queryLower = query.toLowerCase();
+        const isAlgoQuery = queryLower.includes('call algo.') || queryLower.startsWith('call algo');
+        const hasAlgoMetrics = data.columns && data.columns.some(c => 
+          ['score', 'community', 'community_id', 'distance', 'triangles', 'jaccard', 'cosine', 'similarity', 'kcore'].includes(c.toLowerCase())
+        );
+
+        // Auto-switch view and manage graph physics
+        if (isAlgoQuery || hasAlgoMetrics) {
+          switchView('table', document.getElementById('tab-btn-table'));
+          document.getElementById('stat-graph').textContent = 'Tabular algorithm output (Graph physics safely paused)';
         } else {
-          extractGraphFromRows(data);
+          // Extract and Render Graph
+          if (data.graph && (data.graph.nodes.length > 0 || data.graph.edges.length > 0)) {
+            buildGraph(data.graph.nodes, data.graph.edges);
+          } else {
+            extractGraphFromRows(data);
+          }
+        }
+
+        if (currentView === 'unity') {
+          renderUnityGraph();
         }
 
         // Add to history
@@ -1051,11 +1087,17 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
 
     // Build Graph from Node/Edge Lists
     function buildGraph(nodes, edges) {
+      const MAX_GRAPH_NODES = 250;
+      let capped = false;
       const nodeMap = new Map();
       graphNodes = [];
       graphEdges = [];
 
       for (const n of nodes) {
+        if (graphNodes.length >= MAX_GRAPH_NODES) {
+          capped = true;
+          break;
+        }
         const node = {
           id: n.id,
           label: n.label || String(n.id),
@@ -1082,13 +1124,19 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         }
       }
 
-      document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes, ${graphEdges.length} edges`;
+      if (capped) {
+        document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes (capped at 250 for 60 FPS), ${graphEdges.length} edges | Full data in Table view`;
+      } else {
+        document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes, ${graphEdges.length} edges`;
+      }
     }
 
     // Auto-extract graph from generic rows (e.g. [a.name, b.name] or [vertex_id, score])
     function extractGraphFromRows(data) {
       if (!data.columns || !data.rows || data.rows.length === 0) return;
 
+      const MAX_GRAPH_NODES = 250;
+      let capped = false;
       const nodeMap = new Map();
       graphNodes = [];
       graphEdges = [];
@@ -1096,6 +1144,10 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       // Case 1: 2-column or 3-column path traversal (source -> target)
       if (data.columns.length >= 2 && !data.columns[1].includes('score') && !data.columns[1].includes('distance')) {
         for (const row of data.rows) {
+          if (graphNodes.length >= MAX_GRAPH_NODES) {
+            capped = true;
+            break;
+          }
           const uId = String(row[0]);
           const vId = String(row[1]);
 
@@ -1124,6 +1176,10 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         const metricName = data.columns[metricIdx];
 
         for (const row of data.rows) {
+          if (graphNodes.length >= MAX_GRAPH_NODES) {
+            capped = true;
+            break;
+          }
           const vid = String(row[idIdx]);
           const metricVal = row[metricIdx];
           const node = {
@@ -1139,16 +1195,71 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         }
       }
 
-      document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes, ${graphEdges.length} edges`;
+      if (capped) {
+        document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes (capped at 250 for 60 FPS), ${graphEdges.length} edges | Full data in Table view`;
+      } else {
+        document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes, ${graphEdges.length} edges`;
+      }
     }
 
     // Tabs & Navigation
     function switchView(viewName, el) {
+      currentView = viewName;
       document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-      el.classList.add('active');
-      document.querySelectorAll('.viewport').forEach(v => v.classList.remove('active'));
-      document.getElementById(`${viewName}-viewport`).classList.add('active');
-      if (viewName === 'graph') resizeCanvas();
+      if (el) el.classList.add('active');
+      document.querySelectorAll('.viewport').forEach(v => {
+        v.classList.remove('active');
+        v.style.display = 'none';
+      });
+      const vp = document.getElementById(`${viewName}-viewport`);
+      if (vp) {
+        vp.classList.add('active');
+        vp.style.display = 'block';
+      }
+      if (viewName === 'graph') {
+        physicsRunning = true;
+        resizeCanvas();
+      } else {
+        physicsRunning = false;
+      }
+      if (viewName === 'unity') {
+        renderUnityGraph();
+      }
+    }
+
+    window.onUnityNodeSelected = function(nodeId) {
+      console.log("[Unity Bridge] Node selected:", nodeId);
+      selectNode(nodeId);
+    };
+
+    function renderUnityGraph() {
+      const badge = document.getElementById('unity-status-badge');
+      const nodes = Array.from(graphNodes.values()).map(n => ({ id: n.id, label: n.label, category: n.category, score: n.score }));
+      const edges = graphEdges.map(e => ({ src: e.src, dst: e.dst, type: e.type }));
+      const payload = { nodes, edges };
+
+      if (window.unityInstance) {
+        window.unityInstance.SendMessage('GraphController', 'ReceiveGraphData', JSON.stringify(payload));
+        if (badge) {
+          badge.textContent = `Unity WebGL Active: ${nodes.length} nodes, ${edges.length} edges rendered in 3D.`;
+          badge.style.color = '#3fb950';
+          badge.style.borderColor = '#238636';
+        }
+        return;
+      }
+
+      if (badge) {
+        const count = nodes.length;
+        if (count > 0) {
+          badge.textContent = `Active 3D Viewport: ${count} nodes, ${edges.length} edges loaded. Ready for Unity WebGL / GPU Instancing.`;
+          badge.style.color = '#3fb950';
+          badge.style.borderColor = '#238636';
+        } else {
+          badge.textContent = 'Ready to render query topology in 3D';
+          badge.style.color = '#58a6ff';
+          badge.style.borderColor = '#1f6feb';
+        }
+      }
     }
 
     function switchSidebarTab(tabName, el) {

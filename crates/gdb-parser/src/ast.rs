@@ -16,12 +16,20 @@ pub enum Statement {
         id: VertexId,
         properties: Vec<(String, DataValue)>,
     },
+    InsertVertices {
+        label: String,
+        vertices: Vec<(VertexId, Vec<(String, DataValue)>)>,
+    },
     InsertEdge {
         edge_type: String,
         src: VertexId,
         dst: VertexId,
         rank: i64,
         properties: Vec<(String, DataValue)>,
+    },
+    InsertEdges {
+        edge_type: String,
+        edges: Vec<(VertexId, VertexId, i64, Vec<(String, DataValue)>)>,
     },
     DeleteEdge {
         edge_type: String,
@@ -58,6 +66,18 @@ pub struct EdgePattern {
     pub variable: Option<String>,
     pub edge_type: Option<String>,
     pub direction: Direction,
+    #[serde(default = "default_min_hops")]
+    pub min_hops: usize,
+    #[serde(default = "default_max_hops")]
+    pub max_hops: Option<usize>,
+}
+
+fn default_min_hops() -> usize {
+    1
+}
+
+fn default_max_hops() -> Option<usize> {
+    Some(1)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

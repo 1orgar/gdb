@@ -64,6 +64,26 @@ impl QueryExecutor {
                     rows_affected: 1,
                 })
             }
+            Statement::InsertVertices { label, vertices } => {
+                let label_id = {
+                    let schema = self.schema.read();
+                    schema
+                        .get_vertex_schema(&label)
+                        .map(|s| s.label_id)
+                        .ok_or_else(|| GdbError::Schema(format!("Unknown vertex label: {}", label)))?
+                };
+
+                let count = vertices.len();
+                for (id, properties) in vertices {
+                    let props_map: HashMap<String, DataValue> = properties.into_iter().collect();
+                    self.storage.set_vertex_properties(id, label_id, props_map)?;
+                }
+                Ok(QueryResult {
+                    message: format!("Inserted {} vertices", count),
+                    batch: None,
+                    rows_affected: count,
+                })
+            }
             Statement::InsertEdge { edge_type, src, dst, rank, .. } => {
                 let et = {
                     let schema = self.schema.read();
@@ -80,6 +100,27 @@ impl QueryExecutor {
                     message: format!("Inserted edge {:?}", edge),
                     batch: None,
                     rows_affected: 1,
+                })
+            }
+            Statement::InsertEdges { edge_type, edges } => {
+                let et = {
+                    let schema = self.schema.read();
+                    schema
+                        .get_edge_schema(&edge_type)
+                        .map(|s| s.edge_type)
+                        .ok_or_else(|| GdbError::Schema(format!("Unknown edge type: {}", edge_type)))?
+                };
+
+                let count = edges.len();
+                let ver = self.storage.next_commit_version();
+                for (src, dst, rank, _props) in edges {
+                    let edge = EdgeId::new(src, et, rank, dst);
+                    self.storage.insert_edge(edge, ver);
+                }
+                Ok(QueryResult {
+                    message: format!("Inserted {} edges", count),
+                    batch: None,
+                    rows_affected: count,
                 })
             }
             Statement::DeleteEdge { edge_type, src, dst, rank } => {
@@ -155,13 +196,25 @@ impl QueryExecutor {
                 None
             };
 
-            current_plan = PhysicalOperator::ExpandEdges {
-                input: Box::new(current_plan),
-                src_var: prev_var,
-                edge_var,
-                dst_var: dst_var.clone(),
-                edge_type,
-            };
+            if edge_pat.min_hops == 1 && edge_pat.max_hops == Some(1) {
+                current_plan = PhysicalOperator::ExpandEdges {
+                    input: Box::new(current_plan),
+                    src_var: prev_var,
+                    edge_var,
+                    dst_var: dst_var.clone(),
+                    edge_type,
+                };
+            } else {
+                current_plan = PhysicalOperator::VarLengthExpand {
+                    input: Box::new(current_plan),
+                    src_var: prev_var,
+                    edge_var,
+                    dst_var: dst_var.clone(),
+                    edge_type,
+                    min_hops: edge_pat.min_hops,
+                    max_hops: edge_pat.max_hops,
+                };
+            }
 
             prev_var = dst_var;
         }
@@ -192,11 +245,11 @@ impl QueryExecutor {
                     row.vertices.insert(var_name.clone(), (*target_id, *label_id));
                     rows.push(row);
                 } else {
-                    // Fetch all known vertices in CSR and Delta
-                    let csr = self.storage.current_csr();
-                    for &vid_raw in &csr.reverse_map {
+                    // Fetch all known vertices across CSR and in-memory Delta table
+                    let all_vids = self.storage.get_all_vertex_ids(Some(*label_id));
+                    for vid in all_vids {
                         let mut row = PathRow::default();
-                        row.vertices.insert(var_name.clone(), (VertexId(vid_raw), *label_id));
+                        row.vertices.insert(var_name.clone(), (vid, *label_id));
                         rows.push(row);
                     }
                 }
@@ -217,6 +270,51 @@ impl QueryExecutor {
                             // Default to LabelId(1) for target if unknown
                             new_row.vertices.insert(dst_var.clone(), (edge.dst, LabelId(1)));
                             output_rows.push(new_row);
+                        }
+                    }
+                }
+
+                Ok(output_rows)
+            }
+            PhysicalOperator::VarLengthExpand {
+                input,
+                src_var,
+                edge_var,
+                dst_var,
+                edge_type,
+                min_hops,
+                max_hops,
+            } => {
+                let input_rows = self.execute_plan(input, snapshot)?;
+                let mut output_rows = Vec::new();
+                let max_depth = max_hops.unwrap_or(15);
+
+                for row in input_rows {
+                    if let Some(&(start_vid, _)) = row.vertices.get(src_var) {
+                        let mut queue = std::collections::VecDeque::new();
+                        // (curr_vid, depth, visited_edges, last_edge)
+                        queue.push_back((start_vid, 0usize, std::collections::HashSet::new(), None));
+
+                        while let Some((curr_vid, depth, visited_edges, last_edge)) = queue.pop_front() {
+                            if depth >= *min_hops {
+                                let mut new_row = row.clone();
+                                if let (Some(ev), Some(le)) = (edge_var, last_edge) {
+                                    new_row.edges.insert(ev.clone(), le);
+                                }
+                                new_row.vertices.insert(dst_var.clone(), (curr_vid, LabelId(1)));
+                                output_rows.push(new_row);
+                            }
+
+                            if depth < max_depth {
+                                let edges = self.storage.get_out_edges(curr_vid, *edge_type, snapshot);
+                                for edge in edges {
+                                    if !visited_edges.contains(&edge) {
+                                        let mut next_visited = visited_edges.clone();
+                                        next_visited.insert(edge);
+                                        queue.push_back((edge.dst, depth + 1, next_visited, Some(edge)));
+                                    }
+                                }
+                            }
                         }
                     }
                 }

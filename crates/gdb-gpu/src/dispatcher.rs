@@ -1,4 +1,6 @@
 use crate::backend::{BfsResult, CpuFallbackBackend, GpuComputeBackend, PageRankResult};
+#[allow(unused_imports)]
+use crate::cuda::CudaComputeBackend;
 use crate::metal::MetalComputeBackend;
 use gdb_core::{GdbResult, VertexId};
 use gdb_storage::ChunkedCsr;
@@ -23,7 +25,16 @@ impl GpuDispatcher {
         #[cfg(target_os = "macos")]
         let backend: Arc<dyn GpuComputeBackend> = Arc::new(MetalComputeBackend::new());
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let backend: Arc<dyn GpuComputeBackend> = {
+            if CudaComputeBackend::is_available() {
+                Arc::new(CudaComputeBackend::new())
+            } else {
+                Arc::new(CpuFallbackBackend)
+            }
+        };
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let backend: Arc<dyn GpuComputeBackend> = Arc::new(CpuFallbackBackend);
 
         Self {
