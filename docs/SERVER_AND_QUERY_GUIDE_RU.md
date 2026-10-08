@@ -55,6 +55,7 @@ gdb-server [OPTIONS]
 
 | Флаг скрипта | Алиасы | Пример использования | Описание |
 | :--- | :--- | :--- | :--- |
+| `--nodes <N>` | `-n <N>` | `./scripts/start_cluster.sh --nodes 5` | Количество запускаемых узлов кластера (по умолчанию 3). Поддерживается любое число $\ge 1$. |
 | `--rf <N>` | `-r <N>`, `--replication-factor <N>` | `./scripts/start_cluster.sh --rf 1` | Устанавливает фактор репликации для всех 3 узлов (допустимы значения `1`, `2`, `3`). |
 | `--sync` | `sync`, `--replication-mode sync` | `./scripts/start_cluster.sh --sync` | Включает строгую синхронную репликацию мутаций с ожиданием кворума. |
 | `--async` | `async`, `--replication-mode async` | `./scripts/start_cluster.sh --async` | Включает фоновую асинхронную репликацию для максимального TPS. |

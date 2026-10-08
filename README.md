@@ -63,17 +63,18 @@ Pre-built binaries are available in [`bin/`](bin/) for ARM Mac (`Mach-O 64-bit a
 The startup script automatically locates binaries (`bin/` or `target/release/`) and supports replication and GPU options:
 
 ```bash
-# 1. Full synchronous replication (RF=3, SYNC — default):
-./scripts/start_cluster.sh --rf 3 --sync
+# 1. Full synchronous replication (3 nodes, RF=3, SYNC — default):
+./scripts/start_cluster.sh --nodes 3 --rf 3 --sync
 
-# 2. Enable GPU acceleration (Apple Metal / NVIDIA CUDA):
-./scripts/start_cluster.sh --rf 3 --sync --enable-gpu true --gpu-offload-threshold 10000
+# 2. Custom node count (e.g. 5 nodes with RF=3 or 1 single node):
+./scripts/start_cluster.sh --nodes 5 --rf 3 --sync
+./scripts/start_cluster.sh --nodes 1
 
-# 3. Asynchronous replication (RF=3, ASYNC — maximum write TPS):
-./scripts/start_cluster.sh --rf 3 --async
+# 3. Enable GPU acceleration (Apple Metal / NVIDIA CUDA):
+./scripts/start_cluster.sh --nodes 3 --rf 3 --sync --enable-gpu true --gpu-offload-threshold 10000
 
-# 4. Pure distributed sharding (RF=1, SYNC — pure MPP):
-./scripts/start_cluster.sh --rf 1 --sync
+# 4. Asynchronous replication (RF=3, ASYNC — maximum write TPS):
+./scripts/start_cluster.sh --nodes 3 --rf 3 --async
 ```
 
 Output:

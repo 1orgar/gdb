@@ -55,6 +55,7 @@ Automated 3-node cluster scripts support dynamic binary discovery and the follow
 
 | Script Option | Aliases | Example | Description |
 | :--- | :--- | :--- | :--- |
+| `--nodes <N>` | `-n <N>` | `./scripts/start_cluster.sh --nodes 5` | Number of cluster nodes to spawn (default: 3). Supports any count $\ge 1$. |
 | `--rf <N>` | `-r <N>`, `--replication-factor <N>` | `./scripts/start_cluster.sh --rf 1` | Sets replication factor across nodes (`1`, `2`, `3`). |
 | `--sync` | `sync`, `--replication-mode sync` | `./scripts/start_cluster.sh --sync` | Enables synchronous quorum replication. |
 | `--async` | `async`, `--replication-mode async` | `./scripts/start_cluster.sh --async` | Enables asynchronous replication for maximum write throughput. |

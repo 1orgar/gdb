@@ -63,17 +63,18 @@
 Скрипт запуска автоматически находит бинарники (в `bin/` или `target/release/`) и поддерживает параметры репликации и GPU:
 
 ```bash
-# 1. Полная синхронная репликация (RF=3, SYNC — по умолчанию):
-./scripts/start_cluster.sh --rf 3 --sync
+# 1. Полная синхронная репликация (3 ноды, RF=3, SYNC — по умолчанию):
+./scripts/start_cluster.sh --nodes 3 --rf 3 --sync
 
-# 2. Включение GPU-ускорения (Apple Metal / NVIDIA CUDA):
-./scripts/start_cluster.sh --rf 3 --sync --enable-gpu true --gpu-offload-threshold 10000
+# 2. Выбор произвольного числа нод (например, 5 нод или одиночная нода):
+./scripts/start_cluster.sh --nodes 5 --rf 3 --sync
+./scripts/start_cluster.sh --nodes 1
 
-# 3. Асинхронная репликация (RF=3, ASYNC — максимальный TPS):
-./scripts/start_cluster.sh --rf 3 --async
+# 3. Включение GPU-ускорения (Apple Metal / NVIDIA CUDA):
+./scripts/start_cluster.sh --nodes 3 --rf 3 --sync --enable-gpu true --gpu-offload-threshold 10000
 
-# 4. Чистое распределенное шардирование без репликации (RF=1, SYNC):
-./scripts/start_cluster.sh --rf 1 --sync
+# 4. Асинхронная репликация (RF=3, ASYNC — максимальный TPS):
+./scripts/start_cluster.sh --nodes 3 --rf 3 --async
 ```
 
 Вывод:
