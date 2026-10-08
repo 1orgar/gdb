@@ -465,7 +465,103 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       border-top-color: #fff;
       animation: spin 0.8s ease-in-out infinite;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    /* Cluster & Resources Viewports */
+    .dashboard-container {
+      width: 100%;
+      height: 100%;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .dash-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 14px;
+    }
+    .dash-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-bright);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .dash-badge {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-weight: 600;
+    }
+    .dash-badge.green { background: rgba(46, 160, 67, 0.15); color: var(--success); border: 1px solid rgba(46, 160, 67, 0.3); }
+    .dash-badge.purple { background: rgba(188, 140, 255, 0.15); color: var(--purple); border: 1px solid rgba(188, 140, 255, 0.3); }
+    .dash-badge.orange { background: rgba(240, 136, 62, 0.15); color: var(--orange); border: 1px solid rgba(240, 136, 62, 0.3); }
+    .dash-badge.blue { background: rgba(88, 166, 255, 0.15); color: var(--accent); border: 1px solid rgba(88, 166, 255, 0.3); }
+    .dash-badge.gray { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); border: 1px solid rgba(139, 148, 158, 0.3); }
+
+    .dash-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+    .dash-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .card-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+    }
+    .card-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text-bright);
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    .card-subtext {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .dash-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .dash-section-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-bright);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .node-action-btn {
+      background: rgba(88, 166, 255, 0.1);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      color: var(--accent);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .node-action-btn:hover {
+      background: rgba(88, 166, 255, 0.25);
+    }
   </style>
 </head>
 <body>
@@ -474,7 +570,7 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
   <header>
     <div class="brand">
       <span>⚡ GDB STUDIO</span>
-      <span class="brand-badge">Workspace</span>
+      <span class="brand-badge">v0.3.1</span>
     </div>
 
     <div class="cluster-controls">
@@ -486,10 +582,8 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         <div class="status-dot"></div>
         <span id="cluster-status-text">Connected</span>
       </div>
-      <div class="node-pills">
-        <div class="node-pill active" title="Flight :8848 | HTTP :8847">Node 1 (Leader)</div>
-        <div class="node-pill" title="Flight :8849 | HTTP :8846">Node 2</div>
-        <div class="node-pill" title="Flight :8850 | HTTP :8845">Node 3</div>
+      <div class="node-pills" id="header-node-pills">
+        <div class="node-pill active" title="Flight :8848 | HTTP :8847">Peer #1</div>
       </div>
     </div>
   </header>
@@ -497,11 +591,12 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
   <!-- Workspace -->
   <div class="workspace">
 
-    <!-- Left Sidebar: Templates, Catalog, History -->
+    <!-- Left Sidebar: Templates, Catalog, Cluster, History -->
     <div class="sidebar">
       <div class="sidebar-tabs">
         <div class="sidebar-tab active" onclick="switchSidebarTab('templates', this)">Templates</div>
         <div class="sidebar-tab" onclick="switchSidebarTab('schema', this)">Schema</div>
+        <div class="sidebar-tab" onclick="switchSidebarTab('cluster', this)">Cluster</div>
         <div class="sidebar-tab" onclick="switchSidebarTab('history', this)">History</div>
       </div>
 
@@ -565,6 +660,23 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
           </div>
         </div>
 
+        <!-- Cluster View -->
+        <div id="tab-cluster" style="display:none;">
+          <div class="section-title">Ring Peer Nodes</div>
+          <div id="sidebar-cluster-nodes">
+            <div style="font-size:11px; color:var(--text-muted);">Loading cluster peers...</div>
+          </div>
+          <div class="section-title" style="margin-top: 14px;">Quick Actions</div>
+          <div class="template-item" onclick="switchView('cluster', document.getElementById('tab-btn-cluster'))">
+            <div class="template-title">Open Cluster Ring Dashboard</div>
+            <div class="template-query">View full topology &amp; tokens</div>
+          </div>
+          <div class="template-item" onclick="switchView('resources', document.getElementById('tab-btn-resources'))">
+            <div class="template-title">Open Storage &amp; Resources</div>
+            <div class="template-query">Inspect RAM, CSR, Compactions</div>
+          </div>
+        </div>
+
         <!-- History View -->
         <div id="tab-history" style="display:none;">
           <div class="section-title">Recent Queries</div>
@@ -600,6 +712,8 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
           <div class="nav-tabs">
             <div class="nav-tab active" id="tab-btn-graph" onclick="switchView('graph', this)">🕸️ Graph View</div>
             <div class="nav-tab" id="tab-btn-table" onclick="switchView('table', this)">📊 Table View</div>
+            <div class="nav-tab" id="tab-btn-cluster" onclick="switchView('cluster', this)">🌐 Cluster Ring</div>
+            <div class="nav-tab" id="tab-btn-resources" onclick="switchView('resources', this)">⚡ Storage &amp; Resources</div>
             <div class="nav-tab" id="tab-btn-unity" onclick="switchView('unity', this)">🎮 3D Unity View</div>
             <div class="nav-tab" id="tab-btn-json" onclick="switchView('json', this)">📜 Raw JSON</div>
           </div>
@@ -628,6 +742,138 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
             <thead><tr id="table-header"><th>No Data</th></tr></thead>
             <tbody id="table-body"><tr><td>Execute a query to view tabular results</td></tr></tbody>
           </table>
+        </div>
+
+        <!-- Cluster Ring Viewport -->
+        <div id="cluster-viewport" class="viewport">
+          <div class="dashboard-container">
+            <div class="dash-header">
+              <div class="dash-title">
+                <span>🌐 Leaderless Ring Cluster Topology</span>
+                <span id="cluster-rf-badge" class="dash-badge green">RF = 3 (SYNC)</span>
+                <span id="cluster-gpu-badge" class="dash-badge purple">GPU Disabled</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-secondary btn-sm" onclick="fetchClusterStatus()">🔄 Refresh Cluster</button>
+              </div>
+            </div>
+
+            <div class="dash-grid">
+              <div class="dash-card">
+                <div class="card-label">Topology Architecture</div>
+                <div class="card-value" style="font-size:16px; color:var(--accent);">LEADERLESS HASH RING</div>
+                <div class="card-subtext" id="cluster-sub-topology">Consistent hashing across peer nodes</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Replication Factor</div>
+                <div class="card-value" id="cluster-rf-val">RF = 3</div>
+                <div class="card-subtext" id="cluster-rf-sub">Mode: Synchronous Quorum</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Active Ring Nodes</div>
+                <div class="card-value" id="cluster-nodes-count">3 Peers</div>
+                <div class="card-subtext" id="cluster-partitions-count">8 Partitions per Node</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Hardware Acceleration</div>
+                <div class="card-value" id="cluster-gpu-val" style="font-size:16px;">Disabled</div>
+                <div class="card-subtext" id="cluster-gpu-sub">Pass --enable-gpu to activate</div>
+              </div>
+            </div>
+
+            <div class="dash-section">
+              <div class="dash-section-title">
+                <span>Ring Member Nodes</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="cluster-last-updated">Updated: Live</span>
+              </div>
+              <table class="data-grid" style="width:100%;">
+                <thead>
+                  <tr>
+                    <th>Node ID</th>
+                    <th>Role</th>
+                    <th>REST HTTP Endpoint</th>
+                    <th>Internal Flight Port</th>
+                    <th>Client Flight Port</th>
+                    <th>Assigned Token Range</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="cluster-nodes-table-body">
+                  <tr><td colspan="8" style="text-align:center;">Loading cluster nodes...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Resources & Storage Viewport -->
+        <div id="resources-viewport" class="viewport">
+          <div class="dashboard-container">
+            <div class="dash-header">
+              <div class="dash-title">
+                <span>⚡ System Resources &amp; In-Memory Storage</span>
+                <span id="res-health-badge" class="dash-badge green">Storage Healthy</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary btn-sm" id="btn-trigger-compact" onclick="triggerCompaction()">⚡ Compact CSR Now</button>
+                <button class="btn btn-secondary btn-sm" onclick="fetchResources()">🔄 Refresh</button>
+              </div>
+            </div>
+
+            <div class="dash-grid">
+              <div class="dash-card">
+                <div class="card-label">In-Memory Allocated RAM</div>
+                <div class="card-value" id="res-ram-val">0.00 MB</div>
+                <div class="card-subtext" id="res-ram-sub">CSR structure + Delta write buffers</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Total Vertices (CSR)</div>
+                <div class="card-value" id="res-v-val">0</div>
+                <div class="card-subtext">Compacted vertex index</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Total Graph Edges</div>
+                <div class="card-value" id="res-e-val">0</div>
+                <div class="card-subtext" id="res-edges-breakdown">CSR: 0 | Delta: 0</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Background Compactions</div>
+                <div class="card-value" id="res-compaction-val">0</div>
+                <div class="card-subtext">Delta to Chunked-CSR merges</div>
+              </div>
+            </div>
+
+            <div class="dash-grid">
+              <div class="dash-card" style="grid-column: span 2;">
+                <div class="card-label">GPU Acceleration &amp; Offload Engine</div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+                  <div>
+                    <div class="card-value" id="res-gpu-name" style="font-size:18px;">Apple Metal UMA</div>
+                    <div class="card-subtext" id="res-gpu-device" style="margin-top:2px;">Device #0 | Offload Threshold: 10,000 edges</div>
+                  </div>
+                  <span id="res-gpu-status-badge" class="dash-badge gray">Disabled</span>
+                </div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:8px;">
+                  Supported kernels: BFS Frontier Expansion, Vectorized PageRank, SIMD Graph Kernel
+                </div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Cloud Tiered Storage (S3)</div>
+                <div class="card-value" id="res-s3-val" style="font-size:18px;">Disabled</div>
+                <div class="card-subtext" id="res-s3-sub">Local WAL &amp; memory persistence only</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Executed Query Statistics</div>
+                <div class="card-value" id="res-queries-val">0</div>
+                <div class="card-subtext" id="res-queries-sub">OK: 0 | Errors: 0</div>
+              </div>
+            </div>
+
+            <div id="compaction-alert" style="display:none; padding:10px 14px; border-radius:6px; font-size:12px; background:rgba(63,185,80,0.15); border:1px solid #238636; color:#3fb950;">
+              Compaction completed successfully!
+            </div>
+          </div>
         </div>
 
         <!-- 3D Unity Viewport -->
@@ -666,9 +912,9 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span>GDB Studio v0.3.0</span>
-      <span>Cluster: Leaderless Ring (3 Peers)</span>
-      <span>Acceleration: Apple Metal UMA / CPU SIMD</span>
+      <span id="footer-version">GDB Studio v0.3.1</span>
+      <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
+      <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>
     <div class="footer-right">
       <span id="footer-connection">Connected to http://localhost:8847</span>
@@ -1224,6 +1470,10 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       }
       if (viewName === 'unity') {
         renderUnityGraph();
+      } else if (viewName === 'cluster') {
+        fetchClusterStatus();
+      } else if (viewName === 'resources') {
+        fetchResources();
       }
     }
 
@@ -1267,7 +1517,9 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       el.classList.add('active');
       document.getElementById('tab-templates').style.display = tabName === 'templates' ? 'block' : 'none';
       document.getElementById('tab-schema').style.display = tabName === 'schema' ? 'block' : 'none';
+      document.getElementById('tab-cluster').style.display = tabName === 'cluster' ? 'block' : 'none';
       document.getElementById('tab-history').style.display = tabName === 'history' ? 'block' : 'none';
+      if (tabName === 'cluster') fetchClusterStatus();
     }
 
     function setQuery(text) {
@@ -1301,28 +1553,217 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       }
     });
 
-    // Check Cluster Health on Load
-    async function checkHealth() {
+    // Cluster Status Polling & Rendering
+    async function fetchClusterStatus() {
       const endpoint = document.getElementById('cluster-url').value.trim();
-      const pill = document.getElementById('cluster-status-pill');
-      const text = document.getElementById('cluster-status-text');
       try {
-        const resp = await fetch(`${endpoint}/health`, { mode: 'cors' });
+        const resp = await fetch(`/api/cluster/status?endpoint=${encodeURIComponent(endpoint)}`);
         if (resp.ok) {
-          pill.className = 'status-indicator';
-          text.textContent = 'Connected (Healthy)';
-        } else {
-          pill.className = 'status-indicator offline';
-          text.textContent = 'HTTP Error';
+          const data = await resp.json();
+          updateClusterUI(data);
         }
       } catch (err) {
-        // Fallback: studio proxy health
+        console.error("Failed to fetch cluster status:", err);
+      }
+    }
+
+    function updateClusterUI(data) {
+      const isConnected = data.status === 'connected';
+      const pill = document.getElementById('cluster-status-pill');
+      const text = document.getElementById('cluster-status-text');
+      if (isConnected) {
         pill.className = 'status-indicator';
-        text.textContent = 'Online (Proxy)';
+        text.textContent = `Connected (RF=${data.replication_factor || 3}, ${data.total_nodes || 3} Nodes)`;
+      } else {
+        pill.className = 'status-indicator offline';
+        text.textContent = 'Disconnected';
+      }
+
+      // Update Header Node Pills
+      const nodePillsContainer = document.getElementById('header-node-pills');
+      if (nodePillsContainer && data.ring_nodes && data.ring_nodes.length > 0) {
+        nodePillsContainer.innerHTML = '';
+        data.ring_nodes.forEach(n => {
+          const div = document.createElement('div');
+          const isCurrent = data.node_id === n.node_id;
+          div.className = `node-pill ${isCurrent ? 'active' : ''}`;
+          div.title = `HTTP: ${n.http_url} | Flight: :${n.flight_port}`;
+          div.textContent = `Peer #${n.node_id}`;
+          div.onclick = () => {
+            if (n.http_url) {
+              document.getElementById('cluster-url').value = n.http_url;
+              fetchClusterStatus();
+              fetchResources();
+            }
+          };
+          nodePillsContainer.appendChild(div);
+        });
+      }
+
+      // Update Cluster Viewport Badges & Cards
+      const rfBadge = document.getElementById('cluster-rf-badge');
+      if (rfBadge) rfBadge.textContent = `RF = ${data.replication_factor || 3} (${(data.replication_mode || 'SYNC').toUpperCase()})`;
+      const gpuBadge = document.getElementById('cluster-gpu-badge');
+      if (gpuBadge) {
+        if (data.gpu_enabled) {
+          gpuBadge.className = 'dash-badge green';
+          gpuBadge.textContent = `GPU Active (#${data.gpu_device || 0})`;
+        } else {
+          gpuBadge.className = 'dash-badge gray';
+          gpuBadge.textContent = 'GPU Disabled';
+        }
+      }
+      const rfVal = document.getElementById('cluster-rf-val');
+      if (rfVal) rfVal.textContent = `RF = ${data.replication_factor || 3}`;
+      const rfSub = document.getElementById('cluster-rf-sub');
+      if (rfSub) rfSub.textContent = `Mode: ${data.replication_mode || 'SYNC'}`;
+      const nodesCount = document.getElementById('cluster-nodes-count');
+      if (nodesCount) nodesCount.textContent = `${data.total_nodes || 3} Peers`;
+      const partitionsCount = document.getElementById('cluster-partitions-count');
+      if (partitionsCount) partitionsCount.textContent = `${data.partitions || 8} Partitions per Node`;
+      const gpuVal = document.getElementById('cluster-gpu-val');
+      if (gpuVal) gpuVal.textContent = data.gpu_enabled ? `${data.gpu_backend || 'Metal'} (#${data.gpu_device || 0})` : 'Disabled';
+      const gpuSub = document.getElementById('cluster-gpu-sub');
+      if (gpuSub) gpuSub.textContent = data.gpu_enabled ? `Threshold: ${data.gpu_threshold || 10000} edges` : 'Pass --enable-gpu to activate';
+
+      // Update Table of Nodes
+      const tbody = document.getElementById('cluster-nodes-table-body');
+      if (tbody && data.ring_nodes) {
+        tbody.innerHTML = '';
+        data.ring_nodes.forEach(n => {
+          const tr = document.createElement('tr');
+          const isCurrent = data.node_id === n.node_id;
+          tr.innerHTML = `
+            <td style="font-weight:600; color:var(--text-bright);">Peer Node #${n.node_id} ${isCurrent ? '<span style="font-size:10px; color:var(--accent);">(Current)</span>' : ''}</td>
+            <td><span class="dash-badge blue">Peer</span></td>
+            <td><code>${n.http_url}</code></td>
+            <td><code>:${n.flight_port}</code></td>
+            <td><code>:${n.client_flight_port || '-'}</code></td>
+            <td><code>u % ${data.total_nodes || 3} == ${n.node_id - 1}</code></td>
+            <td><span class="dash-badge green">UP</span></td>
+            <td><button class="node-action-btn" onclick="document.getElementById('cluster-url').value='${n.http_url}'; fetchClusterStatus(); fetchResources();">Connect</button></td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+
+      // Update Sidebar Cluster Tab
+      const sbNodes = document.getElementById('sidebar-cluster-nodes');
+      if (sbNodes && data.ring_nodes) {
+        sbNodes.innerHTML = '';
+        data.ring_nodes.forEach(n => {
+          const item = document.createElement('div');
+          item.className = 'template-item';
+          item.onclick = () => {
+            document.getElementById('cluster-url').value = n.http_url;
+            fetchClusterStatus();
+            fetchResources();
+          };
+          item.innerHTML = `<div class="template-title">Node #${n.node_id} (:${n.flight_port})</div><div class="template-query">${n.http_url}</div>`;
+          sbNodes.appendChild(item);
+        });
+      }
+
+      // Update footer
+      const footerCluster = document.getElementById('footer-cluster-info');
+      if (footerCluster) footerCluster.textContent = `Cluster: Leaderless Ring (${data.total_nodes || 3} Nodes, RF=${data.replication_factor || 3})`;
+      const footerGpu = document.getElementById('footer-gpu-info');
+      if (footerGpu) footerGpu.textContent = `GPU: ${data.gpu_enabled ? `${data.gpu_backend || 'Metal'} (#${data.gpu_device || 0})` : 'Disabled'}`;
+    }
+
+    async function fetchResources() {
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      try {
+        const resp = await fetch(`/api/resources?endpoint=${encodeURIComponent(endpoint)}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          updateResourcesUI(data);
+        }
+      } catch (err) {
+        console.error("Failed to fetch resources:", err);
+      }
+    }
+
+    function updateResourcesUI(data) {
+      const ramMb = ((data.estimated_memory_bytes || 0) / 1024 / 1024).toFixed(2);
+      const ramVal = document.getElementById('res-ram-val');
+      if (ramVal) ramVal.textContent = `${ramMb} MB`;
+      const ramSub = document.getElementById('res-ram-sub');
+      if (ramSub) ramSub.textContent = `CSR: ${data.csr_edges || 0} edges | MemTable: ${data.memtable_edges || 0} edges`;
+
+      const vVal = document.getElementById('res-v-val');
+      if (vVal) vVal.textContent = (data.total_vertices || 0).toLocaleString();
+      const eVal = document.getElementById('res-e-val');
+      if (eVal) eVal.textContent = (data.total_edges || 0).toLocaleString();
+      const edgesBreakdown = document.getElementById('res-edges-breakdown');
+      if (edgesBreakdown) edgesBreakdown.textContent = `CSR: ${data.csr_edges || 0} | MemTable: ${data.memtable_edges || 0}`;
+
+      const compVal = document.getElementById('res-compaction-val');
+      if (compVal) compVal.textContent = (data.compactions_total || 0).toLocaleString();
+
+      const gpuName = document.getElementById('res-gpu-name');
+      if (gpuName) gpuName.textContent = data.gpu_backend || 'Apple Metal UMA';
+      const gpuDev = document.getElementById('res-gpu-device');
+      if (gpuDev) gpuDev.textContent = `Device #${data.gpu_device || 0} | Offload Threshold: ${(data.gpu_threshold || 10000).toLocaleString()} edges`;
+      const gpuBadge = document.getElementById('res-gpu-status-badge');
+      if (gpuBadge) {
+        if (data.gpu_enabled) {
+          gpuBadge.className = 'dash-badge green';
+          gpuBadge.textContent = 'Active & Ready';
+        } else {
+          gpuBadge.className = 'dash-badge gray';
+          gpuBadge.textContent = 'Disabled (--enable-gpu)';
+        }
+      }
+
+      const s3Val = document.getElementById('res-s3-val');
+      if (s3Val) s3Val.textContent = data.s3_configured ? 'Enabled' : 'Disabled';
+      const s3Sub = document.getElementById('res-s3-sub');
+      if (s3Sub) s3Sub.textContent = data.s3_configured ? `Bucket: ${data.s3_bucket}` : 'Pass --s3-bucket to activate';
+
+      const qVal = document.getElementById('res-queries-val');
+      if (qVal) qVal.textContent = (data.queries_total || 0).toLocaleString();
+      const qSub = document.getElementById('res-queries-sub');
+      if (qSub) qSub.textContent = `OK: ${data.queries_ok || 0} | Errors: ${data.queries_error || 0}`;
+    }
+
+    async function triggerCompaction() {
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      const btn = document.getElementById('btn-trigger-compact');
+      const alertBox = document.getElementById('compaction-alert');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> Compacting...';
+      }
+      try {
+        const resp = await fetch(`/api/compact?endpoint=${encodeURIComponent(endpoint)}`, { method: 'POST' });
+        if (resp.ok) {
+          if (alertBox) {
+            alertBox.style.display = 'block';
+            alertBox.textContent = 'CSR Compaction completed and replicated across cluster!';
+            setTimeout(() => { alertBox.style.display = 'none'; }, 4000);
+          }
+          await fetchResources();
+        }
+      } catch (err) {
+        console.error("Compaction failed:", err);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '⚡ Compact CSR Now';
+        }
+      }
+    }
+
+    // Check Cluster Health on Load and periodic background refresh
+    async function checkHealth() {
+      await fetchClusterStatus();
+      if (currentView === 'resources') {
+        await fetchResources();
       }
     }
     checkHealth();
-    setInterval(checkHealth, 5000);
+    setInterval(checkHealth, 3000);
   </script>
 </body>
 </html>

@@ -79,15 +79,19 @@ impl Default for CudaComputeBackend {
 
 impl CudaComputeBackend {
     pub fn new() -> Self {
+        Self::with_device(0)
+    }
+
+    pub fn with_device(device_id: u32) -> Self {
         let name = if Self::is_available() {
-            "NVIDIA CUDA Compute (Linux Device #0)"
+            format!("NVIDIA CUDA Compute (Linux Device #{})", device_id)
         } else {
-            "NVIDIA CUDA Driver Emulation (CPU Vectorized)"
+            format!("NVIDIA CUDA Driver Emulation (CPU Vectorized, Target Device #{})", device_id)
         };
 
         Self {
-            device_name: name.to_string(),
-            device_id: 0,
+            device_name: name,
+            device_id: device_id as i32,
         }
     }
 

@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -35,6 +35,11 @@ struct Args {
 struct AppState {
     default_cluster_url: String,
     http_client: reqwest::Client,
+}
+
+#[derive(Debug, Deserialize)]
+struct EndpointParam {
+    endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,22 +95,131 @@ async fn handle_health() -> impl IntoResponse {
     }))
 }
 
-async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let url = format!("{}/health", state.default_cluster_url);
-    let is_up = match state.http_client.get(&url).send().await {
-        Ok(res) => res.status().is_success(),
-        Err(_) => false,
-    };
+async fn handle_cluster_status(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let cluster_url = format!("{}/cluster", target.trim_end_matches('/'));
+
+    match state.http_client.get(&cluster_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            if let Ok(info) = res.json::<serde_json::Value>().await {
+                return Json(serde_json::json!({
+                    "cluster_url": target,
+                    "status": "connected",
+                    "node_id": info.get("node_id"),
+                    "role": info.get("role"),
+                    "cluster_topology": info.get("cluster_topology"),
+                    "replication_factor": info.get("replication_factor"),
+                    "effective_replication_factor": info.get("effective_replication_factor"),
+                    "replication_mode": info.get("replication_mode"),
+                    "total_nodes": info.get("total_nodes"),
+                    "partitions": info.get("partitions"),
+                    "ring_nodes": info.get("ring_nodes"),
+                    "gpu_enabled": info.get("gpu_enabled"),
+                    "gpu_device": info.get("gpu_device"),
+                    "gpu_backend": info.get("gpu_backend"),
+                    "gpu_threshold": info.get("gpu_threshold")
+                }));
+            }
+        }
+        _ => {}
+    }
 
     Json(serde_json::json!({
-        "cluster_url": state.default_cluster_url,
-        "status": if is_up { "connected" } else { "disconnected" },
-        "nodes": [
-            { "id": 1, "endpoint": "http://localhost:8847", "flight_port": 8848, "role": "Leader" },
-            { "id": 2, "endpoint": "http://localhost:8846", "flight_port": 8849, "role": "Follower" },
-            { "id": 3, "endpoint": "http://localhost:8845", "flight_port": 8850, "role": "Follower" }
-        ]
+        "cluster_url": target,
+        "status": "disconnected",
+        "nodes": []
     }))
+}
+
+async fn handle_proxy_cluster(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let url = format!("{}/cluster", target.trim_end_matches('/'));
+    match state.http_client.get(&url).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+                Json(json),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Failed to reach cluster at {}: {}", url, e) })),
+        ),
+    }
+}
+
+async fn handle_proxy_resources(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let url = format!("{}/resources", target.trim_end_matches('/'));
+    match state.http_client.get(&url).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+                Json(json),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Failed to reach cluster at {}: {}", url, e) })),
+        ),
+    }
+}
+
+async fn handle_proxy_gpu(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let url = format!("{}/gpu", target.trim_end_matches('/'));
+    match state.http_client.get(&url).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+                Json(json),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Failed to reach cluster at {}: {}", url, e) })),
+        ),
+    }
+}
+
+async fn handle_proxy_compact(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let url = format!("{}/compact", target.trim_end_matches('/'));
+    match state.http_client.post(&url).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+                Json(json),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Failed to trigger compaction at {}: {}", url, e) })),
+        ),
+    }
 }
 
 async fn handle_query(
@@ -281,6 +395,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(handle_health))
         .route("/api/query", post(handle_query))
         .route("/api/cluster/status", get(handle_cluster_status))
+        .route("/api/cluster", get(handle_proxy_cluster))
+        .route("/api/resources", get(handle_proxy_resources))
+        .route("/api/gpu", get(handle_proxy_gpu))
+        .route("/api/compact", post(handle_proxy_compact))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

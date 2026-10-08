@@ -262,13 +262,25 @@ fn show_gpu(client: &reqwest::blocking::Client, endpoint: &str) {
     match client.get(&url).timeout(Duration::from_secs(2)).send() {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(data) = resp.json::<Value>() {
+                let is_enabled = data["enabled"].as_bool().unwrap_or(false);
+                let status_str = if is_enabled {
+                    "\x1b[1;32mActive & Ready\x1b[0m"
+                } else {
+                    "\x1b[1;33mDisabled (pass --enable-gpu to activate)\x1b[0m"
+                };
+                let device_id = data["device_id"].as_u64().unwrap_or(0);
+                let backend = data["backend"].as_str().unwrap_or("Apple Metal");
+                let threshold = data["threshold_edges"].as_u64().unwrap_or(10_000);
+                let mem_arch = data["memory_model"].as_str().unwrap_or("UMA Zero-Copy");
+
                 let cols = vec!["GPU Attribute".to_string(), "Status / Value".to_string()];
                 let rows = vec![
-                    vec![Value::String("Compute Accelerator".into()), Value::String(data["backend"].as_str().unwrap_or("Apple Metal").into())],
-                    vec![Value::String("Memory Architecture".into()), Value::String(data["memory_model"].as_str().unwrap_or("UMA Zero-Copy").into())],
-                    vec![Value::String("Offload Threshold".into()), Value::String(format!("{} edges", data["threshold_edges"]))],
-                    vec![Value::String("Kernel Status".into()), Value::String("\x1b[1;32mActive & Ready\x1b[0m".into())],
-                    vec![Value::String("Supported Kernels".into()), Value::String("Parallel BFS Frontier, PageRank MSL, Similarity".into())],
+                    vec![Value::String("Hardware Status".into()), Value::String(status_str.into())],
+                    vec![Value::String("Compute Accelerator".into()), Value::String(backend.into())],
+                    vec![Value::String("Selected Device ID".into()), Value::String(format!("#{}", device_id))],
+                    vec![Value::String("Offload Threshold".into()), Value::String(format!("{} edges", threshold))],
+                    vec![Value::String("Memory Architecture".into()), Value::String(mem_arch.into())],
+                    vec![Value::String("Supported Kernels".into()), Value::String("Parallel BFS Frontier, PageRank MSL/CUDA, Similarity".into())],
                 ];
 
                 print_ascii_table(&cols, &rows);
@@ -319,9 +331,11 @@ fn execute_query(
         match mode {
             ClientMode::Cluster { client, endpoint } => show_gpu(client, endpoint),
             ClientMode::Local { .. } => {
-                let disp = gdb_gpu::GpuDispatcher::new();
+                let disp = gdb_gpu::GpuDispatcher::disabled();
                 println!("\n\x1b[1;36m=== Local Hardware Acceleration ===\x1b[0m");
+                println!("  Status:     Disabled (default)");
                 println!("  Backend:    {}", disp.backend_name());
+                println!("  Device:     #{}", disp.device_id);
                 println!("  Threshold:  {} edges\n", disp.threshold_edges);
             }
         }

@@ -45,8 +45,12 @@ impl Default for MetalComputeBackend {
 
 impl MetalComputeBackend {
     pub fn new() -> Self {
+        Self::with_device(0)
+    }
+
+    pub fn with_device(device_id: u32) -> Self {
         Self {
-            device_name: "Apple Silicon Metal (UMA Zero-Copy)".into(),
+            device_name: format!("Apple Silicon Metal Device #{} (UMA Zero-Copy)", device_id),
         }
     }
 }

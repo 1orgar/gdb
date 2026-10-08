@@ -10,25 +10,54 @@ use std::sync::Arc;
 /// based on work-size thresholds and hardware availability.
 pub struct GpuDispatcher {
     backend: Arc<dyn GpuComputeBackend>,
+    /// Whether GPU hardware acceleration is enabled
+    pub enabled: bool,
+    /// Selected GPU device index
+    pub device_id: u32,
     /// Minimum number of edges required to trigger GPU hardware dispatch
     pub threshold_edges: usize,
 }
 
 impl Default for GpuDispatcher {
     fn default() -> Self {
-        Self::new()
+        Self::disabled()
     }
 }
 
 impl GpuDispatcher {
-    pub fn new() -> Self {
+    /// Creates a disabled dispatcher running purely on CPU SIMD fallback.
+    pub fn disabled() -> Self {
+        Self {
+            backend: Arc::new(CpuFallbackBackend),
+            enabled: false,
+            device_id: 0,
+            threshold_edges: 10_000,
+        }
+    }
+
+    /// Creates an enabled dispatcher (convenience helper).
+    pub fn enabled(device_id: u32, threshold_edges: usize) -> Self {
+        Self::new(true, device_id, threshold_edges)
+    }
+
+    /// Creates a new dispatcher with explicit enabled flag, device id, and offload threshold.
+    pub fn new(enabled: bool, device_id: u32, threshold_edges: usize) -> Self {
+        if !enabled {
+            return Self {
+                backend: Arc::new(CpuFallbackBackend),
+                enabled: false,
+                device_id,
+                threshold_edges,
+            };
+        }
+
         #[cfg(target_os = "macos")]
-        let backend: Arc<dyn GpuComputeBackend> = Arc::new(MetalComputeBackend::new());
+        let backend: Arc<dyn GpuComputeBackend> = Arc::new(MetalComputeBackend::with_device(device_id));
 
         #[cfg(target_os = "linux")]
         let backend: Arc<dyn GpuComputeBackend> = {
             if CudaComputeBackend::is_available() {
-                Arc::new(CudaComputeBackend::new())
+                Arc::new(CudaComputeBackend::with_device(device_id))
             } else {
                 Arc::new(CpuFallbackBackend)
             }
@@ -39,7 +68,9 @@ impl GpuDispatcher {
 
         Self {
             backend,
-            threshold_edges: 10_000,
+            enabled: true,
+            device_id,
+            threshold_edges,
         }
     }
 
@@ -48,8 +79,20 @@ impl GpuDispatcher {
         self
     }
 
+    pub fn with_device(mut self, device_id: u32) -> Self {
+        self.device_id = device_id;
+        if self.enabled {
+            return Self::new(true, device_id, self.threshold_edges);
+        }
+        self
+    }
+
     pub fn backend_name(&self) -> &'static str {
-        self.backend.name()
+        if !self.enabled {
+            "CPU Vectorized Engine (GPU Disabled)"
+        } else {
+            self.backend.name()
+        }
     }
 
     /// Dispatches parallel Breadth-First Search to GPU or CPU.
@@ -60,10 +103,11 @@ impl GpuDispatcher {
         max_depth: u32,
     ) -> GdbResult<BfsResult> {
         let edges = csr.edge_count();
-        if edges >= self.threshold_edges {
+        if self.enabled && edges >= self.threshold_edges {
             tracing::info!(
-                "Dispatching BFS to GPU accelerator ({}) for {} edges",
+                "Dispatching BFS to GPU accelerator ({}, device #{}) for {} edges",
                 self.backend.name(),
+                self.device_id,
                 edges
             );
             self.backend.parallel_bfs(csr, start_vid, max_depth)
@@ -80,10 +124,11 @@ impl GpuDispatcher {
         iterations: usize,
     ) -> GdbResult<PageRankResult> {
         let edges = csr.edge_count();
-        if edges >= self.threshold_edges {
+        if self.enabled && edges >= self.threshold_edges {
             tracing::info!(
-                "Dispatching PageRank to GPU accelerator ({}) for {} edges",
+                "Dispatching PageRank to GPU accelerator ({}, device #{}) for {} edges",
                 self.backend.name(),
+                self.device_id,
                 edges
             );
             self.backend.pagerank(csr, damping, iterations)

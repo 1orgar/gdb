@@ -200,8 +200,10 @@ A next-generation, high-performance distributed HTAP graph database engine built
    - Клик на любой узел или связь отображает карточку с ID, меткой, свойствами и списком смежных ребер (двунаправленный мост Canvas/Unity к Inspector).
 4. **Табличное представление (Table View):**
    - Сортируемая сетка данных с фиксацией заголовков для аналитических запросов (`CALL algo.pageRank()`, `CALL algo.louvain()`).
-5. **Мониторинг кластера:**
-   - Отображение статуса нод (Peer 1 :8847, Peer 2 :8846, Peer 3 :8845) и возможность динамической смены URL подключения.
+5. **Расширенный мониторинг кластера и ресурсов в реальном времени:**
+   - **Вкладка `🌐 Cluster Ring`:** Интерактивная таблица всех пиров кольца хеширования (Node ID, HTTP/Flight порты, назначенные диапазоны токенов, статус UP, кнопка моментального переключения сессии к любой ноде).
+   - **Вкладка `⚡ Storage & Resources`:** Мониторинг выделенной оперативной памяти (RAM RSS, CSR-структуры vs буферы MemTable), объемов графа (вершины и ребра), статус облачного S3-хранилища и кнопка ручного запуска компактизации (`⚡ Compact CSR Now`).
+   - **Карточка аппаратного GPU-ускорения:** Отображение статуса (Active / Disabled), выбранного индекса GPU (`--gpu-device`), вычислительного бэкенда (Metal / CUDA / CPU SIMD) и порога офлоада (`--gpu-offload-threshold`).
 
 ### 🚀 Быстрый запуск GDB Studio:
 
@@ -239,7 +241,7 @@ CLI (`bin/gdb-cli` и `bin/amd64/gdb-cli`) автоматически прове
   / ____/ / __ \/ __ )
  / / __  / / / / __  |
 / /_/ / / /_/ / /_/ / 
-\____(_)_____/_____/  Interactive Cypher Shell v0.3.0
+\____(_)_____/_____/  Interactive Cypher Shell v0.3.1
 
 [✓] Connected to GDB Node at http://localhost:8847 (Latency: 0.8ms)
     Type 'help' or '\?' for help. Press Ctrl+D to exit.
@@ -252,7 +254,7 @@ CLI (`bin/gdb-cli` и `bin/amd64/gdb-cli`) автоматически прове
 | :--- | :--- |
 | `SHOW CLUSTER` | Таблица всех равноправных узлов кольца: Node ID, роль (Peer), порты Flight/HTTP, фактор репликации (RF) и режим (sync/async). |
 | `SHOW RESOURCES` | Метрики потребления: объем памяти (RSS), аптайм, QPS, кол-во вершин и ребер (CSR vs MemTable), компактизации. |
-| `SHOW GPU` | Статус графического ускорителя: активный бэкенд (Apple Metal / CUDA / CPU SIMD), UMA Zero-Copy, порог офлоада. |
+| `SHOW GPU` | Статус графического ускорителя: активный статус, выбранный индекс устройства, бэкенд (Apple Metal / CUDA / CPU SIMD), UMA Zero-Copy, порог офлоада. |
 | `:connect <url>` | Динамическое переключение текущей сессии CLI на любой другой узел кольца (например, `:connect http://localhost:8846`). |
 
 #### Примеры вывода команд:
@@ -282,15 +284,16 @@ gdb> SHOW RESOURCES;
 +------------------+---------+
 
 gdb> SHOW GPU;
-+------------------+------------------------------------+
-| Parameter        | Value                              |
-+------------------+------------------------------------+
-| Available        | true                               |
-| Backend          | Apple Metal Compute (UMA Zero-Copy)|
-| Device           | Apple M5                           |
-| Dispatch Status  | Active                             |
-| Offload Threshold| 10000 edges                        |
-+------------------+------------------------------------+
++---------------------+---------------------------------------------------+
+| GPU Attribute       | Status / Value                                    |
++---------------------+---------------------------------------------------+
+| Hardware Status     | Active & Ready                                    |
+| Compute Accelerator | Apple Metal                                       |
+| Selected Device ID  | #0                                                |
+| Offload Threshold   | 10000 edges                                       |
+| Memory Architecture | UMA Zero-Copy                                     |
+| Supported Kernels   | Parallel BFS Frontier, PageRank MSL/CUDA, Simil...|
++---------------------+---------------------------------------------------+
 ```
 
 ### Примеры запросов данных:

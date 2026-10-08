@@ -24,7 +24,12 @@ mod tests {
         ];
         let csr = ChunkedCsr::from_edges(edges);
 
-        let dispatcher = GpuDispatcher::new().with_threshold(1);
+        let dispatcher = GpuDispatcher::enabled(0, 1);
+        assert!(dispatcher.enabled);
+        assert_eq!(dispatcher.device_id, 0);
+
+        let default_disp = GpuDispatcher::default();
+        assert!(!default_disp.enabled);
 
         // Test BFS from Vertex 1
         let bfs_res = dispatcher.bfs(&csr, VertexId(1), 2).unwrap();

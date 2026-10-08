@@ -114,6 +114,18 @@ struct Args {
     /// Cluster architecture mode (compatibility alias: 'ring', 'replication', 'sharding')
     #[arg(long, default_value = "ring")]
     cluster_mode: String,
+
+    /// Enable hardware GPU acceleration (Metal on macOS, CUDA on Linux). Disabled by default.
+    #[arg(long, env = "GDB_ENABLE_GPU", default_value_t = false)]
+    enable_gpu: bool,
+
+    /// Select GPU device index when multiple GPUs are available (default: 0)
+    #[arg(long, env = "GDB_GPU_DEVICE", default_value_t = 0)]
+    gpu_device: u32,
+
+    /// Minimum number of edges required to trigger GPU hardware offload (default: 10000)
+    #[arg(long, env = "GDB_GPU_THRESHOLD", default_value_t = 10_000)]
+    gpu_offload_threshold: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -146,6 +158,8 @@ struct AppState {
     total_query_duration_us: Arc<AtomicU64>,
     replications_count: Arc<AtomicU64>,
     compactions_count: Arc<AtomicU64>,
+    gpu_enabled: bool,
+    gpu_device: u32,
     gpu_backend: String,
     gpu_threshold: usize,
     s3_manager: Option<Arc<S3StorageManager>>,
@@ -185,6 +199,10 @@ async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
         "assigned_tokens": format!("Primary token: u % {} == {}", total_nodes, state.node_id.saturating_sub(1)),
         "s3_tiering": if state.s3_manager.is_some() { "Enabled" } else { "Disabled" },
         "s3_bucket": state.s3_bucket.clone().unwrap_or_default(),
+        "gpu_enabled": state.gpu_enabled,
+        "gpu_device": state.gpu_device,
+        "gpu_backend": state.gpu_backend,
+        "gpu_threshold": state.gpu_threshold,
         "status": "UP"
     }))
 }
@@ -221,7 +239,11 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
         "uptime_seconds": uptime,
         "estimated_memory_bytes": estimated_memory,
         "s3_configured": state.s3_manager.is_some(),
-        "s3_bucket": state.s3_bucket.clone().unwrap_or_default()
+        "s3_bucket": state.s3_bucket.clone().unwrap_or_default(),
+        "gpu_enabled": state.gpu_enabled,
+        "gpu_device": state.gpu_device,
+        "gpu_backend": state.gpu_backend,
+        "gpu_threshold": state.gpu_threshold
     }))
 }
 
@@ -255,11 +277,23 @@ async fn handle_snapshot(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn handle_gpu(State(state): State<AppState>) -> impl IntoResponse {
+    let memory_model = if state.gpu_enabled {
+        #[cfg(target_os = "macos")]
+        { "Unified Memory Architecture (Zero-Copy UMA)" }
+        #[cfg(not(target_os = "macos"))]
+        { "Dedicated PCIe HBM2/GDDR Host-Device" }
+    } else {
+        "Host RAM (CPU SIMD Fallback)"
+    };
+
     Json(serde_json::json!({
+        "enabled": state.gpu_enabled,
+        "device_id": state.gpu_device,
         "backend": state.gpu_backend,
         "threshold_edges": state.gpu_threshold,
-        "memory_model": "Unified Memory Architecture (Zero-Copy)",
-        "active": true,
+        "memory_model": memory_model,
+        "active": state.gpu_enabled,
+        "status": if state.gpu_enabled { "Active" } else { "Disabled (pass --enable-gpu)" },
         "supported_kernels": [
             "Parallel BFS Frontier Expansion",
             "Vectorized PageRank Iteration",
@@ -289,6 +323,7 @@ async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let estimated_memory = (csr_e * 32) + (memtable_e * 64) + 20_971_520;
     let is_sync = if state.replication_mode == ReplicationMode::Sync { 1 } else { 0 };
     let rf = state.replication_factor;
+    let gpu_active = if state.gpu_enabled { 1 } else { 0 };
 
     let body = format!(
         r#"# HELP gdb_uptime_seconds Process uptime in seconds
@@ -342,7 +377,7 @@ gdb_cluster_replications_total {}
 
 # HELP gdb_gpu_active GPU hardware acceleration status (1 for active)
 # TYPE gdb_gpu_active gauge
-gdb_gpu_active 1
+gdb_gpu_active {}
 
 # HELP gdb_memory_allocated_bytes Estimated memory allocated by process
 # TYPE gdb_memory_allocated_bytes gauge
@@ -364,6 +399,7 @@ gdb_memory_allocated_bytes {}
         rf,
         is_sync,
         replications,
+        gpu_active,
         estimated_memory
     );
 
@@ -870,10 +906,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" Distributed HTAP In-Memory Graph Database (Nebula Alternative)");
     println!("\x1b[0m");
 
-    let gpu_dispatcher = GpuDispatcher::new();
+    let gpu_dispatcher = GpuDispatcher::new(args.enable_gpu, args.gpu_device, args.gpu_offload_threshold);
     println!(
-        "\x1b[1;32m[+] Hardware Acceleration:\x1b[0m {}",
-        gpu_dispatcher.backend_name()
+        "\x1b[1;32m[+] Hardware Acceleration:\x1b[0m {} (Status: {}, Device: #{}, Threshold: {} edges)",
+        gpu_dispatcher.backend_name(),
+        if args.enable_gpu { "Active" } else { "Disabled" },
+        args.gpu_device,
+        args.gpu_offload_threshold
     );
     println!(
         "\x1b[1;32m[+] Node ID:\x1b[0m {} | \x1b[1;32mPartitions:\x1b[0m {}",
@@ -997,6 +1036,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_query_duration_us: Arc::new(AtomicU64::new(0)),
         replications_count: Arc::new(AtomicU64::new(0)),
         compactions_count: Arc::new(AtomicU64::new(0)),
+        gpu_enabled: args.enable_gpu,
+        gpu_device: args.gpu_device,
         gpu_backend: gpu_dispatcher.backend_name().to_string(),
         gpu_threshold: gpu_dispatcher.threshold_edges,
         s3_manager,
