@@ -1,11 +1,11 @@
-use gdb_analytics::AnalyticsEngine;
 use crate::eval::{eval_expr, PathRow};
 use crate::plan::PhysicalOperator;
-use arrow::array::{ArrayRef, Int64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt32Array};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+use gdb_analytics::AnalyticsEngine;
 use gdb_core::schema::GraphSchema;
 use gdb_core::{DataValue, EdgeId, GdbError, GdbResult, LabelId, VertexId};
-use gdb_parser::ast::{CypherQuery, Expr, ReturnItem, Statement};
+use gdb_parser::ast::{BinaryOperator, CypherQuery, Expr, ReturnItem, Statement, UpdateClause};
 use gdb_storage::PartitionStorageEngine;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -47,6 +47,48 @@ impl QueryExecutor {
                     rows_affected: 0,
                 })
             }
+            Statement::CreateIndex { label, property } => {
+                let label_id = {
+                    let schema = self.schema.read();
+                    schema
+                        .get_vertex_schema(&label)
+                        .map(|s| s.label_id)
+                        .ok_or_else(|| GdbError::Schema(format!("Unknown vertex label: {}", label)))?
+                };
+
+                {
+                    let mut schema = self.schema.write();
+                    schema.register_index(&label, &property)?;
+                }
+
+                self.storage.create_vertex_index(label_id, &property)?;
+                Ok(QueryResult {
+                    message: format!("Created secondary index ON :{}({})", label, property),
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
+            Statement::DropIndex { label, property } => {
+                let label_id = {
+                    let schema = self.schema.read();
+                    schema
+                        .get_vertex_schema(&label)
+                        .map(|s| s.label_id)
+                        .ok_or_else(|| GdbError::Schema(format!("Unknown vertex label: {}", label)))?
+                };
+
+                {
+                    let mut schema = self.schema.write();
+                    schema.drop_index(&label, &property)?;
+                }
+
+                self.storage.drop_vertex_index(label_id, &property)?;
+                Ok(QueryResult {
+                    message: format!("Dropped secondary index ON :{}({})", label, property),
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
             Statement::InsertVertex { label, id, properties } => {
                 let label_id = {
                     let schema = self.schema.read();
@@ -82,6 +124,24 @@ impl QueryExecutor {
                     message: format!("Inserted {} vertices", count),
                     batch: None,
                     rows_affected: count,
+                })
+            }
+            Statement::MergeVertex { label, id, properties } => {
+                let label_id = {
+                    let schema = self.schema.read();
+                    schema
+                        .get_vertex_schema(&label)
+                        .map(|s| s.label_id)
+                        .ok_or_else(|| GdbError::Schema(format!("Unknown vertex label: {}", label)))?
+                };
+
+                for (name, val) in properties {
+                    self.storage.update_vertex_property(id, label_id, &name, val)?;
+                }
+                Ok(QueryResult {
+                    message: format!("Merged vertex {}", id),
+                    batch: None,
+                    rows_affected: 1,
                 })
             }
             Statement::InsertEdge { edge_type, src, dst, rank, .. } => {
@@ -145,6 +205,117 @@ impl QueryExecutor {
             Statement::CallAlgorithm { algorithm, args, yield_items } => {
                 self.execute_call(&algorithm, args, yield_items)
             }
+            Statement::Explain(inner) => self.execute_explain(*inner),
+        }
+    }
+
+    fn execute_explain(&self, stmt: Statement) -> GdbResult<QueryResult> {
+        match stmt {
+            Statement::Query(query) => {
+                let plan = self.create_physical_plan(&query)?;
+                let ascii_tree = plan.format_ascii_tree(0);
+
+                let mut steps = Vec::new();
+                Self::collect_plan_steps(&plan, &mut steps);
+
+                let mut step_col = Vec::new();
+                let mut op_col = Vec::new();
+                let mut details_col = Vec::new();
+                let mut cost_col = Vec::new();
+
+                for (idx, (op, details, cost)) in steps.into_iter().enumerate() {
+                    step_col.push((idx + 1) as u32);
+                    op_col.push(op);
+                    details_col.push(details);
+                    cost_col.push(cost);
+                }
+
+                let schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("step", ArrowDataType::UInt32, false),
+                    Field::new("operator", ArrowDataType::Utf8, false),
+                    Field::new("details", ArrowDataType::Utf8, false),
+                    Field::new("cost", ArrowDataType::Float64, false),
+                ]));
+
+                let batch = RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(UInt32Array::from(step_col)),
+                        Arc::new(StringArray::from(op_col)),
+                        Arc::new(StringArray::from(details_col)),
+                        Arc::new(Float64Array::from(cost_col)),
+                    ],
+                )?;
+
+                Ok(QueryResult {
+                    message: ascii_tree,
+                    batch: Some(batch),
+                    rows_affected: 1,
+                })
+            }
+            other => {
+                let desc = format!("{:?}", other);
+                let schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("operator", ArrowDataType::Utf8, false),
+                    Field::new("details", ArrowDataType::Utf8, false),
+                ]));
+                let batch = RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(StringArray::from(vec!["DirectExecution"])),
+                        Arc::new(StringArray::from(vec![desc.clone()])),
+                    ],
+                )?;
+                Ok(QueryResult {
+                    message: format!("Direct Execution Plan:\n  └─ {}", desc),
+                    batch: Some(batch),
+                    rows_affected: 1,
+                })
+            }
+        }
+    }
+
+    fn collect_plan_steps(plan: &PhysicalOperator, steps: &mut Vec<(String, String, f64)>) {
+        match plan {
+            PhysicalOperator::ScanVertices { .. } | PhysicalOperator::IndexScan { .. } => {
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 1.0));
+            }
+            PhysicalOperator::ExpandEdges { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 2.5));
+            }
+            PhysicalOperator::VarLengthExpand { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 5.0));
+            }
+            PhysicalOperator::Filter { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 1.2));
+            }
+            PhysicalOperator::Mutate { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 3.0));
+            }
+            PhysicalOperator::Distinct { input } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 1.5));
+            }
+            PhysicalOperator::Sort { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 2.0));
+            }
+            PhysicalOperator::Skip { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 1.1));
+            }
+            PhysicalOperator::Limit { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 1.0));
+            }
+            PhysicalOperator::Project { input, .. } => {
+                Self::collect_plan_steps(input, steps);
+                steps.push((plan.operator_name().to_string(), plan.operator_details(), 1.0));
+            }
         }
     }
 
@@ -153,7 +324,15 @@ impl QueryExecutor {
         let snapshot = self.storage.latest_version();
         let rows = self.execute_plan(&plan, snapshot)?;
 
-        // Build result RecordBatch
+        if query.return_items.is_empty() {
+            let count = rows.len();
+            return Ok(QueryResult {
+                message: format!("Query completed, {} rows affected", count),
+                batch: None,
+                rows_affected: count,
+            });
+        }
+
         let batch = self.build_record_batch(&query.return_items, &rows)?;
         let count = batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
 
@@ -176,10 +355,44 @@ impl QueryExecutor {
             LabelId(1)
         };
 
-        let mut current_plan = PhysicalOperator::ScanVertices {
-            var_name: start_var.clone(),
-            label_id,
-            id_filter: start.id_filter,
+        // Check for index match in WHERE clause
+        let mut index_scan = None;
+        let mut filter_needed = true;
+
+        if let Some(ref where_expr) = query.where_clause {
+            if let Expr::BinaryOp { left, op: BinaryOperator::Eq, right } = where_expr {
+                let matched = match (&**left, &**right) {
+                    (Expr::Property { variable, property }, Expr::Literal(lit)) if variable == &start_var => {
+                        Some((property.clone(), lit.clone()))
+                    }
+                    (Expr::Literal(lit), Expr::Property { variable, property }) if variable == &start_var => {
+                        Some((property.clone(), lit.clone()))
+                    }
+                    _ => None,
+                };
+
+                if let Some((prop, val)) = matched {
+                    if self.storage.has_vertex_index(label_id, &prop) {
+                        index_scan = Some(PhysicalOperator::IndexScan {
+                            var_name: start_var.clone(),
+                            label_id,
+                            property: prop,
+                            value: val,
+                        });
+                        filter_needed = false;
+                    }
+                }
+            }
+        }
+
+        let mut current_plan = if let Some(idx) = index_scan {
+            idx
+        } else {
+            PhysicalOperator::ScanVertices {
+                var_name: start_var.clone(),
+                label_id,
+                id_filter: start.id_filter,
+            }
         };
 
         let mut prev_var = start_var;
@@ -220,9 +433,38 @@ impl QueryExecutor {
         }
 
         if let Some(ref where_expr) = query.where_clause {
-            current_plan = PhysicalOperator::Filter {
+            if filter_needed {
+                current_plan = PhysicalOperator::Filter {
+                    input: Box::new(current_plan),
+                    predicate: where_expr.clone(),
+                };
+            }
+        }
+
+        if !query.updates.is_empty() {
+            current_plan = PhysicalOperator::Mutate {
                 input: Box::new(current_plan),
-                predicate: where_expr.clone(),
+                updates: query.updates.clone(),
+            };
+        }
+
+        if query.distinct {
+            current_plan = PhysicalOperator::Distinct {
+                input: Box::new(current_plan),
+            };
+        }
+
+        if !query.order_by.is_empty() {
+            current_plan = PhysicalOperator::Sort {
+                input: Box::new(current_plan),
+                order_by: query.order_by.clone(),
+            };
+        }
+
+        if let Some(skip) = query.skip {
+            current_plan = PhysicalOperator::Skip {
+                input: Box::new(current_plan),
+                skip,
             };
         }
 
@@ -245,9 +487,19 @@ impl QueryExecutor {
                     row.vertices.insert(var_name.clone(), (*target_id, *label_id));
                     rows.push(row);
                 } else {
-                    // Fetch all known vertices across CSR and in-memory Delta table
                     let all_vids = self.storage.get_all_vertex_ids(Some(*label_id));
                     for vid in all_vids {
+                        let mut row = PathRow::default();
+                        row.vertices.insert(var_name.clone(), (vid, *label_id));
+                        rows.push(row);
+                    }
+                }
+                Ok(rows)
+            }
+            PhysicalOperator::IndexScan { var_name, label_id, property, value } => {
+                let mut rows = Vec::new();
+                if let Some(vids) = self.storage.lookup_vertex_by_index(*label_id, property, value) {
+                    for vid in vids {
                         let mut row = PathRow::default();
                         row.vertices.insert(var_name.clone(), (vid, *label_id));
                         rows.push(row);
@@ -267,7 +519,6 @@ impl QueryExecutor {
                             if let Some(ev) = edge_var {
                                 new_row.edges.insert(ev.clone(), edge);
                             }
-                            // Default to LabelId(1) for target if unknown
                             new_row.vertices.insert(dst_var.clone(), (edge.dst, LabelId(1)));
                             output_rows.push(new_row);
                         }
@@ -292,7 +543,6 @@ impl QueryExecutor {
                 for row in input_rows {
                     if let Some(&(start_vid, _)) = row.vertices.get(src_var) {
                         let mut queue = std::collections::VecDeque::new();
-                        // (curr_vid, depth, visited_edges, last_edge)
                         queue.push_back((start_vid, 0usize, std::collections::HashSet::new(), None));
 
                         while let Some((curr_vid, depth, visited_edges, last_edge)) = queue.pop_front() {
@@ -332,6 +582,83 @@ impl QueryExecutor {
                 }
                 Ok(filtered)
             }
+            PhysicalOperator::Mutate { input, updates } => {
+                let input_rows = self.execute_plan(input, snapshot)?;
+                for row in &input_rows {
+                    for update in updates {
+                        match update {
+                            UpdateClause::Set { variable, property, expr } => {
+                                if let Some(&(vid, label_id)) = row.vertices.get(variable) {
+                                    let val = eval_expr(expr, row, &self.storage)?;
+                                    self.storage.update_vertex_property(vid, label_id, property, val)?;
+                                }
+                            }
+                            UpdateClause::Delete { variable, detach } => {
+                                if let Some(&(vid, label_id)) = row.vertices.get(variable) {
+                                    self.storage.delete_vertex(vid, label_id, *detach)?;
+                                }
+                            }
+                            UpdateClause::MergeVertex { variable, label, id, properties } => {
+                                let label_id = {
+                                    let schema = self.schema.read();
+                                    schema.get_vertex_schema(label).map(|s| s.label_id).unwrap_or(LabelId(1))
+                                };
+                                let target_vid = if let Some(vid) = id {
+                                    *vid
+                                } else if let Some(var) = variable {
+                                    row.vertices.get(var).map(|(v, _)| *v).unwrap_or(VertexId(0))
+                                } else {
+                                    VertexId(0)
+                                };
+                                for (prop_name, expr) in properties {
+                                    let val = eval_expr(expr, row, &self.storage)?;
+                                    self.storage.update_vertex_property(target_vid, label_id, prop_name, val)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(input_rows)
+            }
+            PhysicalOperator::Distinct { input } => {
+                let input_rows = self.execute_plan(input, snapshot)?;
+                let mut seen = std::collections::HashSet::new();
+                let mut output = Vec::new();
+
+                for row in input_rows {
+                    let mut key: Vec<(&String, u64)> = row.vertices.iter().map(|(k, (v, _))| (k, v.as_u64())).collect();
+                    key.sort_by(|a, b| a.0.cmp(b.0));
+                    if seen.insert(format!("{:?}", key)) {
+                        output.push(row);
+                    }
+                }
+                Ok(output)
+            }
+            PhysicalOperator::Sort { input, order_by } => {
+                let mut input_rows = self.execute_plan(input, snapshot)?;
+                input_rows.sort_by(|a, b| {
+                    for item in order_by {
+                        let va = eval_expr(&item.expr, a, &self.storage).unwrap_or(DataValue::Null);
+                        let vb = eval_expr(&item.expr, b, &self.storage).unwrap_or(DataValue::Null);
+                        let cmp = if item.ascending {
+                            va.partial_cmp(&vb)
+                        } else {
+                            vb.partial_cmp(&va)
+                        };
+                        if let Some(c) = cmp {
+                            if c != std::cmp::Ordering::Equal {
+                                return c;
+                            }
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+                Ok(input_rows)
+            }
+            PhysicalOperator::Skip { input, skip } => {
+                let input_rows = self.execute_plan(input, snapshot)?;
+                Ok(input_rows.into_iter().skip(*skip).collect())
+            }
             PhysicalOperator::Limit { input, limit } => {
                 let input_rows = self.execute_plan(input, snapshot)?;
                 Ok(input_rows.into_iter().take(*limit).collect())
@@ -341,7 +668,6 @@ impl QueryExecutor {
             }
         }
     }
-
 
     fn execute_call(
         &self,
@@ -417,7 +743,6 @@ impl QueryExecutor {
             other => return Err(GdbError::Execution(format!("Unknown graph algorithm: {}", other))),
         };
 
-        // If yield_items is provided, project columns
         let final_batch = if !yield_items.is_empty() {
             let schema = batch.schema();
             let mut proj_indices = Vec::new();
@@ -452,32 +777,187 @@ impl QueryExecutor {
             return Ok(None);
         }
 
-        // Special case: check if COUNT(*)
-        if return_items.len() == 1 && matches!(return_items[0].expr, Expr::CountStar) {
-            let field = Field::new("count", ArrowDataType::Int64, false);
-            let schema = Arc::new(ArrowSchema::new(vec![field]));
-            let count_arr = Arc::new(Int64Array::from(vec![rows.len() as i64]));
-            let batch = RecordBatch::try_new(schema, vec![count_arr])?;
+        let has_aggregates = return_items.iter().any(|item| item.expr.is_aggregate());
+
+        if !has_aggregates {
+            let mut fields = Vec::with_capacity(return_items.len());
+            let mut column_values: Vec<Vec<DataValue>> = vec![Vec::with_capacity(rows.len()); return_items.len()];
+
+            for (col_idx, item) in return_items.iter().enumerate() {
+                let col_name = item.alias.clone().unwrap_or_else(|| match &item.expr {
+                    Expr::Property { variable, property } => format!("{}.{}", variable, property),
+                    Expr::Variable(v) => v.clone(),
+                    Expr::Literal(l) => l.to_string(),
+                    _ => format!("col_{}", col_idx),
+                });
+
+                for row in rows {
+                    let val = eval_expr(&item.expr, row, &self.storage)?;
+                    column_values[col_idx].push(val);
+                }
+
+                let arrow_type = column_values[col_idx]
+                    .iter()
+                    .find(|v| **v != DataValue::Null)
+                    .map(|v| v.data_type())
+                    .unwrap_or(ArrowDataType::Utf8);
+
+                fields.push(Field::new(col_name, arrow_type, true));
+            }
+
+            let arrow_schema = Arc::new(ArrowSchema::new(fields));
+            let columns = Self::build_arrow_columns(&arrow_schema, &column_values)?;
+            let batch = RecordBatch::try_new(arrow_schema, columns)?;
             return Ok(Some(batch));
         }
 
+        // Grouping & Aggregations
+        let group_key_indices: Vec<usize> = return_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !item.expr.is_aggregate())
+            .map(|(idx, _)| idx)
+            .collect();
+
+        let mut groups: HashMap<Vec<DataValue>, Vec<usize>> = HashMap::new();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            let mut key = Vec::with_capacity(group_key_indices.len());
+            for &k_idx in &group_key_indices {
+                let val = eval_expr(&return_items[k_idx].expr, row, &self.storage).unwrap_or(DataValue::Null);
+                key.push(val);
+            }
+            groups.entry(key).or_default().push(row_idx);
+        }
+
+        let num_output_rows = groups.len();
+        let mut column_values: Vec<Vec<DataValue>> = vec![Vec::with_capacity(num_output_rows); return_items.len()];
         let mut fields = Vec::with_capacity(return_items.len());
-        let mut column_values: Vec<Vec<DataValue>> = vec![Vec::with_capacity(rows.len()); return_items.len()];
 
         for (col_idx, item) in return_items.iter().enumerate() {
             let col_name = item.alias.clone().unwrap_or_else(|| match &item.expr {
                 Expr::Property { variable, property } => format!("{}.{}", variable, property),
                 Expr::Variable(v) => v.clone(),
-                Expr::Literal(l) => l.to_string(),
+                Expr::CountStar => "count(*)".into(),
+                Expr::FunctionCall { name, .. } => format!("{}(...)", name.to_lowercase()),
                 _ => format!("col_{}", col_idx),
             });
 
-            for row in rows {
-                let val = eval_expr(&item.expr, row, &self.storage)?;
-                column_values[col_idx].push(val);
+            for (group_key, row_indices) in &groups {
+                if let Some(pos) = group_key_indices.iter().position(|&idx| idx == col_idx) {
+                    column_values[col_idx].push(group_key[pos].clone());
+                } else {
+                    let agg_val = match &item.expr {
+                        Expr::CountStar => DataValue::Int64(row_indices.len() as i64),
+                        Expr::FunctionCall { name, args } => {
+                            let n = name.to_uppercase();
+                            match n.as_str() {
+                                "COUNT" => {
+                                    if let Some(arg) = args.first() {
+                                        let mut count = 0i64;
+                                        for &r_idx in row_indices {
+                                            if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                if v != DataValue::Null {
+                                                    count += 1;
+                                                }
+                                            }
+                                        }
+                                        DataValue::Int64(count)
+                                    } else {
+                                        DataValue::Int64(row_indices.len() as i64)
+                                    }
+                                }
+                                "SUM" => {
+                                    let mut sum_f = 0.0f64;
+                                    let mut is_float = false;
+                                    let mut sum_i = 0i64;
+                                    if let Some(arg) = args.first() {
+                                        for &r_idx in row_indices {
+                                            if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                match v {
+                                                    DataValue::Int64(i) => sum_i += i,
+                                                    DataValue::Float64(f) => {
+                                                        is_float = true;
+                                                        sum_f += f;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if is_float {
+                                        DataValue::Float64(sum_f + sum_i as f64)
+                                    } else {
+                                        DataValue::Int64(sum_i)
+                                    }
+                                }
+                                "AVG" => {
+                                    let mut sum = 0.0f64;
+                                    let mut count = 0usize;
+                                    if let Some(arg) = args.first() {
+                                        for &r_idx in row_indices {
+                                            if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                match v {
+                                                    DataValue::Int64(i) => {
+                                                        sum += i as f64;
+                                                        count += 1;
+                                                    }
+                                                    DataValue::Float64(f) => {
+                                                        sum += f;
+                                                        count += 1;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if count > 0 {
+                                        DataValue::Float64(sum / count as f64)
+                                    } else {
+                                        DataValue::Null
+                                    }
+                                }
+                                "MIN" => {
+                                    let mut min_val: Option<DataValue> = None;
+                                    if let Some(arg) = args.first() {
+                                        for &r_idx in row_indices {
+                                            if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                if v != DataValue::Null {
+                                                    min_val = match min_val {
+                                                        None => Some(v),
+                                                        Some(curr) => if v < curr { Some(v) } else { Some(curr) },
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                    min_val.unwrap_or(DataValue::Null)
+                                }
+                                "MAX" => {
+                                    let mut max_val: Option<DataValue> = None;
+                                    if let Some(arg) = args.first() {
+                                        for &r_idx in row_indices {
+                                            if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                if v != DataValue::Null {
+                                                    max_val = match max_val {
+                                                        None => Some(v),
+                                                        Some(curr) => if v > curr { Some(v) } else { Some(curr) },
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                    max_val.unwrap_or(DataValue::Null)
+                                }
+                                _ => DataValue::Null,
+                            }
+                        }
+                        _ => DataValue::Null,
+                    };
+                    column_values[col_idx].push(agg_val);
+                }
             }
 
-            // Determine data type from first non-null value
             let arrow_type = column_values[col_idx]
                 .iter()
                 .find(|v| **v != DataValue::Null)
@@ -488,9 +968,18 @@ impl QueryExecutor {
         }
 
         let arrow_schema = Arc::new(ArrowSchema::new(fields));
-        let mut columns: Vec<ArrayRef> = Vec::with_capacity(return_items.len());
+        let columns = Self::build_arrow_columns(&arrow_schema, &column_values)?;
+        let batch = RecordBatch::try_new(arrow_schema, columns)?;
+        Ok(Some(batch))
+    }
 
-        for (col_idx, field) in arrow_schema.fields().iter().enumerate() {
+    fn build_arrow_columns(
+        schema: &Arc<ArrowSchema>,
+        column_values: &[Vec<DataValue>],
+    ) -> GdbResult<Vec<ArrayRef>> {
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+
+        for (col_idx, field) in schema.fields().iter().enumerate() {
             let vals = &column_values[col_idx];
             match field.data_type() {
                 ArrowDataType::Int64 => {
@@ -508,6 +997,7 @@ impl QueryExecutor {
                     for v in vals {
                         match v {
                             DataValue::Float64(f) => builder.append_value(*f),
+                            DataValue::Int64(i) => builder.append_value(*i as f64),
                             _ => builder.append_null(),
                         }
                     }
@@ -526,8 +1016,6 @@ impl QueryExecutor {
                 }
             }
         }
-
-        let batch = RecordBatch::try_new(arrow_schema, columns)?;
-        Ok(Some(batch))
+        Ok(columns)
     }
 }

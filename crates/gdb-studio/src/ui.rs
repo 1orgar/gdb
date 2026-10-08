@@ -1,4 +1,4 @@
-pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
+pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -570,7 +570,7 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
   <header>
     <div class="brand">
       <span>⚡ GDB STUDIO</span>
-      <span class="brand-badge">v0.3.1</span>
+      <span class="brand-badge">v0.4.0</span>
     </div>
 
     <div class="cluster-controls">
@@ -695,6 +695,7 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
           <div class="editor-title">Query Editor (openCypher / GQL)</div>
           <div class="editor-actions">
             <button class="btn btn-secondary btn-sm" onclick="clearQuery()">Clear</button>
+            <button class="btn btn-secondary btn-sm" id="explain-btn" onclick="explainQuery()">🔍 Explain Plan</button>
             <button class="btn btn-primary btn-sm" id="run-btn" onclick="executeQuery()">
               <span id="run-spinner" style="display:none;" class="spinner"></span>
               <span>▶ Run (Cmd+↵)</span>
@@ -712,6 +713,7 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
           <div class="nav-tabs">
             <div class="nav-tab active" id="tab-btn-graph" onclick="switchView('graph', this)">🕸️ Graph View</div>
             <div class="nav-tab" id="tab-btn-table" onclick="switchView('table', this)">📊 Table View</div>
+            <div class="nav-tab" id="tab-btn-plan" onclick="switchView('plan', this)">🔍 Plan / Explain</div>
             <div class="nav-tab" id="tab-btn-cluster" onclick="switchView('cluster', this)">🌐 Cluster Ring</div>
             <div class="nav-tab" id="tab-btn-resources" onclick="switchView('resources', this)">⚡ Storage &amp; Resources</div>
             <div class="nav-tab" id="tab-btn-unity" onclick="switchView('unity', this)">🎮 3D Unity View</div>
@@ -733,6 +735,10 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
             <button class="control-btn" title="Zoom Out" onclick="zoomGraph(0.8)">➖</button>
             <button class="control-btn" title="Reset View" onclick="resetGraphView()">⟲</button>
             <button class="control-btn" title="Toggle Physics" id="physics-btn" onclick="togglePhysics()">⏸</button>
+            <button class="control-btn" title="Export PNG" onclick="exportGraphPng()">📷 PNG</button>
+            <button class="control-btn" title="Export SVG" onclick="exportGraphSvg()">🖼️ SVG</button>
+            <button class="control-btn" title="Export CSV" onclick="exportGraphCsv()">📊 CSV</button>
+            <button class="control-btn" title="Export JSON" onclick="exportGraphJson()">📋 JSON</button>
           </div>
         </div>
 
@@ -742,6 +748,24 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
             <thead><tr id="table-header"><th>No Data</th></tr></thead>
             <tbody id="table-body"><tr><td>Execute a query to view tabular results</td></tr></tbody>
           </table>
+        </div>
+
+        <!-- Plan / Explain Viewport -->
+        <div id="plan-viewport" class="viewport" style="display:none; padding:20px; overflow-y:auto; background:var(--bg-darker);">
+          <div style="max-width:960px; margin:0 auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:16px; font-weight:700; color:var(--text-bright);">🔍 Query Physical Execution Plan</span>
+                <span id="plan-badge" class="dash-badge blue">Cost-Based Optimization</span>
+              </div>
+              <button class="btn btn-secondary btn-sm" onclick="copyPlanText()">📋 Copy Plan Text</button>
+            </div>
+            <div id="plan-dag-container" style="display:flex; flex-direction:column; gap:8px; margin-bottom:20px;"></div>
+            <div class="dash-card" style="background:var(--bg-dark); border:1px solid var(--border); border-radius:8px; padding:16px;">
+              <div class="card-label" style="margin-bottom:8px;">Plan Hierarchy (ASCII Tree)</div>
+              <pre id="plan-ascii-output" style="font-family:monospace; font-size:12px; color:var(--text); line-height:1.5; overflow-x:auto; margin:0;">Execute EXPLAIN &lt;query&gt; to generate execution plan DAG.</pre>
+            </div>
+          </div>
         </div>
 
         <!-- Cluster Ring Viewport -->
@@ -870,6 +894,37 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
               </div>
             </div>
 
+            <!-- Live Telemetry Sparklines -->
+            <div class="dash-section">
+              <div class="dash-section-title">
+                <span>📈 Real-Time Engine Telemetry</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="telemetry-live-badge">🟢 Polling Live</span>
+              </div>
+              <div class="dash-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">
+                <div class="dash-card">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div class="card-label">Throughput (QPS)</div>
+                    <div id="spark-qps-val" style="font-size:14px; font-weight:700; color:var(--accent); font-family:monospace;">0.0 /s</div>
+                  </div>
+                  <svg id="sparkline-qps" width="100%" height="48" style="overflow:visible; margin-top:8px;"></svg>
+                </div>
+                <div class="dash-card">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div class="card-label">Execution Latency</div>
+                    <div id="spark-lat-val" style="font-size:14px; font-weight:700; color:var(--success); font-family:monospace;">0.0 ms</div>
+                  </div>
+                  <svg id="sparkline-latency" width="100%" height="48" style="overflow:visible; margin-top:8px;"></svg>
+                </div>
+                <div class="dash-card">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div class="card-label">Allocated RAM Trend</div>
+                    <div id="spark-ram-val" style="font-size:14px; font-weight:700; color:var(--purple); font-family:monospace;">0.0 MB</div>
+                  </div>
+                  <svg id="sparkline-ram" width="100%" height="48" style="overflow:visible; margin-top:8px;"></svg>
+                </div>
+              </div>
+            </div>
+
             <div id="compaction-alert" style="display:none; padding:10px 14px; border-radius:6px; font-size:12px; background:rgba(63,185,80,0.15); border:1px solid #238636; color:#3fb950;">
               Compaction completed successfully!
             </div>
@@ -912,7 +967,7 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span id="footer-version">GDB Studio v0.3.1</span>
+      <span id="footer-version">GDB Studio v0.4.0</span>
       <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
       <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>
@@ -1192,6 +1247,101 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       document.getElementById('physics-btn').textContent = physicsRunning ? '⏸' : '▶';
     }
 
+    // Graph Exports
+    function exportGraphPng() {
+      if (graphNodes.length === 0) {
+        alert("No graph elements to export.");
+        return;
+      }
+      const link = document.createElement('a');
+      link.download = `gdb-graph-${Date.now()}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }
+
+    function exportGraphSvg() {
+      if (graphNodes.length === 0) {
+        alert("No graph elements to export.");
+        return;
+      }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const n of graphNodes) {
+        if (n.x < minX) minX = n.x;
+        if (n.x > maxX) maxX = n.x;
+        if (n.y < minY) minY = n.y;
+        if (n.y > maxY) maxY = n.y;
+      }
+      const pad = 60;
+      const w = Math.max(maxX - minX + pad * 2, 400);
+      const h = Math.max(maxY - minY + pad * 2, 400);
+      const offX = -minX + pad;
+      const offY = -minY + pad;
+
+      let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="background:#0d1117;">\n`;
+      svg += `<defs>\n  <marker id="arrow" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">\n    <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff" />\n  </marker>\n</defs>\n`;
+
+      for (const edge of graphEdges) {
+        if (!edge.source || !edge.target) continue;
+        const x1 = edge.source.x + offX;
+        const y1 = edge.source.y + offY;
+        const x2 = edge.target.x + offX;
+        const y2 = edge.target.y + offY;
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="rgba(88, 166, 255, 0.4)" stroke-width="1.5" marker-end="url(#arrow)" />\n`;
+        if (edge.label) {
+          const mx = (x1 + x2) / 2;
+          const my = (y1 + y2) / 2;
+          svg += `<text x="${mx + 3}" y="${my - 3}" fill="#8b949e" font-size="10" font-family="monospace">${edge.label}</text>\n`;
+        }
+      }
+
+      for (const n of graphNodes) {
+        const cx = n.x + offX;
+        const cy = n.y + offY;
+        const color = getNodeColor(n.label, n.id);
+        svg += `<circle cx="${cx}" cy="${cy}" r="18" fill="${color}" stroke="#ffffff" stroke-width="1.5" />\n`;
+        const lbl = String(n.label || n.id).substring(0, 5);
+        svg += `<text x="${cx}" y="${cy + 4}" fill="#ffffff" font-size="11" font-family="sans-serif" font-weight="bold" text-anchor="middle">${lbl}</text>\n`;
+        svg += `<text x="${cx}" y="${cy + 28}" fill="#8b949e" font-size="10" font-family="monospace" text-anchor="middle">${n.id}</text>\n`;
+      }
+      svg += `</svg>`;
+
+      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `gdb-graph-${Date.now()}.svg`;
+      link.click();
+    }
+
+    function exportGraphCsv() {
+      if (!lastLoadedGraphData || !lastLoadedGraphData.columns) {
+        alert("No query result data to export.");
+        return;
+      }
+      const headers = lastLoadedGraphData.columns.join(',');
+      const rows = (lastLoadedGraphData.rows || []).map(r => r.map(cell => {
+        const str = typeof cell === 'object' ? JSON.stringify(cell) : String(cell);
+        return `"${str.replace(/"/g, '""')}"`;
+      }).join(','));
+      const csv = [headers, ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `gdb-query-${Date.now()}.csv`;
+      link.click();
+    }
+
+    function exportGraphJson() {
+      if (!lastLoadedGraphData) {
+        alert("No query result data to export.");
+        return;
+      }
+      const blob = new Blob([JSON.stringify(lastLoadedGraphData, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `gdb-export-${Date.now()}.json`;
+      link.click();
+    }
+
     // Inspector
     function openInspector(entity) {
       const panel = document.getElementById('inspector-panel');
@@ -1255,6 +1405,11 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         document.getElementById('stat-time').textContent = `${(data.elapsed_us ? (data.elapsed_us / 1000).toFixed(2) : duration)} ms`;
         document.getElementById('stat-rows').textContent = data.num_rows || (data.rows ? data.rows.length : 0);
 
+        const durationFloat = parseFloat(data.elapsed_us ? (data.elapsed_us / 1000).toFixed(2) : duration);
+        if (typeof recordQueryLatency === 'function') {
+          recordQueryLatency(durationFloat);
+        }
+
         // Render JSON
         document.getElementById('json-output').textContent = JSON.stringify(data, null, 2);
 
@@ -1271,7 +1426,11 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         );
 
         // Auto-switch view and manage graph physics
-        if (isAlgoQuery || hasAlgoMetrics) {
+        if (data.plan || queryLower.startsWith('explain')) {
+          renderPlan(data);
+          switchView('plan', document.getElementById('tab-btn-plan'));
+          document.getElementById('stat-graph').textContent = 'Physical plan DAG generated';
+        } else if (isAlgoQuery || hasAlgoMetrics) {
           switchView('table', document.getElementById('tab-btn-table'));
           document.getElementById('stat-graph').textContent = 'Tabular algorithm output (Graph physics safely paused)';
         } else {
@@ -1297,6 +1456,104 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
         runBtn.disabled = false;
         spinner.style.display = 'none';
       }
+    }
+
+    // Explain Query & Physical Execution Plan DAG Visualizer
+    function explainQuery() {
+      let q = document.getElementById('query-input').value.trim();
+      if (!q) return;
+      if (!q.toUpperCase().startsWith('EXPLAIN')) {
+        q = 'EXPLAIN ' + q;
+        document.getElementById('query-input').value = q;
+      }
+      executeQuery();
+    }
+
+    function copyPlanText() {
+      const text = document.getElementById('plan-ascii-output').textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.querySelector('#plan-viewport button');
+        if (btn) {
+          const orig = btn.textContent;
+          btn.textContent = '✅ Copied!';
+          setTimeout(() => { btn.textContent = orig; }, 1500);
+        }
+      });
+    }
+
+    function renderPlan(data) {
+      const planText = data.plan || (data.rows && data.rows.length > 0 && data.rows[0].length > 0 ? String(data.rows[0][0]) : 'No physical plan returned.');
+      document.getElementById('plan-ascii-output').textContent = planText;
+
+      const dagContainer = document.getElementById('plan-dag-container');
+      dagContainer.innerHTML = '';
+
+      const lines = planText.split('\n').filter(l => l.trim().length > 0);
+      if (lines.length === 0) return;
+
+      const opColors = {
+        'PROJECTION': '#58a6ff',
+        'FILTER': '#f0883e',
+        'INDEXSCAN': '#3fb950',
+        'SCAN': '#3fb950',
+        'SORT': '#bc8cff',
+        'AGGREGATE': '#39c5bb',
+        'SKIP': '#d29922',
+        'LIMIT': '#d29922',
+        'DISTINCT': '#f778ba',
+        'MUTATE': '#f85149',
+        'MERGEVERTEX': '#e3b341'
+      };
+
+      lines.forEach((line, idx) => {
+        const indent = line.search(/\S/);
+        const trimmed = line.trim();
+        const firstWord = (trimmed.match(/^[A-Za-z0-9_]+/) || ['Operator'])[0].toUpperCase();
+        const badgeColor = opColors[firstWord] || '#79c0ff';
+
+        let details = '';
+        const bracketMatch = trimmed.match(/\[(.*)\]/);
+        if (bracketMatch) {
+          details = bracketMatch[1];
+        } else {
+          details = trimmed.substring(firstWord.length).trim();
+        }
+
+        const stepDiv = document.createElement('div');
+        stepDiv.style.cssText = `display:flex; flex-direction:column; align-items:center; margin-left:${Math.min(indent * 8, 80)}px;`;
+
+        if (idx > 0) {
+          const arrow = document.createElement('div');
+          arrow.innerHTML = '↓';
+          arrow.style.cssText = 'color:var(--text-muted); font-size:14px; margin:2px 0;';
+          stepDiv.appendChild(arrow);
+        }
+
+        const card = document.createElement('div');
+        card.style.cssText = `
+          width:100%; max-width:680px; background:var(--bg-card);
+          border:1px solid var(--border); border-left:4px solid ${badgeColor};
+          border-radius:6px; padding:10px 14px; display:flex;
+          justify-content:space-between; align-items:center;
+          box-shadow:0 1px 3px rgba(0,0,0,0.2);
+        `;
+
+        card.innerHTML = `
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:12px; font-weight:700; color:var(--text-bright); text-transform:uppercase;">${firstWord}</span>
+              <span class="dash-badge" style="background:${badgeColor}22; color:${badgeColor}; border:1px solid ${badgeColor}44; font-size:10px;">Operator #${idx + 1}</span>
+            </div>
+            ${details ? `<div style="font-family:monospace; font-size:11px; color:var(--text-muted); word-break:break-all;">${details}</div>` : ''}
+          </div>
+          <div style="text-align:right;">
+            <span style="font-size:10px; color:var(--text-muted);">Depth: ${Math.floor(indent / 2)}</span>
+          </div>
+        `;
+
+        stepDiv.appendChild(card);
+        dagContainer.appendChild(stepDiv);
+      });
     }
 
     // Table Rendering
@@ -1684,6 +1941,73 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       }
     }
 
+    // Telemetry & Sparklines State
+    const telemetryHistory = {
+      qps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      latency: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      ram: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    };
+    let lastQueryCount = 0;
+    let lastQueryPollTime = Date.now();
+
+    function recordQueryLatency(latMs) {
+      telemetryHistory.latency.push(latMs);
+      if (telemetryHistory.latency.length > 20) telemetryHistory.latency.shift();
+      const sparkLat = document.getElementById('spark-lat-val');
+      if (sparkLat) sparkLat.textContent = `${latMs.toFixed(1)} ms`;
+      renderSparkline('sparkline-latency', telemetryHistory.latency, '#3fb950', 'rgba(63, 185, 80, 0.15)');
+    }
+
+    function renderSparkline(svgId, points, strokeColor, fillColor) {
+      const svg = document.getElementById(svgId);
+      if (!svg) return;
+      const width = svg.clientWidth || 240;
+      const height = 48;
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      svg.innerHTML = '';
+
+      if (points.length < 2) return;
+      const min = Math.min(...points);
+      const max = Math.max(...points, min + 0.001);
+      const range = max - min;
+
+      const coords = points.map((val, idx) => {
+        const x = (idx / (points.length - 1)) * width;
+        const y = height - 4 - ((val - min) / range) * (height - 8);
+        return [x, y];
+      });
+
+      let pathD = `M ${coords[0][0]} ${coords[0][1]}`;
+      for (let i = 1; i < coords.length; i++) {
+        pathD += ` L ${coords[i][0]} ${coords[i][1]}`;
+      }
+
+      // Fill area under sparkline
+      const fillD = `${pathD} L ${width} ${height} L 0 ${height} Z`;
+      const fillElem = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      fillElem.setAttribute('d', fillD);
+      fillElem.setAttribute('fill', fillColor);
+      svg.appendChild(fillElem);
+
+      // Stroke line
+      const strokeElem = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      strokeElem.setAttribute('d', pathD);
+      strokeElem.setAttribute('fill', 'none');
+      strokeElem.setAttribute('stroke', strokeColor);
+      strokeElem.setAttribute('stroke-width', '2');
+      strokeElem.setAttribute('stroke-linecap', 'round');
+      svg.appendChild(strokeElem);
+
+      // Dot at latest value
+      const last = coords[coords.length - 1];
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      dot.setAttribute('cx', last[0]);
+      dot.setAttribute('cy', last[1]);
+      dot.setAttribute('r', '3');
+      dot.setAttribute('fill', strokeColor);
+      svg.appendChild(dot);
+    }
+
     function updateResourcesUI(data) {
       const ramMb = ((data.estimated_memory_bytes || 0) / 1024 / 1024).toFixed(2);
       const ramVal = document.getElementById('res-ram-val');
@@ -1725,6 +2049,31 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
       if (qVal) qVal.textContent = (data.queries_total || 0).toLocaleString();
       const qSub = document.getElementById('res-queries-sub');
       if (qSub) qSub.textContent = `OK: ${data.queries_ok || 0} | Errors: ${data.queries_error || 0}`;
+
+      // Update Sparklines
+      const now = Date.now();
+      const dt = Math.max((now - lastQueryPollTime) / 1000, 0.5);
+      const totalQ = data.queries_total || 0;
+      let qps = 0;
+      if (lastQueryCount > 0 && totalQ >= lastQueryCount) {
+        qps = (totalQ - lastQueryCount) / dt;
+      }
+      lastQueryCount = totalQ;
+      lastQueryPollTime = now;
+
+      telemetryHistory.qps.push(parseFloat(qps.toFixed(1)));
+      if (telemetryHistory.qps.length > 20) telemetryHistory.qps.shift();
+      const sparkQps = document.getElementById('spark-qps-val');
+      if (sparkQps) sparkQps.textContent = `${qps.toFixed(1)} /s`;
+      renderSparkline('sparkline-qps', telemetryHistory.qps, '#58a6ff', 'rgba(88, 166, 255, 0.15)');
+
+      const ramFloat = parseFloat(ramMb) || 0;
+      telemetryHistory.ram.push(ramFloat);
+      if (telemetryHistory.ram.length > 20) telemetryHistory.ram.shift();
+      const sparkRam = document.getElementById('spark-ram-val');
+      if (sparkRam) sparkRam.textContent = `${ramMb} MB`;
+      renderSparkline('sparkline-ram', telemetryHistory.ram, '#bc8cff', 'rgba(188, 140, 255, 0.15)');
+      renderSparkline('sparkline-latency', telemetryHistory.latency, '#3fb950', 'rgba(63, 185, 80, 0.15)');
     }
 
     async function triggerCompaction() {
@@ -1767,4 +2116,4 @@ pub const HTML_INDEX: &str = r#"<!DOCTYPE html>
   </script>
 </body>
 </html>
-"#;
+"###;

@@ -113,6 +113,8 @@ pub struct GraphSchema {
     label_ids: HashMap<LabelId, String>,
     edges: HashMap<String, EdgeSchema>,
     edge_types: HashMap<EdgeType, String>,
+    #[serde(default)]
+    indexes: HashMap<String, std::collections::HashSet<String>>,
     next_label_id: u32,
     next_edge_type: u32,
 }
@@ -125,6 +127,7 @@ impl GraphSchema {
             label_ids: HashMap::new(),
             edges: HashMap::new(),
             edge_types: HashMap::new(),
+            indexes: HashMap::new(),
             next_label_id: 1,
             next_edge_type: 1,
         }
@@ -152,6 +155,39 @@ impl GraphSchema {
         self.edges.insert(edge_type_name.to_string(), schema);
         self.edge_types.insert(id, edge_type_name.to_string());
         Ok(id)
+    }
+
+    pub fn register_index(&mut self, label: &str, property: &str) -> GdbResult<()> {
+        if !self.labels.contains_key(label) {
+            return Err(GdbError::Schema(format!("Vertex label '{}' does not exist", label)));
+        }
+        self.indexes
+            .entry(label.to_string())
+            .or_default()
+            .insert(property.to_string());
+        Ok(())
+    }
+
+    pub fn drop_index(&mut self, label: &str, property: &str) -> GdbResult<bool> {
+        if let Some(props) = self.indexes.get_mut(label) {
+            Ok(props.remove(property))
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn has_index(&self, label: &str, property: &str) -> bool {
+        self.indexes
+            .get(label)
+            .map(|set| set.contains(property))
+            .unwrap_or(false)
+    }
+
+    pub fn get_indexes(&self, label: &str) -> Vec<String> {
+        self.indexes
+            .get(label)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn get_vertex_schema(&self, label: &str) -> Option<&VertexSchema> {

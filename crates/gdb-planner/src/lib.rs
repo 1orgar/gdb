@@ -170,4 +170,87 @@ mod tests {
         // Should find 2, 3, 4 (3 rows)
         assert_eq!(b3.num_rows(), 3);
     }
+
+    #[test]
+    fn test_secondary_index_and_explain() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("indexed")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+
+        executor.execute(parse("CREATE VERTEX User (name STRING, email STRING)").unwrap()).unwrap();
+        executor.execute(parse("CREATE INDEX ON :User(email)").unwrap()).unwrap();
+
+        executor.execute(parse("INSERT VERTEX User (id, name, email) VALUES (1, 'Alice', 'alice@test.com'), (2, 'Bob', 'bob@test.com')").unwrap()).unwrap();
+
+        // Query with indexed lookup
+        let q = parse("MATCH (u:User) WHERE u.email = 'alice@test.com' RETURN u.name").unwrap();
+        let res = executor.execute(q).unwrap();
+        let batch = res.batch.unwrap();
+        assert_eq!(batch.num_rows(), 1);
+
+        // Explain query
+        let explain_q = parse("EXPLAIN MATCH (u:User) WHERE u.email = 'alice@test.com' RETURN u.name").unwrap();
+        let explain_res = executor.execute(explain_q).unwrap();
+        assert!(explain_res.message.contains("IndexScan"));
+        let explain_batch = explain_res.batch.unwrap();
+        assert!(explain_batch.num_rows() >= 1);
+
+        // Drop index
+        let drop_res = executor.execute(parse("DROP INDEX ON :User(email)").unwrap()).unwrap();
+        assert!(drop_res.message.contains("Dropped"));
+    }
+
+    #[test]
+    fn test_cypher_dml_set_and_delete() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("dml")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+
+        executor.execute(parse("CREATE VERTEX User (name STRING, age INT64)").unwrap()).unwrap();
+        executor.execute(parse("INSERT VERTEX User (id, name, age) VALUES (10, 'Eve', 22)").unwrap()).unwrap();
+
+        // 1. SET
+        let set_q = parse("MATCH (u:User) WHERE u.id = 10 SET u.age = 23 RETURN u.name, u.age").unwrap();
+        let set_res = executor.execute(set_q).unwrap();
+        let set_b = set_res.batch.unwrap();
+        assert_eq!(set_b.num_rows(), 1);
+
+        // 2. MERGE
+        let merge_q = parse("MERGE VERTEX User (id, name, age) VALUES (11, 'Mallory', 30)").unwrap();
+        let merge_res = executor.execute(merge_q).unwrap();
+        assert_eq!(merge_res.rows_affected, 1);
+
+        // 3. DELETE
+        let del_q = parse("MATCH (u:User) WHERE u.id = 10 DETACH DELETE u").unwrap();
+        let del_res = executor.execute(del_q).unwrap();
+        assert_eq!(del_res.rows_affected, 1);
+
+        // Confirm deleted
+        let check_q = parse("MATCH (u:User) WHERE u.id = 10 RETURN u.name").unwrap();
+        let check_res = executor.execute(check_q).unwrap();
+        assert_eq!(check_res.rows_affected, 0);
+    }
+
+    #[test]
+    fn test_ordering_pagination_aggregations() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("agg")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+
+        executor.execute(parse("CREATE VERTEX Emp (city STRING, salary INT64)").unwrap()).unwrap();
+        executor.execute(parse("INSERT VERTEX Emp (id, city, salary) VALUES (1, 'SF', 100), (2, 'SF', 200), (3, 'NY', 150), (4, 'NY', 250)").unwrap()).unwrap();
+
+        // 1. ORDER BY & SKIP/LIMIT
+        let sort_q = parse("MATCH (e:Emp) RETURN e.salary ORDER BY e.salary DESC SKIP 1 LIMIT 2").unwrap();
+        let sort_res = executor.execute(sort_q).unwrap();
+        let sort_b = sort_res.batch.unwrap();
+        assert_eq!(sort_b.num_rows(), 2);
+
+        // 2. Aggregations with GROUP BY: city, COUNT(*), SUM(salary), AVG(salary), MIN(salary), MAX(salary)
+        let agg_q = parse("MATCH (e:Emp) RETURN e.city, COUNT(*), SUM(e.salary), AVG(e.salary), MIN(e.salary), MAX(e.salary)").unwrap();
+        let agg_res = executor.execute(agg_q).unwrap();
+        let agg_b = agg_res.batch.unwrap();
+        assert_eq!(agg_b.num_rows(), 2); // 2 cities: SF, NY
+        assert_eq!(agg_b.num_columns(), 6);
+    }
 }

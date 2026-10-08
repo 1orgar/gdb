@@ -81,6 +81,8 @@ struct StudioQueryResponse {
     columns: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
     graph: GraphData,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<String>,
 }
 
 async fn handle_index() -> impl IntoResponse {
@@ -327,6 +329,20 @@ async fn handle_query(
 
                 let num_rows = rows.len();
 
+                let is_explain = req.query.trim().to_uppercase().starts_with("EXPLAIN")
+                    || columns.contains(&"operator".to_string());
+                let plan = if is_explain {
+                    message.clone().or_else(|| {
+                        if !rows.is_empty() && !rows[0].is_empty() {
+                            rows[0][0].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+
                 Json(StudioQueryResponse {
                     status,
                     message,
@@ -336,6 +352,7 @@ async fn handle_query(
                     columns,
                     rows,
                     graph: GraphData { nodes, edges },
+                    plan,
                 })
             } else {
                 Json(StudioQueryResponse {
@@ -347,6 +364,7 @@ async fn handle_query(
                     columns: vec![],
                     rows: vec![],
                     graph: GraphData { nodes: vec![], edges: vec![] },
+                    plan: None,
                 })
             }
         }
@@ -359,6 +377,7 @@ async fn handle_query(
             columns: vec![],
             rows: vec![],
             graph: GraphData { nodes: vec![], edges: vec![] },
+            plan: None,
         }),
     }
 }

@@ -14,6 +14,8 @@ pub struct VertexPropertyTable {
     /// Fast in-memory map of vertex properties for instant OLTP point queries:
     /// VertexId -> HashMap<PropertyName, DataValue>
     row_cache: DashMap<u64, HashMap<String, DataValue>, ahash::RandomState>,
+    /// Secondary property indexes: PropertyName -> (DataValue -> Vec<VertexId>)
+    indexes: DashMap<String, DashMap<DataValue, Vec<VertexId>, ahash::RandomState>, ahash::RandomState>,
     /// Columnar Arrow RecordBatches for vectorized analytical scans (OLAP)
     batches: RwLock<Vec<RecordBatch>>,
 }
@@ -25,13 +27,102 @@ impl VertexPropertyTable {
             label_id: schema_def.label_id,
             schema: arrow_schema,
             row_cache: DashMap::with_hasher(ahash::RandomState::new()),
+            indexes: DashMap::with_hasher(ahash::RandomState::new()),
             batches: RwLock::new(Vec::new()),
         }
     }
 
-    /// Fast OLTP insertion of vertex properties.
+    /// Creates a secondary index on a vertex property.
+    pub fn create_index(&self, property_name: &str) {
+        let index_map = DashMap::with_hasher(ahash::RandomState::new());
+        for entry in self.row_cache.iter() {
+            let vid = VertexId(*entry.key());
+            if let Some(val) = entry.value().get(property_name) {
+                index_map.entry(val.clone()).or_insert_with(Vec::new).push(vid);
+            }
+        }
+        self.indexes.insert(property_name.to_string(), index_map);
+    }
+
+    /// Drops a secondary index on a vertex property.
+    pub fn drop_index(&self, property_name: &str) -> bool {
+        self.indexes.remove(property_name).is_some()
+    }
+
+    /// Checks if a secondary index exists on a vertex property.
+    pub fn has_index(&self, property_name: &str) -> bool {
+        self.indexes.contains_key(property_name)
+    }
+
+    /// Looks up vertices matching a property value via secondary index.
+    pub fn lookup_by_index(&self, property_name: &str, value: &DataValue) -> Option<Vec<VertexId>> {
+        self.indexes.get(property_name).and_then(|idx| {
+            idx.get(value).and_then(|v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.clone())
+                }
+            })
+        })
+    }
+
+    /// Fast OLTP insertion of vertex properties, updating indexes if present.
     pub fn set_properties(&self, vid: VertexId, props: HashMap<String, DataValue>) {
+        if let Some(old) = self.row_cache.get(&vid.as_u64()) {
+            for idx_entry in self.indexes.iter() {
+                let prop_name = idx_entry.key();
+                let idx_map = idx_entry.value();
+                if let Some(old_val) = old.get(prop_name) {
+                    if let Some(mut vids) = idx_map.get_mut(old_val) {
+                        vids.retain(|v| *v != vid);
+                    }
+                }
+            }
+        }
+
+        for idx_entry in self.indexes.iter() {
+            let prop_name = idx_entry.key();
+            let idx_map = idx_entry.value();
+            if let Some(new_val) = props.get(prop_name) {
+                idx_map.entry(new_val.clone()).or_insert_with(Vec::new).push(vid);
+            }
+        }
+
         self.row_cache.insert(vid.as_u64(), props);
+    }
+
+    /// Updates a single property on a vertex.
+    pub fn update_property(&self, vid: VertexId, prop_name: &str, new_val: DataValue) {
+        if let Some(mut map) = self.row_cache.get_mut(&vid.as_u64()) {
+            let old_val = map.insert(prop_name.to_string(), new_val.clone());
+            if let Some(idx_map) = self.indexes.get(prop_name) {
+                if let Some(ref old) = old_val {
+                    if let Some(mut vids) = idx_map.get_mut(old) {
+                        vids.retain(|v| *v != vid);
+                    }
+                }
+                idx_map.entry(new_val).or_insert_with(Vec::new).push(vid);
+            }
+        }
+    }
+
+    /// Deletes a vertex from property storage and indexes.
+    pub fn delete_vertex(&self, vid: VertexId) -> bool {
+        if let Some((_, old_props)) = self.row_cache.remove(&vid.as_u64()) {
+            for idx_entry in self.indexes.iter() {
+                let prop_name = idx_entry.key();
+                let idx_map = idx_entry.value();
+                if let Some(old_val) = old_props.get(prop_name) {
+                    if let Some(mut vids) = idx_map.get_mut(old_val) {
+                        vids.retain(|v| *v != vid);
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Fast OLTP lookup of a property by name.

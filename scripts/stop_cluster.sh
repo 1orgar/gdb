@@ -4,15 +4,18 @@
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$PROJECT_ROOT/.cluster.pids"
 
-if [ -f "$PID_FILE" ]; then
-    PIDS=$(cat "$PID_FILE")
-    echo "Stopping GDB cluster nodes (PIDs: $PIDS)..."
-    kill $PIDS 2>/dev/null
-    pkill -f "$PROJECT_ROOT/bin/gdb-server" 2>/dev/null
-    rm -f "$PID_FILE"
-    echo "Cluster stopped."
-else
-    echo "No .cluster.pids file found. Killing any running gdb-server processes..."
-    pkill -f gdb-server 2>/dev/null
-    echo "Done."
-fi
+STOPPED=false
+
+for pid_file in "$PROJECT_ROOT/.cluster.pids" "$PROJECT_ROOT/.cluster_amd64.pids"; do
+    if [ -f "$pid_file" ]; then
+        PIDS=$(cat "$pid_file")
+        echo "Stopping GDB cluster nodes from $(basename "$pid_file") (PIDs: $PIDS)..."
+        kill $PIDS 2>/dev/null
+        rm -f "$pid_file"
+        STOPPED=true
+    fi
+done
+
+# Kill any remaining gdb-server instances
+pkill -f "gdb-server" 2>/dev/null || true
+echo "GDB Cluster stopped cleanly."

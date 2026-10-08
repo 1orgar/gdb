@@ -668,6 +668,8 @@ async fn handle_query(
         stmt,
         gdb_parser::ast::Statement::CreateVertexLabel { .. }
             | gdb_parser::ast::Statement::CreateEdgeType { .. }
+            | gdb_parser::ast::Statement::CreateIndex { .. }
+            | gdb_parser::ast::Statement::DropIndex { .. }
     );
 
     if is_ddl {
@@ -785,7 +787,8 @@ async fn handle_query(
 
     // DML Routing & Leaderless Ring Replication
     let dml_key = match &stmt {
-        gdb_parser::ast::Statement::InsertVertex { id, .. } => Some(id.0),
+        gdb_parser::ast::Statement::InsertVertex { id, .. }
+        | gdb_parser::ast::Statement::MergeVertex { id, .. } => Some(id.0),
         gdb_parser::ast::Statement::InsertEdge { src, .. }
         | gdb_parser::ast::Statement::DeleteEdge { src, .. } => Some(src.0),
         _ => None,

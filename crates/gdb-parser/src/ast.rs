@@ -11,6 +11,14 @@ pub enum Statement {
         edge_type: String,
         properties: Vec<PropertySpec>,
     },
+    CreateIndex {
+        label: String,
+        property: String,
+    },
+    DropIndex {
+        label: String,
+        property: String,
+    },
     InsertVertex {
         label: String,
         id: VertexId,
@@ -37,21 +45,52 @@ pub enum Statement {
         dst: VertexId,
         rank: i64,
     },
+    MergeVertex {
+        label: String,
+        id: VertexId,
+        properties: Vec<(String, DataValue)>,
+    },
     Query(CypherQuery),
     CallAlgorithm {
         algorithm: String,
         args: std::collections::HashMap<String, DataValue>,
         yield_items: Vec<String>,
     },
+    Explain(Box<Statement>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CypherQuery {
     pub pattern: PathPattern,
     pub where_clause: Option<Expr>,
+    #[serde(default)]
+    pub updates: Vec<UpdateClause>,
+    #[serde(default)]
+    pub distinct: bool,
     pub return_items: Vec<ReturnItem>,
+    #[serde(default)]
     pub order_by: Vec<OrderByItem>,
+    pub skip: Option<usize>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UpdateClause {
+    Set {
+        variable: String,
+        property: String,
+        expr: Expr,
+    },
+    Delete {
+        variable: String,
+        detach: bool,
+    },
+    MergeVertex {
+        variable: Option<String>,
+        label: String,
+        id: Option<VertexId>,
+        properties: Vec<(String, Expr)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,6 +98,8 @@ pub struct NodePattern {
     pub variable: Option<String>,
     pub label: Option<String>,
     pub id_filter: Option<VertexId>,
+    #[serde(default)]
+    pub properties: Vec<(String, DataValue)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,4 +172,17 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     CountStar,
+}
+
+impl Expr {
+    pub fn is_aggregate(&self) -> bool {
+        match self {
+            Expr::CountStar => true,
+            Expr::FunctionCall { name, .. } => {
+                let n = name.to_uppercase();
+                matches!(n.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
+            }
+            _ => false,
+        }
+    }
 }

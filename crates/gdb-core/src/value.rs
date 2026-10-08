@@ -19,6 +19,33 @@ pub enum DataValue {
     List(Vec<DataValue>),
 }
 
+impl Eq for DataValue {}
+
+impl std::hash::Hash for DataValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            DataValue::Null => {}
+            DataValue::Boolean(b) => b.hash(state),
+            DataValue::Int64(i) => i.hash(state),
+            DataValue::Float64(f) => {
+                let bits = if f.is_nan() {
+                    f64::NAN.to_bits()
+                } else if *f == 0.0 {
+                    0.0f64.to_bits()
+                } else {
+                    f.to_bits()
+                };
+                bits.hash(state);
+            }
+            DataValue::String(s) => s.hash(state),
+            DataValue::Date(d) => d.hash(state),
+            DataValue::Timestamp(t) => t.hash(state),
+            DataValue::List(l) => l.hash(state),
+        }
+    }
+}
+
 impl fmt::Debug for DataValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -65,4 +65,31 @@ mod tests {
         let pr = cuda.pagerank(&csr, 0.85, 10).unwrap();
         assert_eq!(pr.len(), 3);
     }
+
+    #[test]
+    fn test_gpu_wcc_louvain_triangles() {
+        // Triangle graph
+        let edges = vec![
+            EdgeId::simple(VertexId(1), EdgeType(1), VertexId(2)),
+            EdgeId::simple(VertexId(2), EdgeType(1), VertexId(3)),
+            EdgeId::simple(VertexId(3), EdgeType(1), VertexId(1)),
+        ];
+        let csr = ChunkedCsr::from_edges(edges);
+        let dispatcher = GpuDispatcher::enabled(0, 1);
+
+        // WCC: all in same component
+        let wcc_res = dispatcher.wcc(&csr).unwrap();
+        assert_eq!(wcc_res.len(), 3);
+        let comp0 = wcc_res[0].1;
+        assert_eq!(wcc_res[1].1, comp0);
+        assert_eq!(wcc_res[2].1, comp0);
+
+        // Louvain
+        let louvain_res = dispatcher.louvain(&csr, 10).unwrap();
+        assert_eq!(louvain_res.len(), 3);
+
+        // Triangles
+        let tri_res = dispatcher.triangle_count(&csr).unwrap();
+        assert_eq!(tri_res.len(), 3);
+    }
 }

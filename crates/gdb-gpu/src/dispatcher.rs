@@ -136,4 +136,52 @@ impl GpuDispatcher {
             CpuFallbackBackend.pagerank(csr, damping, iterations)
         }
     }
+
+    /// Dispatches Weakly Connected Components (WCC) computation to GPU or CPU.
+    pub fn wcc(&self, csr: &ChunkedCsr) -> GdbResult<Vec<(VertexId, u64)>> {
+        let edges = csr.edge_count();
+        if self.enabled && edges >= self.threshold_edges {
+            tracing::info!(
+                "Dispatching WCC to GPU accelerator ({}, device #{}) for {} edges",
+                self.backend.name(),
+                self.device_id,
+                edges
+            );
+            self.backend.wcc(csr)
+        } else {
+            CpuFallbackBackend.wcc(csr)
+        }
+    }
+
+    /// Dispatches Louvain Community Detection to GPU or CPU.
+    pub fn louvain(&self, csr: &ChunkedCsr, max_iter: usize) -> GdbResult<Vec<(VertexId, u64)>> {
+        let edges = csr.edge_count();
+        if self.enabled && edges >= self.threshold_edges {
+            tracing::info!(
+                "Dispatching Louvain to GPU accelerator ({}, device #{}) for {} edges",
+                self.backend.name(),
+                self.device_id,
+                edges
+            );
+            self.backend.louvain(csr, max_iter)
+        } else {
+            CpuFallbackBackend.louvain(csr, max_iter)
+        }
+    }
+
+    /// Dispatches Triangle Counting to GPU or CPU.
+    pub fn triangle_count(&self, csr: &ChunkedCsr) -> GdbResult<Vec<(VertexId, u64)>> {
+        let edges = csr.edge_count();
+        if self.enabled && edges >= self.threshold_edges {
+            tracing::info!(
+                "Dispatching Triangle Counting to GPU accelerator ({}, device #{}) for {} edges",
+                self.backend.name(),
+                self.device_id,
+                edges
+            );
+            self.backend.triangle_count(csr)
+        } else {
+            CpuFallbackBackend.triangle_count(csr)
+        }
+    }
 }

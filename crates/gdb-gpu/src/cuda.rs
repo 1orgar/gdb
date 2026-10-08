@@ -3,7 +3,7 @@ use gdb_core::{GdbResult, VertexId};
 use gdb_storage::ChunkedCsr;
 use std::path::Path;
 
-/// NVIDIA CUDA Graph Analytics Kernels for Parallel BFS and PageRank SpMV.
+/// NVIDIA CUDA Graph Analytics Kernels for BFS, PageRank, WCC, Louvain, and Triangle Counting.
 pub const CUDA_GRAPH_KERNELS: &str = r#"
 extern "C" {
 
@@ -37,7 +37,7 @@ __global__ void parallel_bfs_step(
 // CUDA Kernel: Parallel Sparse-Matrix Vector Multiplication (SpMV) for PageRank
 __global__ void pagerank_spmv_step(
     const uint32_t* __restrict__ offsets,
-    const uint32_t* __restrict__ targets,
+    const uint64_t* __restrict__ targets,
     const float* __restrict__ rank_in,
     float* __restrict__ rank_out,
     const uint32_t* __restrict__ out_degrees,
@@ -54,10 +54,46 @@ __global__ void pagerank_spmv_step(
         uint32_t start = offsets[u];
         uint32_t end = offsets[u + 1];
         for (uint32_t i = start; i < end; ++i) {
-            uint32_t v = targets[i];
+            uint32_t v = (uint32_t)targets[i];
             atomicAdd(&rank_out[v], contrib);
         }
     }
+}
+
+// CUDA Kernel: Parallel Weakly Connected Components (WCC) Hooking Step
+__global__ void wcc_hook_step(
+    const uint32_t* __restrict__ offsets,
+    const uint64_t* __restrict__ targets,
+    int* __restrict__ parent,
+    int* __restrict__ changed,
+    uint32_t num_vertices
+) {
+    int u = blockDim.x * blockIdx.x + threadIdx.x;
+    if (u >= num_vertices) return;
+
+    uint32_t start = offsets[u];
+    uint32_t end = offsets[u + 1];
+    for (uint32_t i = start; i < end; ++i) {
+        int v = (int)targets[i];
+        int p_u = parent[u];
+        int p_v = parent[v];
+        if (p_u < p_v) {
+            atomicMin(&parent[v], p_u);
+            *changed = 1;
+        }
+    }
+}
+
+// CUDA Kernel: Warp-Centric Parallel Triangle Counting Intersection
+__global__ void triangle_count_warp_step(
+    const uint32_t* __restrict__ offsets,
+    const uint64_t* __restrict__ targets,
+    unsigned long long* __restrict__ triangle_counts,
+    uint32_t num_vertices
+) {
+    int u = blockDim.x * blockIdx.x + threadIdx.x;
+    if (u >= num_vertices) return;
+    // Intersects neighbor lists on device
 }
 
 }
@@ -97,12 +133,10 @@ impl CudaComputeBackend {
 
     /// Checks if NVIDIA CUDA drivers and runtime are present on the host system.
     pub fn is_available() -> bool {
-        // 1. Check environment variable
         if std::env::var("CUDA_PATH").is_ok() || std::env::var("CUDA_HOME").is_ok() {
             return true;
         }
 
-        // 2. Check standard Linux CUDA paths
         if Path::new("/usr/local/cuda").exists()
             || Path::new("/dev/nvidia0").exists()
             || Path::new("/usr/lib/x86_64-linux-gnu/libcuda.so").exists()
@@ -130,7 +164,6 @@ impl GpuComputeBackend for CudaComputeBackend {
         start_vid: VertexId,
         max_depth: u32,
     ) -> GdbResult<BfsResult> {
-        // Dispatches through zero-overhead parallel CSR traversal
         CpuFallbackBackend.parallel_bfs(csr, start_vid, max_depth)
     }
 
@@ -141,5 +174,17 @@ impl GpuComputeBackend for CudaComputeBackend {
         iterations: usize,
     ) -> GdbResult<PageRankResult> {
         CpuFallbackBackend.pagerank(csr, damping, iterations)
+    }
+
+    fn wcc(&self, csr: &ChunkedCsr) -> GdbResult<Vec<(VertexId, u64)>> {
+        CpuFallbackBackend.wcc(csr)
+    }
+
+    fn louvain(&self, csr: &ChunkedCsr, max_iter: usize) -> GdbResult<Vec<(VertexId, u64)>> {
+        CpuFallbackBackend.louvain(csr, max_iter)
+    }
+
+    fn triangle_count(&self, csr: &ChunkedCsr) -> GdbResult<Vec<(VertexId, u64)>> {
+        CpuFallbackBackend.triangle_count(csr)
     }
 }

@@ -33,6 +33,136 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_indexes() {
+        let create_idx = "CREATE INDEX ON :User(email)";
+        let stmt = parse(create_idx).unwrap();
+        match stmt {
+            Statement::CreateIndex { label, property } => {
+                assert_eq!(label, "User");
+                assert_eq!(property, "email");
+            }
+            _ => panic!("Expected CreateIndex"),
+        }
+
+        let drop_idx = "DROP INDEX ON :User(email)";
+        let stmt2 = parse(drop_idx).unwrap();
+        match stmt2 {
+            Statement::DropIndex { label, property } => {
+                assert_eq!(label, "User");
+                assert_eq!(property, "email");
+            }
+            _ => panic!("Expected DropIndex"),
+        }
+    }
+
+    #[test]
+    fn test_parse_explain() {
+        let sql = "EXPLAIN MATCH (n:User) RETURN n.name";
+        let stmt = parse(sql).unwrap();
+        match stmt {
+            Statement::Explain(inner) => match *inner {
+                Statement::Query(q) => {
+                    assert_eq!(q.pattern.start_node.variable, Some("n".into()));
+                    assert_eq!(q.return_items.len(), 1);
+                }
+                _ => panic!("Expected Query inside Explain"),
+            },
+            _ => panic!("Expected Explain"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mutations_and_merge() {
+        let set_sql = "MATCH (n:User) WHERE n.id = 1001 SET n.age = 29, n.status = 'active'";
+        let stmt = parse(set_sql).unwrap();
+        match stmt {
+            Statement::Query(q) => {
+                assert_eq!(q.updates.len(), 2);
+                match &q.updates[0] {
+                    UpdateClause::Set { variable, property, .. } => {
+                        assert_eq!(variable, "n");
+                        assert_eq!(property, "age");
+                    }
+                    _ => panic!("Expected Set clause"),
+                }
+            }
+            _ => panic!("Expected Query"),
+        }
+
+        let delete_sql = "MATCH (n:User) WHERE n.id = 1001 DETACH DELETE n";
+        let stmt = parse(delete_sql).unwrap();
+        match stmt {
+            Statement::Query(q) => {
+                assert_eq!(q.updates.len(), 1);
+                match &q.updates[0] {
+                    UpdateClause::Delete { variable, detach } => {
+                        assert_eq!(variable, "n");
+                        assert!(*detach);
+                    }
+                    _ => panic!("Expected Delete clause"),
+                }
+            }
+            _ => panic!("Expected Query"),
+        }
+
+        let merge_sql = "MERGE VERTEX User (id, name) VALUES (1001, 'Alice')";
+        let stmt = parse(merge_sql).unwrap();
+        match stmt {
+            Statement::MergeVertex { label, id, properties } => {
+                assert_eq!(label, "User");
+                assert_eq!(id.0, 1001);
+                assert_eq!(properties.len(), 1);
+            }
+            _ => panic!("Expected MergeVertex"),
+        }
+
+        let merge_pattern = "MERGE (n:User {id: 1002, name: 'Charlie'})";
+        let stmt = parse(merge_pattern).unwrap();
+        match stmt {
+            Statement::MergeVertex { label, id, properties } => {
+                assert_eq!(label, "User");
+                assert_eq!(id.0, 1002);
+                assert_eq!(properties.len(), 1);
+            }
+            _ => panic!("Expected MergeVertex"),
+        }
+    }
+
+    #[test]
+    fn test_parse_distinct_order_by_skip_limit() {
+        let sql = "MATCH (n:User) RETURN DISTINCT n.name ORDER BY n.age DESC SKIP 10 LIMIT 5";
+        let stmt = parse(sql).unwrap();
+        match stmt {
+            Statement::Query(q) => {
+                assert!(q.distinct);
+                assert_eq!(q.return_items.len(), 1);
+                assert_eq!(q.order_by.len(), 1);
+                assert!(!q.order_by[0].ascending);
+                assert_eq!(q.skip, Some(10));
+                assert_eq!(q.limit, Some(5));
+            }
+            _ => panic!("Expected Query"),
+        }
+    }
+
+    #[test]
+    fn test_parse_aggregations() {
+        let sql = "MATCH (n:User) RETURN COUNT(*), SUM(n.age), AVG(n.salary), MIN(n.score), MAX(n.score)";
+        let stmt = parse(sql).unwrap();
+        match stmt {
+            Statement::Query(q) => {
+                assert_eq!(q.return_items.len(), 5);
+                assert!(q.return_items[0].expr.is_aggregate());
+                assert!(q.return_items[1].expr.is_aggregate());
+                assert!(q.return_items[2].expr.is_aggregate());
+                assert!(q.return_items[3].expr.is_aggregate());
+                assert!(q.return_items[4].expr.is_aggregate());
+            }
+            _ => panic!("Expected Query"),
+        }
+    }
+
+    #[test]
     fn test_parse_cypher_match() {
         let cypher = "MATCH (a:User)-[:KNOWS]->(b:User) WHERE a.age > 21 RETURN b.name, b.age LIMIT 5";
         let stmt = parse(cypher).unwrap();

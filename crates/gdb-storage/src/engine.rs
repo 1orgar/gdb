@@ -75,6 +75,71 @@ impl PartitionStorageEngine {
         guard.get(&label_id).and_then(|t| t.get_property(vid, prop_name))
     }
 
+    /// Creates a secondary index for vertices under a given label.
+    pub fn create_vertex_index(&self, label_id: LabelId, prop_name: &str) -> GdbResult<()> {
+        let table = self.get_or_create_property_table(label_id)?;
+        table.create_index(prop_name);
+        Ok(())
+    }
+
+    /// Drops a secondary index for vertices under a given label.
+    pub fn drop_vertex_index(&self, label_id: LabelId, prop_name: &str) -> GdbResult<bool> {
+        let guard = self.vertex_properties.read();
+        if let Some(table) = guard.get(&label_id) {
+            Ok(table.drop_index(prop_name))
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Checks if a secondary index exists on a property for a given label.
+    pub fn has_vertex_index(&self, label_id: LabelId, prop_name: &str) -> bool {
+        let guard = self.vertex_properties.read();
+        guard.get(&label_id).map(|t| t.has_index(prop_name)).unwrap_or(false)
+    }
+
+    /// Point lookup of vertices by property value via secondary index.
+    pub fn lookup_vertex_by_index(
+        &self,
+        label_id: LabelId,
+        prop_name: &str,
+        value: &DataValue,
+    ) -> Option<Vec<VertexId>> {
+        let guard = self.vertex_properties.read();
+        guard.get(&label_id).and_then(|t| t.lookup_by_index(prop_name, value))
+    }
+
+    /// Updates a single property on a vertex under a label.
+    pub fn update_vertex_property(
+        &self,
+        vid: VertexId,
+        label_id: LabelId,
+        prop_name: &str,
+        value: DataValue,
+    ) -> GdbResult<()> {
+        let table = self.get_or_create_property_table(label_id)?;
+        table.update_property(vid, prop_name, value);
+        Ok(())
+    }
+
+    /// Deletes a vertex from property storage, and optionally deletes all incident edges.
+    pub fn delete_vertex(&self, vid: VertexId, label_id: LabelId, detach: bool) -> GdbResult<bool> {
+        if detach {
+            let snapshot = self.latest_version();
+            let ver = self.next_commit_version();
+            let out_edges = self.get_out_edges(vid, None, snapshot);
+            for e in out_edges {
+                self.delete_edge(e, ver);
+            }
+        }
+        let guard = self.vertex_properties.read();
+        if let Some(table) = guard.get(&label_id) {
+            Ok(table.delete_vertex(vid))
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Traverses outgoing edges of a vertex combining CSR + Delta MemTable with MVCC visibility.
     pub fn get_out_edges(
         &self,

@@ -1,213 +1,261 @@
-# GDB Operations Guide: Установка кластера, загрузка больших данных и графовые расчеты
+[English](OPERATIONS_GUIDE.md) | [Русский](OPERATIONS_GUIDE_RU.md)
 
-Полное руководство по эксплуатации распределенной in-memory графовой СУБД **GDB** (высокопроизводительный аналог Nebula Graph / Nebula Enterprise).
+# GDB Operations Guide: Cluster Setup, High-Throughput Bulk Ingestion, and Graph Analytics
+
+Complete operational and administration guide for the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.4.0**.
 
 ---
 
-## 1. Установка и запуск кластера
+## 1. Cluster Installation and Launch
 
-### 1.1. Системные требования и тюнинг ОС
-Для достижения экстремальной производительности (десятки миллионов операций в секунду):
+### 1.1. System Requirements & OS Tuning
+To achieve peak performance (tens of millions of operations per second):
 ```bash
-# 1. Увеличить лимиты на файловые дескрипторы
+# 1. Increase file descriptor limits
 ulimit -n 65535
 
-# 2. Убедиться, что Rust toolchain настроен
+# 2. Verify Rust toolchain
 source "$HOME/.cargo/env"
 cargo --version
 ```
 
-### 1.2. Вариант А: Локальный запуск кластера из 3 узлов (Native Multi-Node)
-Каждый узел СУБД является симметричным: принимает клиентские запросы, управляет своими Multi-Raft партициями и предоставляет Arrow Flight сервис.
+### 1.2. Quick 3-Node Cluster Launch via Scripts
 
-Запустите 3 терминала (или фоновые процессы):
+The repository includes cluster launch scripts with dynamic binary resolution (locating binaries in `bin/` or `target/release/`) and GPU options:
 
 ```bash
-# Нода 1 (Координатор + Шарды 0..7)
+# ARM Mac (Apple Silicon):
+./scripts/start_cluster.sh --rf 3 --sync
+
+# Enable hardware acceleration (Apple Metal):
+./scripts/start_cluster.sh --rf 3 --sync --enable-gpu true --gpu-offload-threshold 10000
+
+# Linux AMD64 (x86_64) / NVIDIA CUDA:
+./scripts/start_cluster_amd64.sh --rf 3 --sync
+
+# Stop cluster:
+./scripts/stop_cluster.sh
+```
+
+### 1.3. Manual Multi-Node Cluster Setup
+Every GDB node is symmetric: it processes client requests, manages its Multi-Raft partitions, and serves Arrow Flight requests.
+
+```bash
+# Node 1 (Coordinator + Shards 0..7)
 cargo run --release --bin gdb-server -- \
   --node-id 1 \
   --partitions 8 \
   --port 8848 \
-  --wal-dir ./data/node1/wal
+  --http-port 8847 \
+  --wal-dir ./data/node1/wal \
+  --peers http://127.0.0.1:8846,http://127.0.0.1:8845 \
+  --replication-factor 3 \
+  --replication-mode sync \
+  --enable-gpu false
 
-# Нода 2
+# Node 2
 cargo run --release --bin gdb-server -- \
   --node-id 2 \
   --partitions 8 \
   --port 8849 \
-  --wal-dir ./data/node2/wal
+  --http-port 8846 \
+  --wal-dir ./data/node2/wal \
+  --peers http://127.0.0.1:8847,http://127.0.0.1:8845 \
+  --replication-factor 3 \
+  --replication-mode sync \
+  --enable-gpu false
 
-# Нода 3
+# Node 3
 cargo run --release --bin gdb-server -- \
   --node-id 3 \
   --partitions 8 \
   --port 8850 \
-  --wal-dir ./data/node3/wal
+  --http-port 8845 \
+  --wal-dir ./data/node3/wal \
+  --peers http://127.0.0.1:8847,http://127.0.0.1:8846 \
+  --replication-factor 3 \
+  --replication-mode sync \
+  --enable-gpu false
 ```
 
-### 1.3. Вариант Б: Развертывание в Docker Compose с S3 (MinIO)
-В корень репозитория включен `docker-compose.yml`, развертывающий 3 ноды GDB и S3-хранилище MinIO:
+### 1.4. Docker Compose Deployment with S3 (MinIO)
+The root repository includes `docker-compose.yml` deploying a 3-node GDB cluster along with MinIO S3 storage:
 
 ```bash
-# Запуск кластера и S3 в фоне
+# Start cluster and S3 in background
 docker compose up -d
 
-# Проверка статуса сервисов
+# Check service status
 docker compose ps
 
-# Web-консоль MinIO S3: http://localhost:9001 (логин: minioadmin, пароль: minioadminpassword)
-# Arrow Flight порт GDB: localhost:8848
+# MinIO S3 Web Console: http://localhost:9001 (user: minioadmin, pass: minioadminpassword)
+# GDB Arrow Flight port: localhost:8848
 ```
 
 ---
 
-## 2. Загрузка больших данных (High-Throughput Bulk Ingestion)
+## 2. High-Throughput Bulk Ingestion
 
-В GDB реализована двухуровневая архитектура **Dual-Store**:
-1. Мутации пишутся в память в lock-free буфер **Delta MemTable** и локальный WAL со скоростью более **30 миллионов ребер в секунду**.
-2. По завершении пачки вызывается **Compaction**, упаковывающий ребра в непрерывный кэш-выровненный **Chunked-CSR**, готовый для миллисекундных обходов и GPU-расчетов.
+GDB uses a **Dual-Store** in-memory architecture:
+1. Mutations write to a lock-free **Delta MemTable** and local append-only WAL at **over 30 million edges/sec**.
+2. Once batch import completes, **Compaction** merges delta edges into contiguous, cache-aligned **Chunked-CSR**, ready for sub-millisecond traversals and GPU analytics.
 
-### 2.1. Сквозной скрипт массовой загрузки и расчетов
-Для тестирования загрузки 1,000,000 ребер и 50,000 вершин запустите встроенный пайплайн:
+### 2.1. End-to-End Bulk Ingestion Benchmark Script
+To test ingestion of 1,000,000 edges and 50,000 vertices:
 
 ```bash
 cargo run -p gdb-server --example benchmark_and_bulk_load --release
 ```
 
-**Фактическая скорость на Apple M5:**
-- Загрузка 50,000 вершин со свойствами в Arrow: **16.3 мс** (`3,065,588 вершин/сек`).
-- Загрузка 1,000,000 ребер в Delta MemTable: **31.5 мс** (`31.73 МИЛЛИОНА ребер/сек`).
-- Компактизация 1,000,000 связей в плотный CSR: **92.2 мс**.
+**Measured performance on Apple M5:**
+- 50,000 vertices with Arrow properties: **16.3 ms** (`3,065,588 vertices/sec`).
+- 1,000,000 edges into Delta MemTable: **31.5 ms** (`31.73 MILLION edges/sec`).
+- CSR Compaction of 1,000,000 edges: **92.2 ms**.
 
-### 2.2. Загрузка данных через интерактивную консоль (`gdb-cli`)
-Запустите CLI:
+### 2.2. Interactive CLI Ingestion (`gdb-cli`)
+Launch CLI:
 ```bash
 cargo run --release --bin gdb-cli
 ```
 
-Создайте схему и добавьте данные:
+Create schema, secondary indexes, and insert data:
 ```sql
--- 1. Создание схемы вершин и связей
+-- 1. Create schema
 CREATE VERTEX User (name STRING, age INT64);
 CREATE EDGE FOLLOWS ();
 
--- 2. Вставка вершин
+-- 2. Create secondary index for O(1) property lookup
+CREATE INDEX ON :User(name);
+
+-- 3. Insert vertices
 INSERT VERTEX User (id, name, age) VALUES (1, 'Alice', 30);
 INSERT VERTEX User (id, name, age) VALUES (2, 'Bob', 25);
 INSERT VERTEX User (id, name, age) VALUES (3, 'Charlie', 35);
 INSERT VERTEX User (id, name, age) VALUES (4, 'Dave', 22);
 
--- 3. Вставка связей
+-- 4. Insert edges
 INSERT EDGE FOLLOWS FROM 1 TO 2;
 INSERT EDGE FOLLOWS FROM 2 TO 3;
 INSERT EDGE FOLLOWS FROM 3 TO 1;
 INSERT EDGE FOLLOWS FROM 3 TO 4;
 
--- 4. Вызов компактизации в CSR (для максимизации скорости обхода)
+-- 5. Mutation & Upsert (DML)
+MATCH (u:User {name: 'Alice'}) SET u.age = 31;
+MERGE (u:User {name: 'Eve', age: 28});
+
+-- 6. Trigger CSR compaction (maximize traversal speed)
 compact;
 ```
 
-### 2.3. Рекомендации для сверхбольших датасетов (десятки/сотни млн ребер)
-1. **Отключение частой компактизации во время заливки:**
-   Грузите данные непрерывными пачками по 500,000 – 1,000,000 ребер. Вызывайте `compact` только после завершения импорта батча.
-2. **Использование бинарного формата Parquet / S3:**
-   При персистентности снапшот 1,000,000 ребер сжимается ZSTD в Parquet размером всего **0.69 MB** и мгновенно восстанавливается с S3/NVMe без повторного парсинга текстовых форматов.
-
 ---
 
-## 3. Произведение расчетов и Графовая Аналитика
+## 3. Query Execution and Graph Analytics
 
-GDB поддерживает два типа расчетов:
-1. **Шаблонные Cypher-запросы (MATCH, Filter, Expand)** для точечной и k-hop аналитики.
-2. **Nebula Enterprise Analytics Suite (`CALL algo.<name>`)** для глобальных алгоритмов над всем графом.
+GDB supports three tiers of analytical computing:
+1. **Cypher Queries (MATCH, Filter, Expand, DML, Indexes, Explain)** for targeted point and k-hop lookups.
+2. **Aggregations & Pagination** (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`).
+3. **Nebula Enterprise Analytics Suite (`CALL algo.<name>`)** for whole-graph GPU-accelerated algorithms.
 
-### 3.1. Выполнение запросов Cypher (openCypher / GQL)
+### 3.1. Cypher Query Execution (openCypher / GQL)
 ```sql
--- k-hop поиск связей с фильтрацией по свойствам
+-- k-hop graph traversal with property filtering
 MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)
 WHERE a.age >= 25
-RETURN a.name, b.name, c.name;
+RETURN a.name, b.name, c.name
+ORDER BY a.name ASC
+LIMIT 10;
 
--- Подсчет общего числа связей
+-- Aggregations & Group By
 MATCH (a:User)-[:FOLLOWS]->(b:User)
-RETURN COUNT(*);
+RETURN a.name, COUNT(b) AS followers
+ORDER BY followers DESC;
+
+-- Inspect Physical Execution Plan (EXPLAIN)
+EXPLAIN MATCH (a:User)-[:FOLLOWS]->(b:User)
+WHERE a.name = 'Alice'
+RETURN b.name;
 ```
 
 ---
 
-### 3.2. Запуск графовых алгоритмов корпоративного пакета (Enterprise Suite)
+### 3.2. Enterprise Graph Analytics Algorithms
 
-Все алгоритмы возвращают данные в векторном формате **Apache Arrow** (`RecordBatch`), что гарантирует нулевой оверхед на сериализацию:
+All algorithms return results in **Apache Arrow** (`RecordBatch`) columnar format with zero serialization overhead:
 
-#### А. Кластеризация и Сообщества (Community Detection)
+#### A. Community Detection & Clustering
 ```sql
--- 1. Louvain Community Detection (максимизация модулярности)
+-- 1. Louvain Community Detection (Modularity optimization, GPU/SIMD)
 CALL algo.louvain({max_iter: 10})
 YIELD vertex_id, community_id;
 
--- 2. WCC (Weakly Connected Components - поиск изолированных подграфов)
+-- 2. WCC (Weakly Connected Components, GPU/SIMD)
 CALL algo.wcc()
 YIELD vertex_id, component_id;
 
--- 3. SCC (Strongly Connected Components - ориентированная связность)
+-- 3. SCC (Strongly Connected Components)
 CALL algo.scc()
 YIELD vertex_id, component_id;
 
--- 4. Triangle Count & Local Clustering Coefficient (LCC)
+-- 4. Triangle Count & Local Clustering Coefficient (LCC, GPU/SIMD)
 CALL algo.triangleCount()
 YIELD vertex_id, triangles;
 
--- 5. K-Core декомпозиция (поиск плотных ядер графа)
+-- 5. K-Core Decomposition (Dense subgraphs)
 CALL algo.kCore()
 YIELD vertex_id, coreness;
 ```
 
-#### Б. Центральность и Ранжирование (Centrality & Ranking)
+#### B. Centrality & Ranking
 ```sql
--- 6. PageRank (демпфирование 0.85, 20 итераций, проверка сходимости)
--- На 1 млн ребер отрабатывает за 6 миллисекунд!
+-- 6. PageRank (damping 0.85, 20 iterations, GPU SpMV)
+-- 1 Million edges in 6 milliseconds!
 CALL algo.pageRank({damping: 0.85, max_iter: 20, tolerance: 0.0001})
 YIELD vertex_id, score;
 
--- 7. Betweenness Centrality (алгоритм Брандеса - поиск ключевых мостов)
+-- 7. Betweenness Centrality (Brandes algorithm)
 CALL algo.betweenness({normalized: true})
 YIELD vertex_id, betweenness;
 
--- 8. Closeness Centrality (гармоническая близость)
+-- 8. Closeness Centrality (Harmonic distance)
 CALL algo.closeness()
 YIELD vertex_id, closeness;
 
--- 9. Degree Centrality (In/Out/Total степени)
+-- 9. Degree Centrality (In/Out/Total degree)
 CALL algo.degree()
 YIELD vertex_id, in_degree, out_degree, total_degree;
 ```
 
-#### В. Кратчайшие пути и Сходство вершин (Pathfinding & Similarity)
+#### C. Pathfinding & Similarity
 ```sql
--- 10. SSSP (Кратчайшие расстояния от заданной вершины ко всем остальным)
+-- 10. SSSP (Single-Source Shortest Path)
 CALL algo.sssp({source: 1})
 YIELD vertex_id, distance;
 
--- 11. Метрики сходства (Жаккар, косинусное сходство и общие соседи)
+-- 11. Similarity Metrics (Jaccard, Cosine, Common Neighbors)
 CALL algo.similarity({node1: 1, node2: 2})
 YIELD jaccard, common_neighbors;
 ```
 
 ---
 
-## 4. Аппаратное ускорение на GPU (Metal на Mac / CUDA на Linux)
+## 4. Hardware Acceleration (Metal on Mac / CUDA on Linux)
 
-GDB автоматически включает GPU-пайплайн:
-- **На Apple Silicon (M-серия):** Архитектура **Unified Memory (UMA)** объединяет RAM процессора и видеокарты. GPU выполняет параллельный BFS и фильтрацию данных **без необходимости копировать память по шине PCIe (Zero-Copy)**.
-- **Адаптивный диспетчер (Cost-Based Dispatcher):** 
-  - Запросы размером $< 10,000$ ребер исполняются на CPU (минимизация задержки диспетчеризации).
-  - Массовые обходы и аналитика ($> 10,000$ элементов) автоматически переключаются на ядра Metal/CUDA.
+GDB features a high-performance GPU compute pipeline:
+- **CLI Options:**
+  - `--enable-gpu true` — enables GPU acceleration (default: `false`).
+  - `--gpu-device <ID>` — selects GPU device index when multiple GPUs exist (e.g. `--gpu-device 0`).
+  - `--gpu-offload-threshold <N>` — offload threshold in number of edges (default: 10,000 edges).
+- **Apple Silicon (M-Series):** **Unified Memory Architecture (UMA)** allows GPU cores to read CSR graph topology directly from RAM with **zero PCIe copy overhead (Zero-Copy)**.
+- **Linux NVIDIA (CUDA):** Native CUDA backend supporting Tesla V100, A100, H100, and RTX GPUs.
+- **Adaptive Dispatcher:**
+  - Queries $< 10,000$ edges run on vectorized CPU SIMD to avoid dispatch overhead.
+  - Large traversals and analytics ($> 10,000$ elements) automatically offload to Metal / CUDA kernels.
 
 ---
 
-## 5. Персистентность и создание снапшотов в S3
+## 5. Tiered Storage and S3 Snapshots
 
-Для долговременного хранения графа и быстрого Disaster Recovery:
-1. Нода периодически сбрасывает компактный CSR в **Apache Parquet** в S3:
+For durable persistence and fast disaster recovery:
+1. GDB periodically exports compact CSR partitions into **Apache Parquet (ZSTD)** on S3:
    `partitions/p{id}/snapshot_v{version}.parquet`.
-2. При перезапуске нода скачивает Parquet-снапшот из S3 и накатывает последние записи из локального Raft WAL (`gdb-wal`).
+2. On node restart, the node downloads the latest Parquet snapshot from S3 and replays remaining records from local append-only Raft WAL (`gdb-wal`).

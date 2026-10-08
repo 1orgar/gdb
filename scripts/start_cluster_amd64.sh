@@ -6,10 +6,29 @@ BIN="$PROJECT_ROOT/bin/amd64/gdb-server"
 CLI="$PROJECT_ROOT/bin/amd64/gdb-cli"
 PID_FILE="$PROJECT_ROOT/.cluster_amd64.pids"
 
-# Check if binary exists
-if [ ! -f "$BIN" ]; then
-    echo "AMD64 binary $BIN not found! Building x86_64 release binaries..."
-    (cd "$PROJECT_ROOT" && source "$HOME/.cargo/env" && cargo build --release --target x86_64-apple-darwin --bin gdb-server --bin gdb-cli && mkdir -p bin/amd64 && cp target/x86_64-apple-darwin/release/gdb-server target/x86_64-apple-darwin/release/gdb-cli bin/amd64/)
+resolve_binary() {
+    local bin_name="$1"
+    if [ -x "$PROJECT_ROOT/bin/amd64/$bin_name" ]; then echo "$PROJECT_ROOT/bin/amd64/$bin_name" && return 0; fi
+    if [ -f "$PROJECT_ROOT/bin/amd64/$bin_name" ]; then chmod +x "$PROJECT_ROOT/bin/amd64/$bin_name" 2>/dev/null; if [ -x "$PROJECT_ROOT/bin/amd64/$bin_name" ]; then echo "$PROJECT_ROOT/bin/amd64/$bin_name" && return 0; fi; fi
+    if [ -x "$PROJECT_ROOT/bin/$bin_name" ]; then echo "$PROJECT_ROOT/bin/$bin_name" && return 0; fi
+    if [ -x "$PROJECT_ROOT/$bin_name" ]; then echo "$PROJECT_ROOT/$bin_name" && return 0; fi
+    if [ -x "$PROJECT_ROOT/target/x86_64-apple-darwin/release/$bin_name" ]; then
+        mkdir -p "$PROJECT_ROOT/bin/amd64" && cp "$PROJECT_ROOT/target/x86_64-apple-darwin/release/$bin_name" "$PROJECT_ROOT/bin/amd64/$bin_name"
+        echo "$PROJECT_ROOT/bin/amd64/$bin_name" && return 0
+    fi
+    if [ -x "$PROJECT_ROOT/target/release/$bin_name" ]; then
+        mkdir -p "$PROJECT_ROOT/bin/amd64" && cp "$PROJECT_ROOT/target/release/$bin_name" "$PROJECT_ROOT/bin/amd64/$bin_name"
+        echo "$PROJECT_ROOT/bin/amd64/$bin_name" && return 0
+    fi
+    if command -v "$bin_name" >/dev/null 2>&1; then command -v "$bin_name" && return 0; fi
+    return 1
+}
+
+BIN=$(resolve_binary "gdb-server")
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+    echo -e "\x1b[1;31m[!] Error: AMD64 gdb-server binary not found!\x1b[0m" >&2
+    echo -e "    Checked '$PROJECT_ROOT/bin/amd64/gdb-server', '$PROJECT_ROOT/bin/gdb-server', and target/release." >&2
+    exit 1
 fi
 
 # Detect host CPU architecture
@@ -31,6 +50,9 @@ fi
 
 RF=3
 REP_MODE="sync"
+ENABLE_GPU=false
+GPU_DEVICE=0
+GPU_THRESHOLD=10000
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -58,11 +80,30 @@ while [[ $# -gt 0 ]]; do
             RF=3
             shift
             ;;
+        --gpu|--enable-gpu)
+            ENABLE_GPU=true
+            shift
+            ;;
+        --gpu-device)
+            GPU_DEVICE="$2"
+            shift 2
+            ;;
+        --gpu-threshold|--gpu-offload-threshold)
+            GPU_THRESHOLD="$2"
+            shift 2
+            ;;
         *)
             shift
             ;;
     esac
 done
+
+GPU_FLAGS=""
+GPU_DESC="Disabled"
+if [ "$ENABLE_GPU" = true ]; then
+    GPU_FLAGS="--enable-gpu --gpu-device $GPU_DEVICE --gpu-offload-threshold $GPU_THRESHOLD"
+    GPU_DESC="Active (Device #$GPU_DEVICE, Threshold: $GPU_THRESHOLD edges)"
+fi
 
 MODE_UPPER=$(echo "$REP_MODE" | tr '[:lower:]' '[:upper:]')
 echo -e "\x1b[1;36m============================================================\x1b[0m"
@@ -74,19 +115,19 @@ mkdir -p "$PROJECT_ROOT/data/amd64/node1/wal" "$PROJECT_ROOT/data/amd64/node2/wa
 mkdir -p "$PROJECT_ROOT/logs/amd64"
 
 # Start Peer 1
-$RUNNER "$BIN" --node-id 1 --partitions 8 --port 8848 --http-port 8847 --wal-dir "$PROJECT_ROOT/data/amd64/node1/wal" --peers "http://127.0.0.1:8846,http://127.0.0.1:8845" --replication-factor "$RF" --replication-mode "$REP_MODE" > "$PROJECT_ROOT/logs/amd64/node1.log" 2>&1 &
+$RUNNER "$BIN" --node-id 1 --partitions 8 --port 8848 --http-port 8847 --wal-dir "$PROJECT_ROOT/data/amd64/node1/wal" --peers "http://127.0.0.1:8846,http://127.0.0.1:8845" --replication-factor "$RF" --replication-mode "$REP_MODE" $GPU_FLAGS > "$PROJECT_ROOT/logs/amd64/node1.log" 2>&1 &
 PID1=$!
-echo -e "\x1b[1;32m[+] Peer 1 started (PID $PID1):\x1b[0m Flight :8848 | HTTP :8847 | RF: $RF | Mode: $REP_MODE | Arch: AMD64 | Role: Peer"
+echo -e "\x1b[1;32m[+] Peer 1 started (PID $PID1):\x1b[0m Flight :8848 | HTTP :8847 | RF: $RF | Mode: $REP_MODE | GPU: $GPU_DESC | Arch: AMD64 | Role: Peer"
 
 # Start Peer 2
-$RUNNER "$BIN" --node-id 2 --partitions 8 --port 8849 --http-port 8846 --wal-dir "$PROJECT_ROOT/data/amd64/node2/wal" --peers "http://127.0.0.1:8847,http://127.0.0.1:8845" --replication-factor "$RF" --replication-mode "$REP_MODE" > "$PROJECT_ROOT/logs/amd64/node2.log" 2>&1 &
+$RUNNER "$BIN" --node-id 2 --partitions 8 --port 8849 --http-port 8846 --wal-dir "$PROJECT_ROOT/data/amd64/node2/wal" --peers "http://127.0.0.1:8847,http://127.0.0.1:8845" --replication-factor "$RF" --replication-mode "$REP_MODE" $GPU_FLAGS > "$PROJECT_ROOT/logs/amd64/node2.log" 2>&1 &
 PID2=$!
-echo -e "\x1b[1;32m[+] Peer 2 started (PID $PID2):\x1b[0m Flight :8849 | HTTP :8846 | RF: $RF | Mode: $REP_MODE | Arch: AMD64 | Role: Peer"
+echo -e "\x1b[1;32m[+] Peer 2 started (PID $PID2):\x1b[0m Flight :8849 | HTTP :8846 | RF: $RF | Mode: $REP_MODE | GPU: $GPU_DESC | Arch: AMD64 | Role: Peer"
 
 # Start Peer 3
-$RUNNER "$BIN" --node-id 3 --partitions 8 --port 8850 --http-port 8845 --wal-dir "$PROJECT_ROOT/data/amd64/node3/wal" --peers "http://127.0.0.1:8847,http://127.0.0.1:8846" --replication-factor "$RF" --replication-mode "$REP_MODE" > "$PROJECT_ROOT/logs/amd64/node3.log" 2>&1 &
+$RUNNER "$BIN" --node-id 3 --partitions 8 --port 8850 --http-port 8845 --wal-dir "$PROJECT_ROOT/data/amd64/node3/wal" --peers "http://127.0.0.1:8847,http://127.0.0.1:8846" --replication-factor "$RF" --replication-mode "$REP_MODE" $GPU_FLAGS > "$PROJECT_ROOT/logs/amd64/node3.log" 2>&1 &
 PID3=$!
-echo -e "\x1b[1;32m[+] Peer 3 started (PID $PID3):\x1b[0m Flight :8850 | HTTP :8845 | RF: $RF | Mode: $REP_MODE | Arch: AMD64 | Role: Peer"
+echo -e "\x1b[1;32m[+] Peer 3 started (PID $PID3):\x1b[0m Flight :8850 | HTTP :8845 | RF: $RF | Mode: $REP_MODE | GPU: $GPU_DESC | Arch: AMD64 | Role: Peer"
 
 echo "$PID1 $PID2 $PID3" > "$PID_FILE"
 
