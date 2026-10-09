@@ -446,9 +446,56 @@ fn execute_query(
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = CliArgs::parse();
+pub(crate) fn handle_repl_input(
+    mode: &mut ClientMode,
+    input: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(true);
+    }
+    if input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") {
+        println!("Goodbye!");
+        return Ok(false);
+    }
+    if input.eq_ignore_ascii_case("help") {
+        println!("\x1b[1;33mSystem & Cluster Commands:\x1b[0m");
+        println!("  SHOW CLUSTER              - Display cluster topology, roles & node latencies");
+        println!("  SHOW RESOURCES            - Display in-memory usage (CSR, MemTable, Vertices, Edges)");
+        println!("  SHOW GPU                  - Display hardware GPU acceleration status & kernels");
+        println!("  :connect <http://host:port> - Switch target cluster endpoint");
+        println!("  compact                   - Force CSR compaction on target");
+        println!("  exit / quit               - Exit console");
+        println!("\n\x1b[1;33mGraph DDL & DML Commands:\x1b[0m");
+        println!("  CREATE VERTEX <Label> (<prop> <type>, ...)");
+        println!("  CREATE EDGE <Type> ()");
+        println!("  INSERT VERTEX <Label> (id, <props>...) VALUES (<id>, <values>...)");
+        println!("  INSERT EDGE <Type> FROM <src> TO <dst>");
+        println!("  MATCH (a)-[:TYPE]->(b) WHERE ... RETURN ...");
+        println!("\n\x1b[1;33mGraph Analytics (Nebula Enterprise Suite):\x1b[0m");
+        println!("  CALL algo.pageRank({{damping: 0.85}}) YIELD vertex_id, score");
+        println!("  CALL algo.louvain() YIELD vertex_id, community_id");
+        println!("  CALL algo.wcc() YIELD vertex_id, component_id");
+        println!("  CALL algo.scc() YIELD vertex_id, component_id");
+        println!("  CALL algo.triangleCount() YIELD vertex_id, triangles");
+        println!("  CALL algo.kCore() YIELD vertex_id, coreness");
+        println!("  CALL algo.betweenness() YIELD vertex_id, betweenness");
+        println!("  CALL algo.closeness() YIELD vertex_id, closeness");
+        println!("  CALL algo.degree() YIELD vertex_id, in_degree, out_degree");
+        println!("  CALL algo.sssp({{source: 1}}) YIELD vertex_id, distance");
+        println!("  CALL algo.similarity({{node1: 1, node2: 2}}) YIELD jaccard, common_neighbors\n");
+        return Ok(true);
+    }
 
+    if let Err(e) = execute_query(mode, input) {
+        eprintln!("\x1b[1;31mError: {}\x1b[0m\n", e);
+    } else {
+        println!();
+    }
+    Ok(true)
+}
+
+pub(crate) fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("\x1b[1;36m");
     println!("   ______ ____   ____   ");
     println!("  / ____// __ \\ / __ ) ");
@@ -547,47 +594,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sig = line_editor.read_line(&prompt);
         match sig {
             Ok(Signal::Success(buffer)) => {
-                let input = buffer.trim();
-                if input.is_empty() {
-                    continue;
-                }
-                if input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") {
-                    println!("Goodbye!");
+                if !handle_repl_input(&mut mode, &buffer)? {
                     break;
-                }
-                if input.eq_ignore_ascii_case("help") {
-                    println!("\x1b[1;33mSystem & Cluster Commands:\x1b[0m");
-                    println!("  SHOW CLUSTER              - Display cluster topology, roles & node latencies");
-                    println!("  SHOW RESOURCES            - Display in-memory usage (CSR, MemTable, Vertices, Edges)");
-                    println!("  SHOW GPU                  - Display hardware GPU acceleration status & kernels");
-                    println!("  :connect <http://host:port> - Switch target cluster endpoint");
-                    println!("  compact                   - Force CSR compaction on target");
-                    println!("  exit / quit               - Exit console");
-                    println!("\n\x1b[1;33mGraph DDL & DML Commands:\x1b[0m");
-                    println!("  CREATE VERTEX <Label> (<prop> <type>, ...)");
-                    println!("  CREATE EDGE <Type> ()");
-                    println!("  INSERT VERTEX <Label> (id, <props>...) VALUES (<id>, <values>...)");
-                    println!("  INSERT EDGE <Type> FROM <src> TO <dst>");
-                    println!("  MATCH (a)-[:TYPE]->(b) WHERE ... RETURN ...");
-                    println!("\n\x1b[1;33mGraph Analytics (Nebula Enterprise Suite):\x1b[0m");
-                    println!("  CALL algo.pageRank({{damping: 0.85}}) YIELD vertex_id, score");
-                    println!("  CALL algo.louvain() YIELD vertex_id, community_id");
-                    println!("  CALL algo.wcc() YIELD vertex_id, component_id");
-                    println!("  CALL algo.scc() YIELD vertex_id, component_id");
-                    println!("  CALL algo.triangleCount() YIELD vertex_id, triangles");
-                    println!("  CALL algo.kCore() YIELD vertex_id, coreness");
-                    println!("  CALL algo.betweenness() YIELD vertex_id, betweenness");
-                    println!("  CALL algo.closeness() YIELD vertex_id, closeness");
-                    println!("  CALL algo.degree() YIELD vertex_id, in_degree, out_degree");
-                    println!("  CALL algo.sssp({{source: 1}}) YIELD vertex_id, distance");
-                    println!("  CALL algo.similarity({{node1: 1, node2: 2}}) YIELD jaccard, common_neighbors\n");
-                    continue;
-                }
-
-                if let Err(e) = execute_query(&mut mode, input) {
-                    eprintln!("\x1b[1;31mError: {}\x1b[0m\n", e);
-                } else {
-                    println!();
                 }
             }
             Ok(Signal::CtrlC) => {
@@ -606,3 +614,184 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = CliArgs::parse();
+    run_cli(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_format_cell_and_ascii_table() {
+        assert_eq!(format_cell(&Value::Null), "NULL");
+        assert_eq!(format_cell(&Value::Bool(true)), "true");
+        assert_eq!(format_cell(&serde_json::json!(42)), "42");
+        assert_eq!(format_cell(&Value::String("test".into())), "test");
+        assert_eq!(format_cell(&serde_json::json!([1, 2, 3])), "[3 items]");
+        assert!(format_cell(&serde_json::json!({"a": 1})).contains("1"));
+
+        let cols = vec!["Col1".to_string(), "Col2".to_string()];
+        let rows = vec![
+            vec![Value::String("v1".into()), serde_json::json!(10)],
+            vec![Value::String("v2".into()), serde_json::json!(20)],
+        ];
+        print_ascii_table(&cols, &rows);
+        print_ascii_table(&[], &[]);
+    }
+
+    #[test]
+    fn test_local_query_execution() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+        let mut mode = ClientMode::Local { executor, storage };
+
+        // Empty and comments
+        assert!(execute_query(&mut mode, "").is_ok());
+        assert!(execute_query(&mut mode, "// comment").is_ok());
+        assert!(execute_query(&mut mode, "# comment").is_ok());
+
+        // SHOW commands
+        assert!(execute_query(&mut mode, "SHOW RESOURCES").is_ok());
+        assert!(execute_query(&mut mode, "SHOW GPU").is_ok());
+        assert!(execute_query(&mut mode, "SHOW CLUSTER").is_ok());
+
+        // DDL
+        assert!(execute_query(&mut mode, "CREATE VERTEX Node (val INT64);").is_ok());
+
+        // DML
+        assert!(execute_query(&mut mode, "INSERT VERTEX Node (id, val) VALUES (1, 100);").is_ok());
+
+        // Query
+        assert!(execute_query(&mut mode, "MATCH (n:Node) RETURN n.val;").is_ok());
+
+        // Compact
+        assert!(execute_query(&mut mode, "compact").is_ok());
+
+        // Error handling
+        assert!(execute_query(&mut mode, "INVALID SQL").is_err());
+    }
+
+    #[test]
+    fn test_file_batch_execution() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "// GDB Batch Script").unwrap();
+        writeln!(file, "CREATE VERTEX Item (cost FLOAT64);").unwrap();
+        writeln!(file, "INSERT VERTEX Item (id, cost) VALUES (1, 9.99);").unwrap();
+        writeln!(file, "MATCH (i:Item) RETURN i.cost;").unwrap();
+        file.flush().unwrap();
+
+        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+        let mut mode = ClientMode::Local { executor, storage };
+
+        let f = File::open(file.path()).unwrap();
+        let reader = BufReader::new(f);
+        for line in reader.lines() {
+            let line = line.unwrap();
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("//") {
+                execute_query(&mut mode, trimmed).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn test_cluster_mode_and_show_commands() {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+
+        // Direct show_* functions with dummy endpoint
+        show_cluster(&client, "http://127.0.0.1:19999");
+        show_resources(&client, "http://127.0.0.1:19999");
+        show_gpu(&client, "http://127.0.0.1:19999");
+
+        let mut mode = ClientMode::Cluster {
+            endpoint: "http://127.0.0.1:19999".to_string(),
+            client,
+        };
+
+        // Cluster inspect commands
+        assert!(execute_query(&mut mode, ":CLUSTER").is_ok());
+        assert!(execute_query(&mut mode, ":RESOURCES").is_ok());
+        assert!(execute_query(&mut mode, ":GPU").is_ok());
+
+        // Connect command with :: normalization
+        assert!(execute_query(&mut mode, ":connect http://127.0.0.1::8847").is_ok());
+        assert!(execute_query(&mut mode, ":connect 127.0.0.1:8847").is_ok());
+
+        // Compact & query error on offline cluster
+        let _ = execute_query(&mut mode, "compact");
+        let _ = execute_query(&mut mode, "MATCH (n) RETURN n;");
+    }
+
+    #[test]
+    fn test_cli_args_parsing() {
+        let args = CliArgs::parse_from(&["gdb-cli", "--local", "-e", "SHOW RESOURCES"]);
+        assert!(args.local);
+        assert_eq!(args.execute.unwrap(), "SHOW RESOURCES");
+
+        let args2 = CliArgs::parse_from(&["gdb-cli", "--endpoint", "http://127.0.0.1:9000"]);
+        assert_eq!(args2.endpoint, "http://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn test_handle_repl_input() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+        let mut mode = ClientMode::Local { executor, storage };
+
+        assert_eq!(handle_repl_input(&mut mode, "").unwrap(), true);
+        assert_eq!(handle_repl_input(&mut mode, "   ").unwrap(), true);
+        assert_eq!(handle_repl_input(&mut mode, "help").unwrap(), true);
+        assert_eq!(handle_repl_input(&mut mode, "exit").unwrap(), false);
+        assert_eq!(handle_repl_input(&mut mode, "quit").unwrap(), false);
+        assert_eq!(handle_repl_input(&mut mode, "SHOW RESOURCES").unwrap(), true);
+        assert_eq!(handle_repl_input(&mut mode, "INVALID SQL").unwrap(), true);
+    }
+
+    #[test]
+    fn test_run_cli_executions() {
+        // 1. Run with execute string in local mode
+        let args_exec = CliArgs {
+            endpoint: "http://127.0.0.1:8847".into(),
+            local: true,
+            execute: Some("SHOW RESOURCES".into()),
+            file: None,
+        };
+        assert!(run_cli(args_exec).is_ok());
+
+        // 2. Run with file batch in local mode
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "CREATE VERTEX Test (v INT64);").unwrap();
+        writeln!(file, "INSERT VERTEX Test (id, v) VALUES (1, 1);").unwrap();
+        file.flush().unwrap();
+
+        let args_file = CliArgs {
+            endpoint: "http://127.0.0.1:8847".into(),
+            local: true,
+            execute: None,
+            file: Some(file.path().to_path_buf()),
+        };
+        assert!(run_cli(args_file).is_ok());
+
+        // 3. Run with offline cluster fallback
+        let args_fallback = CliArgs {
+            endpoint: "http://127.0.0.1:19999".into(),
+            local: false,
+            execute: Some("SHOW GPU".into()),
+            file: None,
+        };
+        assert!(run_cli(args_fallback).is_ok());
+    }
+}
+

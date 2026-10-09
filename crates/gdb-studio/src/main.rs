@@ -431,18 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?,
     });
 
-    let app = Router::new()
-        .route("/", get(handle_index))
-        .route("/health", get(handle_health))
-        .route("/api/query", post(handle_query))
-        .route("/api/cluster/status", get(handle_cluster_status))
-        .route("/api/cluster", get(handle_proxy_cluster))
-        .route("/api/resources", get(handle_proxy_resources))
-        .route("/api/schema", get(handle_proxy_schema))
-        .route("/api/gpu", get(handle_proxy_gpu))
-        .route("/api/compact", post(handle_proxy_compact))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+    let app = create_studio_app(state);
 
     let bind_addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     println!(
@@ -456,3 +445,252 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+fn create_studio_app(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/", get(handle_index))
+        .route("/health", get(handle_health))
+        .route("/api/query", post(handle_query))
+        .route("/api/cluster/status", get(handle_cluster_status))
+        .route("/api/cluster", get(handle_proxy_cluster))
+        .route("/api/resources", get(handle_proxy_resources))
+        .route("/api/schema", get(handle_proxy_schema))
+        .route("/api/gpu", get(handle_proxy_gpu))
+        .route("/api/compact", post(handle_proxy_compact))
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_studio_endpoints_lifecycle() {
+        let state = Arc::new(AppState {
+            default_cluster_url: "http://127.0.0.1:9999".into(),
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(500))
+                .build()
+                .unwrap(),
+        });
+
+        let app = create_studio_app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let base_url = format!("http://{}", addr);
+
+        // 1. GET / (index html)
+        let res = client.get(&base_url).send().await.unwrap();
+        assert!(res.status().is_success());
+        let html = res.text().await.unwrap();
+        assert!(html.contains("GDB Studio"));
+
+        // 2. GET /health
+        let res = client.get(format!("{}/health", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["status"], "UP");
+        assert_eq!(body["service"], "gdb-studio");
+
+        // 3. GET /api/cluster/status (disconnected fallback)
+        let res = client.get(format!("{}/api/cluster/status", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["status"], "disconnected");
+
+        // 4. GET /api/cluster (proxy bad gateway when offline)
+        let res = client.get(format!("{}/api/cluster", base_url)).send().await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+        // 5. GET /api/resources (proxy bad gateway when offline)
+        let res = client.get(format!("{}/api/resources", base_url)).send().await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+        // 6. GET /api/schema (proxy bad gateway when offline)
+        let res = client.get(format!("{}/api/schema", base_url)).send().await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+        // 7. GET /api/gpu (proxy bad gateway when offline)
+        let res = client.get(format!("{}/api/gpu", base_url)).send().await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+        // 8. POST /api/compact (proxy bad gateway when offline)
+        let res = client.post(format!("{}/api/compact", base_url)).send().await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+        // 9. POST /api/query (proxy error when offline)
+        let res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({ "query": "MATCH (n) RETURN n;" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(res.status().is_success());
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["status"], "error");
+        assert!(body["error"].as_str().unwrap().contains("Failed to connect"));
+    }
+
+    #[tokio::test]
+    async fn test_studio_connected_cluster_lifecycle() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (server_addr, _server_handle, _server_state) =
+            gdb_server::create_test_server(temp_dir.path().to_path_buf())
+                .await
+                .unwrap();
+
+        let cluster_url = format!("http://{}", server_addr);
+
+        let state = Arc::new(AppState {
+            default_cluster_url: cluster_url.clone(),
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .unwrap(),
+        });
+
+        let app = create_studio_app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let base_url = format!("http://{}", addr);
+
+        // 1. GET /api/cluster/status (online/connected)
+        let res = client.get(format!("{}/api/cluster/status", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["status"], "connected");
+        assert_eq!(body["node_id"], 1);
+
+        // 2. GET /api/cluster
+        let res = client.get(format!("{}/api/cluster", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+
+        // 3. GET /api/resources
+        let res = client.get(format!("{}/api/resources", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+
+        // 4. GET /api/schema
+        let res = client.get(format!("{}/api/schema", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+
+        // 5. GET /api/gpu
+        let res = client.get(format!("{}/api/gpu", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+
+        // 6. POST /api/compact
+        let res = client.post(format!("{}/api/compact", base_url)).send().await.unwrap();
+        assert!(res.status().is_success());
+
+        // 7. POST /api/query: DDL & DML
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "CREATE VERTEX Person (name STRING);"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "CREATE EDGE KNOWS ();"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "INSERT VERTEX Person (id, name) VALUES (1, 'Alice');"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "INSERT VERTEX Person (id, name) VALUES (2, 'Bob');"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "INSERT EDGE KNOWS FROM 1 TO 2;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
+        // Compact storage so graph is indexed into CSR
+        let comp_res = client.post(format!("{}/api/compact", base_url)).send().await.unwrap();
+        assert!(comp_res.status().is_success());
+
+        // 8. Traversal query producing graph nodes & edges
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "MATCH (a:Person)-[e:KNOWS]->(b:Person) RETURN a.name, b.name;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+        let body: StudioQueryResponse = q_res.json().await.unwrap();
+        assert_eq!(body.status, "ok");
+        assert_eq!(body.graph.nodes.len(), 2);
+        assert_eq!(body.graph.edges.len(), 1);
+
+        // 9. Algorithm query with vertex_id column
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "CALL algo.degree() YIELD vertex_id, total_degree;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+        let body: StudioQueryResponse = q_res.json().await.unwrap();
+        assert_eq!(body.status, "ok");
+        assert!(!body.graph.nodes.is_empty());
+
+        // 10. EXPLAIN query with plan extraction
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "EXPLAIN MATCH (a:Person) RETURN a;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+        let body: StudioQueryResponse = q_res.json().await.unwrap();
+        assert_eq!(body.status, "ok");
+        assert!(body.plan.is_some());
+    }
+}
+

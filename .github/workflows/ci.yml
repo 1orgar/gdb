@@ -3,6 +3,7 @@ name: CI & Code Coverage
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -50,6 +51,9 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           cargo llvm-cov --workspace --summary-only >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Enforce Minimum 80% Line Coverage Threshold
+        run: cargo llvm-cov --workspace --fail-under-lines 80 --summary-only
 
       - name: Upload LCOV Coverage Artifact
         uses: actions/upload-artifact@v4

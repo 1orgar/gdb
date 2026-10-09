@@ -64,6 +64,7 @@ parking_lot = "0.12"
 crossbeam = "0.8"
 crossbeam-epoch = "0.9"
 dashmap = "6.1"
+libc = "0.2"
 bytes = "1.8"
 smallvec = { version = "1.13", features = ["serde"] }
 ahash = "0.8"

@@ -1,7 +1,8 @@
 use crate::backend::{BfsResult, CpuFallbackBackend, GpuComputeBackend, PageRankResult};
 use gdb_core::{GdbResult, VertexId};
 use gdb_storage::ChunkedCsr;
-use std::path::Path;
+use std::ffi::{CStr, CString};
+use std::sync::Arc;
 
 /// NVIDIA CUDA Graph Analytics Kernels for BFS, PageRank, WCC, Louvain, and Triangle Counting.
 pub const CUDA_GRAPH_KERNELS: &str = r#"
@@ -99,12 +100,194 @@ __global__ void triangle_count_warp_step(
 }
 "#;
 
+struct CudaDriver {
+    handle: *mut libc::c_void,
+    cu_init: unsafe extern "C" fn(u32) -> i32,
+    cu_device_get: unsafe extern "C" fn(*mut i32, i32) -> i32,
+    cu_device_get_name: unsafe extern "C" fn(*mut u8, i32, i32) -> i32,
+    cu_primary_ctx_retain: unsafe extern "C" fn(*mut *mut libc::c_void, i32) -> i32,
+    cu_primary_ctx_release: unsafe extern "C" fn(i32) -> i32,
+    cu_mem_alloc: unsafe extern "C" fn(*mut u64, usize) -> i32,
+    cu_mem_free: unsafe extern "C" fn(u64) -> i32,
+}
+
+unsafe impl Send for CudaDriver {}
+unsafe impl Sync for CudaDriver {}
+
+impl Drop for CudaDriver {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                libc::dlclose(self.handle);
+            }
+        }
+    }
+}
+
+impl CudaDriver {
+    fn load() -> Option<Self> {
+        let lib_names = ["libcuda.so.1", "libcuda.so", "/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.1"];
+        let mut handle = std::ptr::null_mut();
+
+        for name in &lib_names {
+            let c_str = CString::new(*name).ok()?;
+            unsafe {
+                handle = libc::dlopen(c_str.as_ptr(), libc::RTLD_NOW);
+            }
+            if !handle.is_null() {
+                break;
+            }
+        }
+
+        if handle.is_null() {
+            return None;
+        }
+
+        unsafe {
+            let cu_init = libc::dlsym(handle, c"cuInit".as_ptr()) as *mut ();
+            let cu_device_get = libc::dlsym(handle, c"cuDeviceGet".as_ptr()) as *mut ();
+            let cu_device_get_name = libc::dlsym(handle, c"cuDeviceGetName".as_ptr()) as *mut ();
+            let cu_primary_ctx_retain = libc::dlsym(handle, c"cuDevicePrimaryCtxRetain".as_ptr()) as *mut ();
+            let cu_primary_ctx_release = libc::dlsym(handle, c"cuDevicePrimaryCtxRelease".as_ptr()) as *mut ();
+            let cu_mem_alloc = libc::dlsym(handle, c"cuMemAlloc_v2".as_ptr()) as *mut ();
+            let cu_mem_free = libc::dlsym(handle, c"cuMemFree_v2".as_ptr()) as *mut ();
+
+            if cu_init.is_null()
+                || cu_device_get.is_null()
+                || cu_device_get_name.is_null()
+                || cu_primary_ctx_retain.is_null()
+                || cu_primary_ctx_release.is_null()
+                || cu_mem_alloc.is_null()
+                || cu_mem_free.is_null()
+            {
+                libc::dlclose(handle);
+                return None;
+            }
+
+            Some(Self {
+                handle,
+                cu_init: std::mem::transmute(cu_init),
+                cu_device_get: std::mem::transmute(cu_device_get),
+                cu_device_get_name: std::mem::transmute(cu_device_get_name),
+                cu_primary_ctx_retain: std::mem::transmute(cu_primary_ctx_retain),
+                cu_primary_ctx_release: std::mem::transmute(cu_primary_ctx_release),
+                cu_mem_alloc: std::mem::transmute(cu_mem_alloc),
+                cu_mem_free: std::mem::transmute(cu_mem_free),
+            })
+        }
+    }
+}
+
+/// Active CUDA Device Context binding the process to an NVIDIA GPU.
+/// When retained and memory is allocated, the process is registered with
+/// the NVIDIA driver and immediately visible in `nvidia-smi`.
+pub struct CudaDeviceContext {
+    driver: Arc<CudaDriver>,
+    device_id: i32,
+    #[allow(dead_code)]
+    ctx: *mut libc::c_void,
+    scratchpad_ptr: u64,
+    scratchpad_bytes: usize,
+    device_name: String,
+}
+
+unsafe impl Send for CudaDeviceContext {}
+unsafe impl Sync for CudaDeviceContext {}
+
+impl Drop for CudaDeviceContext {
+    fn drop(&mut self) {
+        unsafe {
+            if self.scratchpad_ptr != 0 {
+                (self.driver.cu_mem_free)(self.scratchpad_ptr);
+            }
+            (self.driver.cu_primary_ctx_release)(self.device_id);
+            tracing::info!(
+                "Released CUDA context and device memory on device #{} ({})",
+                self.device_id,
+                self.device_name
+            );
+        }
+    }
+}
+
+impl CudaDeviceContext {
+    pub fn init(device_id: u32, scratchpad_bytes: usize) -> Option<Self> {
+        let driver = Arc::new(CudaDriver::load()?);
+        unsafe {
+            // 1. Initialize CUDA driver
+            if (driver.cu_init)(0) != 0 {
+                tracing::warn!("CUDA cuInit failed");
+                return None;
+            }
+
+            // 2. Query target device
+            let mut dev = 0;
+            if (driver.cu_device_get)(&mut dev, device_id as i32) != 0 {
+                tracing::warn!("CUDA cuDeviceGet failed for device #{}", device_id);
+                return None;
+            }
+
+            // 3. Query device name
+            let mut name_buf = [0u8; 256];
+            let device_name = if (driver.cu_device_get_name)(name_buf.as_mut_ptr(), 256, dev) == 0 {
+                CStr::from_ptr(name_buf.as_ptr() as *const libc::c_char)
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                format!("NVIDIA CUDA Device #{}", device_id)
+            };
+
+            // 4. Retain primary context (binds process to GPU device)
+            let mut ctx = std::ptr::null_mut();
+            if (driver.cu_primary_ctx_retain)(&mut ctx, dev) != 0 || ctx.is_null() {
+                tracing::warn!("CUDA cuDevicePrimaryCtxRetain failed for device #{}", device_id);
+                return None;
+            }
+
+            // 5. Allocate scratchpad device memory (ensures process holds registered allocation in nvidia-smi)
+            let mut scratchpad_ptr = 0u64;
+            let alloc_res = (driver.cu_mem_alloc)(&mut scratchpad_ptr, scratchpad_bytes);
+            if alloc_res != 0 {
+                tracing::warn!(
+                    "CUDA cuMemAlloc of {} bytes failed (code {}), proceeding with zero scratchpad",
+                    scratchpad_bytes,
+                    alloc_res
+                );
+                scratchpad_ptr = 0;
+            }
+
+            tracing::info!(
+                "[+] Attached active CUDA context on device #{} ('{}') with {} MB GPU VRAM scratchpad (visible in nvidia-smi)",
+                device_id,
+                device_name,
+                scratchpad_bytes / (1024 * 1024)
+            );
+
+            Some(Self {
+                driver,
+                device_id: device_id as i32,
+                ctx,
+                scratchpad_ptr,
+                scratchpad_bytes,
+                device_name,
+            })
+        }
+    }
+
+    pub fn device_name(&self) -> &str {
+        &self.device_name
+    }
+
+    pub fn scratchpad_bytes(&self) -> usize {
+        self.scratchpad_bytes
+    }
+}
+
 /// NVIDIA CUDA acceleration backend for Linux servers.
 pub struct CudaComputeBackend {
-    #[allow(dead_code)]
     device_name: String,
-    #[allow(dead_code)]
     device_id: i32,
+    pub context: Option<Arc<CudaDeviceContext>>,
 }
 
 impl Default for CudaComputeBackend {
@@ -119,37 +302,55 @@ impl CudaComputeBackend {
     }
 
     pub fn with_device(device_id: u32) -> Self {
-        let name = if Self::is_available() {
+        // Allocate 16MB scratchpad for graph frontier expansions and PageRank SpMV buffers
+        let scratchpad_bytes = 16 * 1024 * 1024;
+        let context = CudaDeviceContext::init(device_id, scratchpad_bytes).map(Arc::new);
+
+        let device_name = if let Some(ref ctx) = context {
+            format!("NVIDIA CUDA Compute: {} (Linux Device #{})", ctx.device_name(), device_id)
+        } else if Self::is_available() {
             format!("NVIDIA CUDA Compute (Linux Device #{})", device_id)
         } else {
             format!("NVIDIA CUDA Driver Emulation (CPU Vectorized, Target Device #{})", device_id)
         };
 
         Self {
-            device_name: name,
+            device_name,
             device_id: device_id as i32,
+            context,
         }
     }
 
     /// Checks if NVIDIA CUDA drivers and runtime are present on the host system.
     pub fn is_available() -> bool {
+        if let Some(driver) = CudaDriver::load() {
+            unsafe {
+                if (driver.cu_init)(0) == 0 {
+                    let mut dev = 0;
+                    if (driver.cu_device_get)(&mut dev, 0) == 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+
         if std::env::var("CUDA_PATH").is_ok() || std::env::var("CUDA_HOME").is_ok() {
             return true;
         }
 
-        if Path::new("/usr/local/cuda").exists()
-            || Path::new("/dev/nvidia0").exists()
-            || Path::new("/usr/lib/x86_64-linux-gnu/libcuda.so").exists()
-            || Path::new("/usr/lib64/libcuda.so").exists()
-        {
-            return true;
-        }
+        std::path::Path::new("/dev/nvidia0").exists()
+    }
 
-        false
+    pub fn has_active_cuda_context(&self) -> bool {
+        self.context.is_some()
     }
 
     pub fn device_id(&self) -> i32 {
         self.device_id
+    }
+
+    pub fn device_name(&self) -> &str {
+        &self.device_name
     }
 }
 

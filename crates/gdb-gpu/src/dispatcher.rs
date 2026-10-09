@@ -1,6 +1,7 @@
 use crate::backend::{BfsResult, CpuFallbackBackend, GpuComputeBackend, PageRankResult};
 #[allow(unused_imports)]
 use crate::cuda::CudaComputeBackend;
+#[allow(unused_imports)]
 use crate::metal::MetalComputeBackend;
 use gdb_core::{GdbResult, VertexId};
 use gdb_storage::ChunkedCsr;

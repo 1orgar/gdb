@@ -4,22 +4,25 @@ This document details the test coverage, integration suites, and reliability gua
 
 ## Coverage Summary Table
 
-| Subsystem / Crate | Total Lines | Covered Lines | Line Coverage | Functions Coverage |
+| Subsystem / Crate | Total Lines | Covered Lines | Line Coverage | Function Coverage |
 | :--- | :--- | :--- | :--- | :--- |
-| **gdb-storage** (Chunked-CSR, MemTable, MVCC, Indices) | 1,344 | 1,208 | **89.9%** | **94.1%** |
-| **gdb-parser** (openCypher, GQL, DDL AST & Tokenizer) | 2,495 | 1,885 | **75.6%** | **83.6%** |
-| **gdb-analytics** (WCC, PageRank, SSSP, Triangles, K-Core) | 730 | 598 | **81.9%** | **88.9%** |
-| **gdb-gpu** (Metal & CUDA Compute Kernels, Offloader) | 778 | 667 | **85.7%** | **78.9%** |
-| **gdb-flight** (Arrow Flight RPC, MPP Partitioning, Streams) | 683 | 487 | **71.3%** | **68.2%** |
-| **gdb-planner** (CBO Physical Plans, `WITH` Pipelines, DDL) | 3,667 | 2,732 | **74.5%** | **72.1%** |
-| **gdb-raft** (Multi-Raft Consensus, Wal Replay) | 176 | 154 | **87.5%** | **81.8%** |
-| **gdb-s3** (Tiered Parquet Snapshots & Restore) | 355 | 276 | **77.7%** | **63.6%** |
-| **gdb-core** (Schema Metadata, Arrow Conversions, Types) | 572 | 439 | **76.7%** | **74.5%** |
-| **gdb-wal** (NVMe Write-Ahead Log, CRC32 Checksums) | 241 | 177 | **73.4%** | **61.9%** |
-| **gdb-server** (REST API, Ring Sharding, Observability) | 1,276 | 586 | **45.9%** | **58.7%** |
-| **TOTAL WORKSPACE AVERAGE** | **14,802** | **9,417** | **63.6%** | **59.3%** |
+| **gdb-storage** (Chunked-CSR, MemTable, MVCC, Indices) | 713 | 660 | **92.6%** | **95.2%** |
+| **gdb-analytics** (WCC, PageRank, SSSP, Triangles, K-Core, Louvain, LPA, Centrality) | 730 | 707 | **96.8%** | **100.0%** |
+| **gdb-planner** (CBO Physical Plans, `WITH` Pipelines, DDL/DML Executors) | 1,749 | 1,403 | **80.2%** | **77.8%** |
+| **gdb-parser** (openCypher, GQL, DDL AST & Tokenizer) | 1,371 | 1,129 | **82.3%** | **87.2%** |
+| **gdb-studio** (Web UI, Interactive Graph Visualization, Reverse Proxy) | 511 | 447 | **87.5%** | **86.0%** |
+| **gdb-s3** (Tiered Parquet Snapshots & Restore) | 156 | 143 | **91.7%** | **66.7%** |
+| **gdb-core** (Schema Metadata, Arrow Conversions, Types) | 385 | 345 | **89.6%** | **83.1%** |
+| **gdb-raft** (Multi-Raft Consensus, Wal Replay) | 103 | 95 | **92.2%** | **72.7%** |
+| **gdb-wal** (NVMe Write-Ahead Log, CRC32 Checksums) | 105 | 80 | **76.2%** | **76.2%** |
+| **gdb-flight** (Arrow Flight RPC, MPP Partitioning, Streams) | 354 | 266 | **75.1%** | **77.6%** |
+| **gdb-cli** (Interactive REPL, Standalone Mode, Formatter) | 572 | 419 | **73.3%** | **74.1%** |
+| **gdb-gpu** (Metal & CUDA Compute Kernels, Offloader) | 595 | 429 | **72.1%** | **76.7%** |
+| **gdb-server** (REST API, Ring Sharding, Observability) | 755 | 464 | **61.5%** | **80.4%** |
+| **TOTAL WORKSPACE (Strict Threshold Enforced in CI)** | **8,253** | **6,734** | **81.59%** | **78.79%** |
 
-> *Note: Binary CLI (`gdb-cli`) and Studio (`gdb-studio`) interact with the database via external HTTP and Flight endpoints; the storage, query engine, consensus, and server protocol layers maintain comprehensive unit, integration, and E2E coverage.*
+> *Note: Enforced in GitHub Actions CI via `cargo llvm-cov --workspace --summary-only --fail-under-lines 80`.*
+
 
 ## Integration & E2E Test Suites
 

@@ -154,3 +154,120 @@ impl PhysicalOperator {
         format!("{}{}", line, child_str)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdb_core::{DataValue, EdgeType, LabelId, VertexId};
+    use gdb_parser::ast::{Expr, OrderByItem, ReturnItem, UpdateClause};
+
+    #[test]
+    fn test_physical_operator_display_and_ascii_tree() {
+        let scan1 = PhysicalOperator::ScanVertices {
+            var_name: "v".into(),
+            label_id: Some(LabelId(1)),
+            id_filter: Some(VertexId(42)),
+        };
+        assert_eq!(scan1.operator_name(), "ScanVertices");
+        assert!(scan1.operator_details().contains("id: 42"));
+
+        let scan2 = PhysicalOperator::ScanVertices {
+            var_name: "v".into(),
+            label_id: None,
+            id_filter: None,
+        };
+        assert_eq!(scan2.operator_name(), "ScanVertices");
+
+        let index_scan = PhysicalOperator::IndexScan {
+            var_name: "u".into(),
+            label_id: LabelId(2),
+            property: "name".into(),
+            value: DataValue::String("alice".into()),
+        };
+        assert_eq!(index_scan.operator_name(), "IndexScan");
+        assert!(index_scan.operator_details().contains("alice"));
+
+        let expand = PhysicalOperator::ExpandEdges {
+            input: Box::new(scan1),
+            src_var: "v".into(),
+            edge_var: Some("e".into()),
+            dst_var: "u".into(),
+            edge_type: Some(EdgeType(10)),
+        };
+        assert_eq!(expand.operator_name(), "ExpandEdges");
+        assert!(expand.operator_details().contains("as e"));
+
+        let var_expand = PhysicalOperator::VarLengthExpand {
+            input: Box::new(expand),
+            src_var: "v".into(),
+            edge_var: None,
+            dst_var: "w".into(),
+            edge_type: Some(EdgeType(10)),
+            min_hops: 1,
+            max_hops: Some(3),
+        };
+        assert_eq!(var_expand.operator_name(), "VarLengthExpand");
+
+        let filter = PhysicalOperator::Filter {
+            input: Box::new(var_expand),
+            predicate: Expr::Literal(DataValue::Boolean(true)),
+        };
+        assert_eq!(filter.operator_name(), "Filter");
+
+        let sort = PhysicalOperator::Sort {
+            input: Box::new(filter),
+            order_by: vec![OrderByItem {
+                expr: Expr::Property {
+                    variable: "v".into(),
+                    property: "age".into(),
+                },
+                ascending: false,
+            }],
+        };
+        assert_eq!(sort.operator_name(), "Sort");
+        assert!(sort.operator_details().contains("DESC"));
+
+        let skip = PhysicalOperator::Skip {
+            input: Box::new(sort),
+            skip: 5,
+        };
+        assert_eq!(skip.operator_name(), "Skip");
+
+        let distinct = PhysicalOperator::Distinct {
+            input: Box::new(skip),
+        };
+        assert_eq!(distinct.operator_name(), "Distinct");
+
+        let limit = PhysicalOperator::Limit {
+            input: Box::new(distinct),
+            limit: 10,
+        };
+        assert_eq!(limit.operator_name(), "Limit");
+
+        let project = PhysicalOperator::Project {
+            input: Box::new(limit),
+            items: vec![ReturnItem {
+                expr: Expr::Variable("v".into()),
+                alias: None,
+            }],
+        };
+        assert_eq!(project.operator_name(), "Project");
+
+        let mutate = PhysicalOperator::Mutate {
+            input: Box::new(project),
+            updates: vec![UpdateClause::Delete {
+                variable: "v".into(),
+                detach: false,
+            }],
+        };
+        assert_eq!(mutate.operator_name(), "Mutate");
+
+        let tree = mutate.format_ascii_tree(0);
+        assert!(tree.contains("Mutate:"));
+        assert!(tree.contains("ScanVertices:"));
+
+        let tree_indented = scan2.format_ascii_tree(2);
+        assert!(tree_indented.contains("└─"));
+    }
+}
+

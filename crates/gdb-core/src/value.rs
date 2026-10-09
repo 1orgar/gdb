@@ -129,8 +129,30 @@ impl DataValue {
                     .ok_or_else(|| GdbError::Internal("Downcast StringArray failed".into()))?;
                 Ok(DataValue::String(arr.value(row_idx).to_string()))
             }
+            ArrowDataType::Date32 => {
+                let arr = array.as_any().downcast_ref::<arrow::array::Date32Array>()
+                    .ok_or_else(|| GdbError::Internal("Downcast Date32Array failed".into()))?;
+                Ok(DataValue::Date(arr.value(row_idx)))
+            }
+            ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => {
+                let arr = array.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    .ok_or_else(|| GdbError::Internal("Downcast TimestampMicrosecondArray failed".into()))?;
+                Ok(DataValue::Timestamp(arr.value(row_idx)))
+            }
             other => Err(GdbError::Storage(format!("Unsupported Arrow type extraction: {:?}", other))),
         }
+    }
+}
+
+impl From<bool> for DataValue {
+    fn from(b: bool) -> Self {
+        DataValue::Boolean(b)
+    }
+}
+
+impl From<String> for DataValue {
+    fn from(s: String) -> Self {
+        DataValue::String(s)
     }
 }
 
@@ -149,17 +171,5 @@ impl From<f64> for DataValue {
 impl From<&str> for DataValue {
     fn from(s: &str) -> Self {
         DataValue::String(s.to_string())
-    }
-}
-
-impl From<String> for DataValue {
-    fn from(s: String) -> Self {
-        DataValue::String(s)
-    }
-}
-
-impl From<bool> for DataValue {
-    fn from(b: bool) -> Self {
-        DataValue::Boolean(b)
     }
 }

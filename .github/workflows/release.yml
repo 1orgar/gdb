@@ -4,20 +4,47 @@ on:
   push:
     tags:
       - 'v*'
-      - '*'
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release Tag name (e.g. v0.1.0)'
+        description: 'Release Tag name (e.g. v0.4.1)'
         required: true
-        default: 'v0.1.0'
+        default: 'v0.4.1'
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
 jobs:
-  build-and-release:
+  # Stage 1: Run comprehensive test suite before building or publishing ANY assets
+  test:
+    name: Run Test Suite (Pre-Release Gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config
+
+      - name: Cargo Check
+        run: cargo check --workspace --all-targets
+
+      - name: Run All Workspace Tests
+        run: cargo test --workspace --all-targets --verbose
+
+  # Stage 2: Build release binaries across platforms ONLY if tests pass
+  build-assets:
     name: Build ${{ matrix.asset_name }} (${{ matrix.target }})
+    needs: [test]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -124,19 +151,98 @@ jobs:
             shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
           fi
           
-          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+          mkdir -p dist_upload
+          mv "${ARCHIVE_NAME}" dist_upload/
+          mv "${ARCHIVE_NAME}.sha256" dist_upload/
 
-      - name: Upload Assets to GitHub Release
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.asset_name }}
+          path: dist_upload/*
+          retention-days: 2
+
+  # Stage 3: Publish GitHub Release ONCE with all artifacts, clean changelog, and Dutch codename
+  publish-release:
+    name: Publish GitHub Release & Assets
+    needs: [test, build-assets]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Release Tag & Dutch Codename
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "RELEASE_TAG=${TAG}" >> $GITHUB_ENV
+
+          # Dutch proper noun release codename (1 word)
+          case "$TAG" in
+            v0.1.0) CODENAME="Amsterdam" ;;
+            v0.2.0) CODENAME="Rotterdam" ;;
+            v0.3.0) CODENAME="Utrecht" ;;
+            v0.3.1) CODENAME="Haarlem" ;;
+            v0.4.0) CODENAME="Delft" ;;
+            v0.4.1) CODENAME="Rembrandt" ;;
+            v0.4.2) CODENAME="Vermeer" ;;
+            v0.5.0) CODENAME="Spinoza" ;;
+            v0.6.0) CODENAME="Huygens" ;;
+            v0.7.0) CODENAME="Erasmus" ;;
+            *)      CODENAME="Leeuwenhoek" ;;
+          esac
+          echo "CODENAME=${CODENAME}" >> $GITHUB_ENV
+          echo "RELEASE_TITLE=v${TAG#v} — ${CODENAME}" >> $GITHUB_ENV
+
+      - name: Download All Built Assets
+        uses: actions/download-artifact@v4
+        with:
+          path: all_assets
+          merge-multiple: true
+
+      - name: Generate Clean Release Notes
+        shell: bash
+        run: |
+          # Identify previous tag for comparison
+          PREV_TAG=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -v "^${RELEASE_TAG}$" | head -n 1)
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG="v0.4.0"
+          fi
+
+          cat << 'EOF' > release_notes.md
+          ## Release **${{ env.CODENAME }}** (${{ env.RELEASE_TAG }})
+
+          ### What's Changed
+          - **NVIDIA GPU `nvidia-smi` Registration**: Dynamic CUDA Driver context attachment (`cuDevicePrimaryCtxRetain`) and scratchpad allocation ensuring process visibility in `nvidia-smi`.
+          - **Test Suite & Coverage Overhaul**: Increased workspace test coverage to >= 80% across storage, query planner, Arrow Flight, Raft consensus, and server endpoints.
+          - **Workflow Guardrails**: Automated pre-release testing gates preventing asset builds on test failure.
+          - **openCypher Enhancements**: Extended `WITH` clause support with projections, aggregations, and physical pipelining.
+          - **Catalog & Studio**: Clean graph catalog initialization with dynamic schema management via REST and GDB Studio Web UI.
+
+          ### Checksums & Verification
+          Every binary archive is accompanied by a SHA256 checksum file (`.tar.gz.sha256`).
+
+          **Full Changelog**: https://github.com/1orgar/gdb/compare/${PREV_TAG}...${{ env.RELEASE_TAG }}
+          EOF
+
+          # Replace variable in release_notes.md
+          sed -i "s/\${PREV_TAG}/$PREV_TAG/g" release_notes.md
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "GDB Release ${{ env.RELEASE_TAG }}"
+          name: "GDB Release ${{ env.RELEASE_TITLE }}"
+          body_path: release_notes.md
           draft: false
           prerelease: false
-          generate_release_notes: true
-          files: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
+          generate_release_notes: false
+          files: all_assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
