@@ -246,7 +246,7 @@ impl FlightService for GdbClientFlightService {
                         .map(|(idx, f)| (f.name().clone(), batch.column(idx)))
                         .collect();
 
-                    let default_label = label_or_type.clone().unwrap_or_else(|| "User".into());
+                    let default_label = label_or_type.clone().unwrap_or_else(|| "_default".into());
 
                     for i in 0..num_rows {
                         let vid = match extract_vid(id_col, i) {

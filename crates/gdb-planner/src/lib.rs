@@ -253,4 +253,77 @@ mod tests {
         assert_eq!(agg_b.num_rows(), 2); // 2 cities: SF, NY
         assert_eq!(agg_b.num_columns(), 6);
     }
+
+    #[test]
+    fn test_ddl_and_schema_management() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("test_ddl")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema.clone(), storage.clone());
+
+        // 1. Create schemas
+        executor.execute(parse("CREATE VERTEX Person (name STRING, age INT64)").unwrap()).unwrap();
+        executor.execute(parse("CREATE EDGE KNOWS ()").unwrap()).unwrap();
+
+        // 2. SHOW SCHEMA
+        let show_res = executor.execute(parse("SHOW SCHEMA").unwrap()).unwrap();
+        assert_eq!(show_res.rows_affected, 2);
+
+        // 3. SHOW TAGS
+        let show_tags = executor.execute(parse("SHOW TAGS").unwrap()).unwrap();
+        assert_eq!(show_tags.rows_affected, 1);
+
+        // 4. ALTER VERTEX ADD
+        let alter_res = executor.execute(parse("ALTER VERTEX Person ADD (email STRING)").unwrap()).unwrap();
+        assert!(alter_res.message.contains("Altered"));
+        assert!(schema.read().get_vertex_schema("Person").unwrap().properties.iter().any(|p| p.name == "email"));
+
+        // 5. ALTER VERTEX DROP
+        let alter_drop = executor.execute(parse("ALTER VERTEX Person DROP (email)").unwrap()).unwrap();
+        assert!(alter_drop.message.contains("Altered"));
+        assert!(!schema.read().get_vertex_schema("Person").unwrap().properties.iter().any(|p| p.name == "email"));
+
+        // 6. DROP VERTEX & DROP EDGE
+        let drop_v = executor.execute(parse("DROP VERTEX Person").unwrap()).unwrap();
+        assert!(drop_v.message.contains("Dropped"));
+        assert!(schema.read().get_vertex_schema("Person").is_none());
+
+        let drop_e = executor.execute(parse("DROP EDGE KNOWS").unwrap()).unwrap();
+        assert!(drop_e.message.contains("Dropped"));
+        assert!(schema.read().get_edge_schema("KNOWS").is_none());
+    }
+
+    #[test]
+    fn test_cypher_with_clause() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("with_test")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = QueryExecutor::new(schema, storage.clone());
+
+        executor.execute(parse("CREATE VERTEX Person (name STRING, age INT64)").unwrap()).unwrap();
+        executor.execute(parse("CREATE EDGE KNOWS ()").unwrap()).unwrap();
+
+        executor.execute(parse("INSERT VERTEX Person (id, name, age) VALUES (1, 'Alice', 30)").unwrap()).unwrap();
+        executor.execute(parse("INSERT VERTEX Person (id, name, age) VALUES (2, 'Bob', 25)").unwrap()).unwrap();
+        executor.execute(parse("INSERT VERTEX Person (id, name, age) VALUES (3, 'Charlie', 35)").unwrap()).unwrap();
+        executor.execute(parse("INSERT EDGE KNOWS FROM 1 TO 2").unwrap()).unwrap();
+        executor.execute(parse("INSERT EDGE KNOWS FROM 1 TO 3").unwrap()).unwrap();
+        executor.execute(parse("INSERT EDGE KNOWS FROM 2 TO 3").unwrap()).unwrap();
+
+        // 1. Simple WITH projection and filtering
+        let q1 = parse("MATCH (p:Person) WITH p, p.age AS age WHERE age > 28 RETURN p.name, age ORDER BY age ASC").unwrap();
+        let res1 = executor.execute(q1).unwrap();
+        let b1 = res1.batch.unwrap();
+        assert_eq!(b1.num_rows(), 2); // Alice (30) and Charlie (35)
+
+        // 2. WITH aggregation (friends count)
+        let q2 = parse("MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(b) AS friends WHERE friends > 1 RETURN a.name, friends").unwrap();
+        let res2 = executor.execute(q2).unwrap();
+        let b2 = res2.batch.unwrap();
+        assert_eq!(b2.num_rows(), 1); // Only Alice has 2 friends (> 1)
+
+        // 3. WITH chained into next MATCH
+        let q3 = parse("MATCH (a:Person) WITH a WHERE a.age > 28 MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
+        let res3 = executor.execute(q3).unwrap();
+        let b3 = res3.batch.unwrap();
+        assert_eq!(b3.num_rows(), 2); // Alice->Bob and Alice->Charlie
+    }
 }

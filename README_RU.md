@@ -2,6 +2,11 @@
 
 # GDB — Распределенная высокопроизводительная In-Memory Графовая СУБД (Альтернатива Nebula Graph)
 
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](Cargo.toml)
+[![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-63.6%25-brightgreen)](docs/COVERAGE.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
+
 Высокопроизводительный распределенный HTAP графовый движок СУБД на **Rust**, включающий in-memory топологию Compressed Sparse Row (CSR), столбчатое хранение свойств Apache Arrow, поддержку языка openCypher/GQL и DML мутаций, вторичные индексы свойств, беслидерное кольцо Multi-Raft репликации, многоуровневое хранилище с персистентностью в S3 (Parquet), распределенный MPP обмен через Apache Arrow Flight и **аппаратное GPU-ускорение Apple Metal (UMA Zero-Copy) / NVIDIA CUDA**.
 
 ---
@@ -17,6 +22,7 @@
 
 2. **Язык запросов, DML & Аналитика (openCypher / GQL / CALL algo):**
    - **Шаблоны и Multi-Hop обходы:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name`.
+   - **Конвейер оператора `WITH`:** Промежуточные проекции, группировки и фильтрации: `MATCH (u:User) WITH u.department AS dept, count(u) AS cnt WHERE cnt > 1 RETURN dept, cnt ORDER BY dept ASC`.
    - **Cypher DML (Мутации & Слияния):** `MATCH (u:User {name: 'Alice'}) SET u.age = 31`, `MATCH (u:User) DELETE u`, `MATCH (u:User) DETACH DELETE u`, `MERGE (u:User {name: 'Charlie', age: 35})`.
    - **Агрегации & Пагинация:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `DISTINCT`, `ORDER BY prop [ASC|DESC]`, `SKIP N` / `OFFSET N`, `LIMIT N`.
    - **Инспекция плана выполнения (EXPLAIN):** `EXPLAIN <query>` генерирует оптимизированный физический план выполнения запроса с оценкой операторов (`IndexScan`, `Filter`, `Projection`, `Sort`, `Aggregate`, `Mutate`).
@@ -34,9 +40,10 @@
    - **Гибкая конфигурация:** Флаг включения `--enable-gpu` (по умолчанию выключено), выбор устройства `--gpu-device <ID>`, порог переключения `--gpu-offload-threshold <N>`.
    - **CPU SIMD Fallback:** При выключенном GPU или отсутствии графического процессора автоматически используется векторизованный параллельный бэкенд на Rayon.
 
-5. **GDB Studio v0.4.0 (Интерактивный Web Workspace):**
-   - Интерактивный редактор openCypher / GQL с историей запросов и шаблонами.
-   - Физическая визуализация графа (60 FPS Canvas & 3D Unity WebGL).
+5. **GDB Studio v0.4.1 (Интерактивный Web Workspace):**
+   - **Чистый каталог по умолчанию:** База запускается с чистым каталогом без тестовых сущностей.
+   - **Интерактивный Schema Manager:** Просмотр, создание, изменение и удаление тегов вершин и типов ребер визуально или запросом Cypher DDL.
+   - Физическая визуализация графа (60 FPS 2D Canvas & 3D Unity WebGL).
    - **🔍 Визуализатор Execution Plan DAG:** Наглядное отображение этапов выполнения запроса и ASCII-дерево.
    - **📈 Real-Time Engine Telemetry:** Графики-спарклайны в реальном времени для QPS, задержки исполнения запросов и динамики RAM.
    - **Экспорт данных:** Выгрузка топологии и результатов в форматы PNG, SVG, CSV и JSON.
@@ -237,9 +244,29 @@ SHOW GPU;
 
 ---
 
+## 🧪 Тестирование и покрытие кода (Code Coverage)
+
+В GDB реализован полный набор юнит-, интеграционных и E2E тестов с автоматическим отслеживанием покрытия:
+
+```bash
+# Запуск полного набора тестов рабочего пространства
+cargo test --workspace
+
+# Генерация отчета о покрытии кода (cargo-llvm-cov)
+./scripts/coverage.sh
+
+# Открытие интерактивного HTML-отчета
+cargo llvm-cov --workspace --html --open
+```
+
+Подробное описание тест-сьютов и покрытие по компонентам доступно в **[docs/COVERAGE.md](docs/COVERAGE.md)**.
+
+---
+
 ## 📖 Подробная документация
 
 - 👉 **[Руководство по серверу и запросам (SERVER_AND_QUERY_GUIDE_RU.md)](docs/SERVER_AND_QUERY_GUIDE_RU.md)**
+- 👉 **[Отчет о тестировании и покрытии кода (COVERAGE.md)](docs/COVERAGE.md)**
 - 👉 **[Руководство по эксплуатации и загрузке данных (OPERATIONS_GUIDE_RU.md)](docs/OPERATIONS_GUIDE_RU.md)**
 
 ---

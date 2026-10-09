@@ -125,6 +125,14 @@ impl VertexPropertyTable {
         }
     }
 
+    /// Drops a property column from all stored vertices and removes its index.
+    pub fn drop_property(&self, prop_name: &str) {
+        self.indexes.remove(prop_name);
+        for mut entry in self.row_cache.iter_mut() {
+            entry.value_mut().remove(prop_name);
+        }
+    }
+
     /// Fast OLTP lookup of a property by name.
     pub fn get_property(&self, vid: VertexId, prop_name: &str) -> Option<DataValue> {
         self.row_cache
@@ -135,6 +143,16 @@ impl VertexPropertyTable {
     /// Returns all vertex IDs currently stored in row cache.
     pub fn vertex_ids(&self) -> Vec<VertexId> {
         self.row_cache.iter().map(|entry| VertexId(*entry.key())).collect()
+    }
+
+    /// Number of vertices stored in the property table.
+    pub fn len(&self) -> usize {
+        self.row_cache.len()
+    }
+
+    /// Whether the property table is empty.
+    pub fn is_empty(&self) -> bool {
+        self.row_cache.is_empty()
     }
 
     /// Re-builds Arrow RecordBatches from in-memory row cache for vectorized OLAP query execution.

@@ -205,4 +205,108 @@ impl GraphSchema {
     pub fn get_edge_schema_by_type(&self, edge_type: EdgeType) -> Option<&EdgeSchema> {
         self.edge_types.get(&edge_type).and_then(|name| self.edges.get(name))
     }
+
+    pub fn drop_vertex_label(&mut self, label: &str) -> GdbResult<LabelId> {
+        if let Some(schema) = self.labels.remove(label) {
+            self.label_ids.remove(&schema.label_id);
+            self.indexes.remove(label);
+            Ok(schema.label_id)
+        } else {
+            Err(GdbError::Schema(format!("Vertex label '{}' does not exist", label)))
+        }
+    }
+
+    pub fn drop_edge_type(&mut self, edge_type_name: &str) -> GdbResult<EdgeType> {
+        if let Some(schema) = self.edges.remove(edge_type_name) {
+            self.edge_types.remove(&schema.edge_type);
+            Ok(schema.edge_type)
+        } else {
+            Err(GdbError::Schema(format!("Edge type '{}' does not exist", edge_type_name)))
+        }
+    }
+
+    pub fn alter_vertex_label(
+        &mut self,
+        label: &str,
+        add_props: Vec<PropertySpec>,
+        drop_props: Vec<String>,
+    ) -> GdbResult<()> {
+        let schema = self
+            .labels
+            .get_mut(label)
+            .ok_or_else(|| GdbError::Schema(format!("Vertex label '{}' does not exist", label)))?;
+
+        // Drop specified properties
+        for dp in &drop_props {
+            schema.properties.retain(|p| &p.name != dp);
+            if let Some(idx_set) = self.indexes.get_mut(label) {
+                idx_set.remove(dp);
+            }
+        }
+
+        // Add new properties
+        for ap in add_props {
+            if schema.properties.iter().any(|p| p.name == ap.name) {
+                return Err(GdbError::Schema(format!(
+                    "Property '{}' already exists on label '{}'",
+                    ap.name, label
+                )));
+            }
+            schema.properties.push(ap);
+        }
+
+        Ok(())
+    }
+
+    pub fn alter_edge_type(
+        &mut self,
+        edge_type_name: &str,
+        add_props: Vec<PropertySpec>,
+        drop_props: Vec<String>,
+    ) -> GdbResult<()> {
+        let schema = self
+            .edges
+            .get_mut(edge_type_name)
+            .ok_or_else(|| GdbError::Schema(format!("Edge type '{}' does not exist", edge_type_name)))?;
+
+        for dp in &drop_props {
+            schema.properties.retain(|p| &p.name != dp);
+        }
+
+        for ap in add_props {
+            if schema.properties.iter().any(|p| p.name == ap.name) {
+                return Err(GdbError::Schema(format!(
+                    "Property '{}' already exists on edge type '{}'",
+                    ap.name, edge_type_name
+                )));
+            }
+            schema.properties.push(ap);
+        }
+
+        Ok(())
+    }
+
+    pub fn list_vertex_schemas(&self) -> Vec<&VertexSchema> {
+        let mut list: Vec<&VertexSchema> = self.labels.values().collect();
+        list.sort_by_key(|s| s.label_id.0);
+        list
+    }
+
+    pub fn list_edge_schemas(&self) -> Vec<&EdgeSchema> {
+        let mut list: Vec<&EdgeSchema> = self.edges.values().collect();
+        list.sort_by_key(|s| s.edge_type.0);
+        list
+    }
+
+    pub fn list_vertex_labels(&self) -> Vec<String> {
+        let mut list: Vec<String> = self.labels.keys().cloned().collect();
+        list.sort();
+        list
+    }
+
+    pub fn list_edge_types(&self) -> Vec<String> {
+        let mut list: Vec<String> = self.edges.keys().cloned().collect();
+        list.sort();
+        list
+    }
 }

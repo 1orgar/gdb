@@ -260,4 +260,87 @@ mod tests {
             panic!("Expected Query");
         }
     }
+
+    #[test]
+    fn test_parse_ddl_drop_alter_show() {
+        assert_eq!(
+            parse("DROP VERTEX Person;").unwrap(),
+            Statement::DropVertexLabel {
+                label: "Person".into()
+            }
+        );
+        assert_eq!(
+            parse("DROP TAG Person;").unwrap(),
+            Statement::DropVertexLabel {
+                label: "Person".into()
+            }
+        );
+        assert_eq!(
+            parse("DROP EDGE KNOWS;").unwrap(),
+            Statement::DropEdgeType {
+                edge_type: "KNOWS".into()
+            }
+        );
+
+        let alter_v = parse("ALTER VERTEX Person ADD (email STRING, score FLOAT64);").unwrap();
+        match alter_v {
+            Statement::AlterVertexLabel {
+                label,
+                add_properties,
+                drop_properties,
+            } => {
+                assert_eq!(label, "Person");
+                assert_eq!(add_properties.len(), 2);
+                assert!(drop_properties.is_empty());
+            }
+            _ => panic!("Expected AlterVertexLabel"),
+        }
+
+        let alter_v_drop = parse("ALTER VERTEX Person DROP (email);").unwrap();
+        match alter_v_drop {
+            Statement::AlterVertexLabel {
+                label,
+                add_properties,
+                drop_properties,
+            } => {
+                assert_eq!(label, "Person");
+                assert!(add_properties.is_empty());
+                assert_eq!(drop_properties, vec!["email".to_string()]);
+            }
+            _ => panic!("Expected AlterVertexLabel"),
+        }
+
+        assert_eq!(parse("SHOW SCHEMA;").unwrap(), Statement::ShowSchema);
+        assert_eq!(parse("SHOW TAGS;").unwrap(), Statement::ShowVertexLabels);
+        assert_eq!(parse("SHOW EDGES;").unwrap(), Statement::ShowEdgeTypes);
+    }
+
+    #[test]
+    fn test_parse_with_clause() {
+        let q1 = "MATCH (a:Person) WITH a, a.age AS age WHERE age > 20 RETURN a.name, age;";
+        match parse(q1).unwrap() {
+            Statement::Query(q) => {
+                let with = q.with_clause.expect("Expected with_clause");
+                assert_eq!(with.items.len(), 2);
+                assert_eq!(with.items[1].alias, Some("age".into()));
+                assert!(with.where_clause.is_some());
+                assert_eq!(q.return_items.len(), 2);
+            }
+            _ => panic!("Expected Query"),
+        }
+
+        let q2 = "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(b) AS friends ORDER BY friends DESC LIMIT 10 MATCH (a)-[:WORKS_AT]->(c) RETURN a.name, friends, c.name;";
+        match parse(q2).unwrap() {
+            Statement::Query(q) => {
+                let with = q.with_clause.expect("Expected with_clause");
+                assert_eq!(with.items.len(), 2);
+                assert_eq!(with.limit, Some(10));
+                assert_eq!(with.order_by.len(), 1);
+                assert!(!with.order_by[0].ascending);
+                assert!(q.next_match.is_some());
+                assert_eq!(q.return_items.len(), 3);
+            }
+            _ => panic!("Expected Query"),
+        }
+    }
 }

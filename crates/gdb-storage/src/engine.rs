@@ -140,6 +140,20 @@ impl PartitionStorageEngine {
         }
     }
 
+    /// Drops all stored properties and indexes for an entire vertex label.
+    pub fn drop_vertex_label(&self, label_id: LabelId) {
+        let mut guard = self.vertex_properties.write();
+        guard.remove(&label_id);
+    }
+
+    /// Drops a single property column from a vertex label.
+    pub fn drop_vertex_property(&self, label_id: LabelId, prop_name: &str) {
+        let guard = self.vertex_properties.read();
+        if let Some(table) = guard.get(&label_id) {
+            table.drop_property(prop_name);
+        }
+    }
+
     /// Traverses outgoing edges of a vertex combining CSR + Delta MemTable with MVCC visibility.
     pub fn get_out_edges(
         &self,

@@ -2,7 +2,7 @@
 
 # GDB: Server Configuration Guide & Query Reference
 
-Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.4.0**.
+Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.4.1**.
 
 ---
 
@@ -15,6 +15,7 @@ Each GDB server node (`gdb-server`) combines:
 - Hardware compute acceleration (Apple Metal UMA Zero-Copy / NVIDIA CUDA / CPU SIMD).
 - Transport layer: Apache Arrow Flight (gRPC) + HTTP REST API (:8847).
 - Cluster peer replication (`/raft/replicate`).
+- Schema introspection endpoint (`/schema`).
 - Prometheus metrics exporter (`/metrics`).
 
 ### 1.1. Complete `gdb-server` Command-Line Reference
@@ -31,7 +32,7 @@ gdb-server [OPTIONS]
 | `--partitions` | — | — | `u32` | `4` | Number of independent Multi-Raft groups and storage partitions per node. |
 | `--port` | `-p` | — | `u16` | `8848` | **Internal Apache Arrow Flight gRPC** network port for inter-node MPP shuffle and RecordBatch exchange. |
 | `--client-flight-port` | — | `GDB_CLIENT_FLIGHT_PORT` | `u16` | `8860` | **External Client Flight gRPC** port for streaming bulk ingestion (`do_put`) and direct Cypher streaming (`do_get`). |
-| `--http-port` | — | — | `u16` | `8847` | **HTTP REST API** port for client queries (`POST /query`), replication (`POST /replicate`), metrics (`GET /metrics`), cluster status (`GET /cluster`), and health checks (`GET /health`). |
+| `--http-port` | — | — | `u16` | `8847` | **HTTP REST API** port for client queries (`POST /query`), schema (`GET /schema`), replication (`POST /replicate`), metrics (`GET /metrics`), cluster status (`GET /cluster`), and health checks (`GET /health`). |
 | `--wal-dir` | — | — | `path` | `./data/wal` | Disk path for the append-only **Write-Ahead Log (WAL)** with CRC32 checksums. |
 | `--peers` | — | — | `string` | *(empty)* | Comma-separated list of peer HTTP addresses (e.g. `"http://127.0.0.1:8846,http://127.0.0.1:8845"`). |
 | `--replication-factor` | `-r` | `GDB_REPLICATION_FACTOR` | `u32` | `3` | **Replication Factor (RF):**<br>• `1` — Pure distributed sharding (MPP mode, $\sum\text{RAM}$).<br>• `k` — Partial replication across $k$ consecutive nodes.<br>• `N` — Full mirroring across all active peers. |
@@ -137,8 +138,16 @@ CREATE EDGE CONNECTS ();
 CREATE INDEX ON :User(name);
 CREATE INDEX ON :User(age);
 
--- 4. Drop Secondary Property Index
+-- 4. Alter Vertex Tags & Edge Types
+ALTER VERTEX User ADD (email STRING, country STRING);
+ALTER VERTEX User DROP (country);
+ALTER EDGE FOLLOWS ADD (since INT64);
+ALTER EDGE FOLLOWS DROP (since);
+
+-- 5. Drop Schema Elements
 DROP INDEX ON :User(age);
+DROP VERTEX Device;
+DROP EDGE CONNECTS;
 ```
 
 ---
@@ -189,6 +198,19 @@ RETURN a.name, b.name;
 MATCH (a:User)-[:FOLLOWS*1..3]->(b:User)
 WHERE a.id = 1
 RETURN a.name, b.name;
+
+-- Chained Transformations via WITH Operator:
+MATCH (u:User)
+WITH u.department AS dept, count(u) AS team_size, avg(u.salary) AS avg_sal
+WHERE team_size >= 2
+RETURN dept, team_size, avg_sal
+ORDER BY team_size DESC;
+
+-- Multi-hop Pipelining with WITH:
+MATCH (a:User)-[:FOLLOWS]->(b:User)
+WITH b.name AS followee, b.age AS followee_age
+WHERE followee_age > 20
+RETURN followee, followee_age;
 
 -- Aggregations & Group By:
 MATCH (a:User)-[:FOLLOWS]->(b:User)
@@ -310,3 +332,22 @@ df_edges = pl.DataFrame({
 })
 client.scatter_ingest_edges(df_edges, edge_type="FOLLOWS")
 ```
+
+---
+
+## Part 4. Testing, Verification & Code Coverage
+
+GDB enforces a continuous testing and coverage pipeline:
+
+```bash
+# 1. Run all workspace tests (unit, integration, and E2E)
+cargo test --workspace
+
+# 2. Run automated coverage pipeline (cargo-llvm-cov)
+./scripts/coverage.sh
+
+# 3. View interactive HTML coverage report
+cargo llvm-cov --workspace --html --open
+```
+
+See **[COVERAGE.md](COVERAGE.md)** for detailed metrics across all subsystems and test suites.

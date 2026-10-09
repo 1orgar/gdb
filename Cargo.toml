@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["GDB Team"]
 license = "Apache-2.0"
@@ -85,8 +85,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Memory Allocator
 mimalloc = { version = "0.1", default-features = false }
 
-# Benchmarking
+# Benchmarking & Testing
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tempfile = "3.10"
 
 [profile.release]
 opt-level = 3

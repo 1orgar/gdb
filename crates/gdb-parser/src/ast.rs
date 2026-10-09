@@ -19,6 +19,25 @@ pub enum Statement {
         label: String,
         property: String,
     },
+    DropVertexLabel {
+        label: String,
+    },
+    DropEdgeType {
+        edge_type: String,
+    },
+    AlterVertexLabel {
+        label: String,
+        add_properties: Vec<PropertySpec>,
+        drop_properties: Vec<String>,
+    },
+    AlterEdgeType {
+        edge_type: String,
+        add_properties: Vec<PropertySpec>,
+        drop_properties: Vec<String>,
+    },
+    ShowSchema,
+    ShowVertexLabels,
+    ShowEdgeTypes,
     InsertVertex {
         label: String,
         id: VertexId,
@@ -60,9 +79,23 @@ pub enum Statement {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WithClause {
+    pub distinct: bool,
+    pub items: Vec<ReturnItem>,
+    pub order_by: Vec<OrderByItem>,
+    pub skip: Option<usize>,
+    pub limit: Option<usize>,
+    pub where_clause: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CypherQuery {
     pub pattern: PathPattern,
     pub where_clause: Option<Expr>,
+    #[serde(default)]
+    pub with_clause: Option<WithClause>,
+    #[serde(default)]
+    pub next_match: Option<(PathPattern, Option<Expr>)>,
     #[serde(default)]
     pub updates: Vec<UpdateClause>,
     #[serde(default)]

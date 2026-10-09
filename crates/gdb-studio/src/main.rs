@@ -224,6 +224,28 @@ async fn handle_proxy_compact(
     }
 }
 
+async fn handle_proxy_schema(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let url = format!("{}/schema", target.trim_end_matches('/'));
+    match state.http_client.get(&url).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+                Json(json),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Failed to fetch schema from {}: {}", url, e) })),
+        ),
+    }
+}
+
 async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
@@ -416,6 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/cluster/status", get(handle_cluster_status))
         .route("/api/cluster", get(handle_proxy_cluster))
         .route("/api/resources", get(handle_proxy_resources))
+        .route("/api/schema", get(handle_proxy_schema))
         .route("/api/gpu", get(handle_proxy_gpu))
         .route("/api/compact", post(handle_proxy_compact))
         .layer(CorsLayer::permissive())

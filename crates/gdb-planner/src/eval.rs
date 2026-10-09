@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub struct PathRow {
     pub vertices: HashMap<String, (VertexId, LabelId)>,
     pub edges: HashMap<String, EdgeId>,
+    pub custom_values: HashMap<String, DataValue>,
 }
 
 pub fn eval_expr(
@@ -17,13 +18,19 @@ pub fn eval_expr(
     match expr {
         Expr::Literal(val) => Ok(val.clone()),
         Expr::Variable(var) => {
-            if let Some(&(vid, _)) = row.vertices.get(var) {
+            if let Some(val) = row.custom_values.get(var) {
+                Ok(val.clone())
+            } else if let Some(&(vid, _)) = row.vertices.get(var) {
                 Ok(DataValue::Int64(vid.as_u64() as i64))
             } else {
                 Err(GdbError::Execution(format!("Unbound variable: {}", var)))
             }
         }
         Expr::Property { variable, property } => {
+            let compound = format!("{}.{}", variable, property);
+            if let Some(val) = row.custom_values.get(&compound) {
+                return Ok(val.clone());
+            }
             if let Some(&(vid, label_id)) = row.vertices.get(variable) {
                 if property == "id" || property == "_id" {
                     return Ok(DataValue::Int64(vid.as_u64() as i64));

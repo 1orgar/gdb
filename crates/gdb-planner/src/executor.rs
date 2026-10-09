@@ -1,11 +1,13 @@
 use crate::eval::{eval_expr, PathRow};
 use crate::plan::PhysicalOperator;
-use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt32Array};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use gdb_analytics::AnalyticsEngine;
 use gdb_core::schema::GraphSchema;
 use gdb_core::{DataValue, EdgeId, GdbError, GdbResult, LabelId, VertexId};
-use gdb_parser::ast::{BinaryOperator, CypherQuery, Expr, ReturnItem, Statement, UpdateClause};
+use gdb_parser::ast::{
+    BinaryOperator, CypherQuery, Expr, PathPattern, ReturnItem, Statement, UpdateClause, WithClause,
+};
 use gdb_storage::PartitionStorageEngine;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -87,6 +89,217 @@ impl QueryExecutor {
                     message: format!("Dropped secondary index ON :{}({})", label, property),
                     batch: None,
                     rows_affected: 0,
+                })
+            }
+            Statement::DropVertexLabel { label } => {
+                let label_id = {
+                    let mut schema = self.schema.write();
+                    schema.drop_vertex_label(&label)?
+                };
+                self.storage.drop_vertex_label(label_id);
+                Ok(QueryResult {
+                    message: format!("Dropped vertex label '{}'", label),
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
+            Statement::DropEdgeType { edge_type } => {
+                {
+                    let mut schema = self.schema.write();
+                    schema.drop_edge_type(&edge_type)?;
+                }
+                Ok(QueryResult {
+                    message: format!("Dropped edge type '{}'", edge_type),
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
+            Statement::AlterVertexLabel {
+                label,
+                add_properties,
+                drop_properties,
+            } => {
+                let label_id = {
+                    let schema = self.schema.read();
+                    schema
+                        .get_vertex_schema(&label)
+                        .map(|s| s.label_id)
+                        .ok_or_else(|| GdbError::Schema(format!("Unknown vertex label: {}", label)))?
+                };
+                for dp in &drop_properties {
+                    self.storage.drop_vertex_property(label_id, dp);
+                }
+                {
+                    let mut schema = self.schema.write();
+                    schema.alter_vertex_label(&label, add_properties, drop_properties)?;
+                }
+                Ok(QueryResult {
+                    message: format!("Altered vertex label '{}'", label),
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
+            Statement::AlterEdgeType {
+                edge_type,
+                add_properties,
+                drop_properties,
+            } => {
+                {
+                    let mut schema = self.schema.write();
+                    schema.alter_edge_type(&edge_type, add_properties, drop_properties)?;
+                }
+                Ok(QueryResult {
+                    message: format!("Altered edge type '{}'", edge_type),
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
+            Statement::ShowSchema => {
+                let schema_guard = self.schema.read();
+                let mut entity_types: Vec<String> = Vec::new();
+                let mut names: Vec<String> = Vec::new();
+                let mut ids: Vec<i64> = Vec::new();
+                let mut props_desc: Vec<String> = Vec::new();
+                let mut indexes_desc: Vec<String> = Vec::new();
+
+                for vs in schema_guard.list_vertex_schemas() {
+                    entity_types.push("VERTEX".into());
+                    names.push(vs.label.clone());
+                    ids.push(vs.label_id.0 as i64);
+                    let p_str = vs
+                        .properties
+                        .iter()
+                        .map(|p| format!("{}: {:?}", p.name, p.data_type))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    props_desc.push(if p_str.is_empty() { "-".into() } else { p_str });
+                    let idx = schema_guard.get_indexes(&vs.label).join(", ");
+                    indexes_desc.push(if idx.is_empty() { "-".into() } else { idx });
+                }
+
+                for es in schema_guard.list_edge_schemas() {
+                    entity_types.push("EDGE".into());
+                    names.push(es.edge_type_name.clone());
+                    ids.push(es.edge_type.0 as i64);
+                    let p_str = es
+                        .properties
+                        .iter()
+                        .map(|p| format!("{}: {:?}", p.name, p.data_type))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    props_desc.push(if p_str.is_empty() { "-".into() } else { p_str });
+                    indexes_desc.push("-".into());
+                }
+
+                let batch_schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("entity_type", ArrowDataType::Utf8, false),
+                    Field::new("name", ArrowDataType::Utf8, false),
+                    Field::new("id", ArrowDataType::Int64, false),
+                    Field::new("properties", ArrowDataType::Utf8, false),
+                    Field::new("indexes", ArrowDataType::Utf8, false),
+                ]));
+
+                let batch = RecordBatch::try_new(
+                    batch_schema,
+                    vec![
+                        Arc::new(StringArray::from(entity_types)),
+                        Arc::new(StringArray::from(names)),
+                        Arc::new(Int64Array::from(ids)),
+                        Arc::new(StringArray::from(props_desc)),
+                        Arc::new(StringArray::from(indexes_desc)),
+                    ],
+                )?;
+
+                let count = batch.num_rows();
+                Ok(QueryResult {
+                    message: format!("Catalog schema: {} entities registered", count),
+                    batch: Some(batch),
+                    rows_affected: count,
+                })
+            }
+            Statement::ShowVertexLabels => {
+                let schema_guard = self.schema.read();
+                let mut names: Vec<String> = Vec::new();
+                let mut ids: Vec<i64> = Vec::new();
+                let mut props_desc: Vec<String> = Vec::new();
+                let mut indexes_desc: Vec<String> = Vec::new();
+
+                for vs in schema_guard.list_vertex_schemas() {
+                    names.push(vs.label.clone());
+                    ids.push(vs.label_id.0 as i64);
+                    let p_str = vs
+                        .properties
+                        .iter()
+                        .map(|p| format!("{}: {:?}", p.name, p.data_type))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    props_desc.push(if p_str.is_empty() { "-".into() } else { p_str });
+                    let idx = schema_guard.get_indexes(&vs.label).join(", ");
+                    indexes_desc.push(if idx.is_empty() { "-".into() } else { idx });
+                }
+
+                let batch_schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("label", ArrowDataType::Utf8, false),
+                    Field::new("label_id", ArrowDataType::Int64, false),
+                    Field::new("properties", ArrowDataType::Utf8, false),
+                    Field::new("indexes", ArrowDataType::Utf8, false),
+                ]));
+
+                let batch = RecordBatch::try_new(
+                    batch_schema,
+                    vec![
+                        Arc::new(StringArray::from(names)),
+                        Arc::new(Int64Array::from(ids)),
+                        Arc::new(StringArray::from(props_desc)),
+                        Arc::new(StringArray::from(indexes_desc)),
+                    ],
+                )?;
+
+                let count = batch.num_rows();
+                Ok(QueryResult {
+                    message: format!("Registered vertex tags: {}", count),
+                    batch: Some(batch),
+                    rows_affected: count,
+                })
+            }
+            Statement::ShowEdgeTypes => {
+                let schema_guard = self.schema.read();
+                let mut names: Vec<String> = Vec::new();
+                let mut ids: Vec<i64> = Vec::new();
+                let mut props_desc: Vec<String> = Vec::new();
+
+                for es in schema_guard.list_edge_schemas() {
+                    names.push(es.edge_type_name.clone());
+                    ids.push(es.edge_type.0 as i64);
+                    let p_str = es
+                        .properties
+                        .iter()
+                        .map(|p| format!("{}: {:?}", p.name, p.data_type))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    props_desc.push(if p_str.is_empty() { "-".into() } else { p_str });
+                }
+
+                let batch_schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("edge_type", ArrowDataType::Utf8, false),
+                    Field::new("edge_id", ArrowDataType::Int64, false),
+                    Field::new("properties", ArrowDataType::Utf8, false),
+                ]));
+
+                let batch = RecordBatch::try_new(
+                    batch_schema,
+                    vec![
+                        Arc::new(StringArray::from(names)),
+                        Arc::new(Int64Array::from(ids)),
+                        Arc::new(StringArray::from(props_desc)),
+                    ],
+                )?;
+
+                let count = batch.num_rows();
+                Ok(QueryResult {
+                    message: format!("Registered edge types: {}", count),
+                    batch: Some(batch),
+                    rows_affected: count,
                 })
             }
             Statement::InsertVertex { label, id, properties } => {
@@ -320,6 +533,10 @@ impl QueryExecutor {
     }
 
     fn execute_cypher(&self, query: CypherQuery) -> GdbResult<QueryResult> {
+        if query.with_clause.is_some() {
+            return self.execute_cypher_with(query);
+        }
+
         let plan = self.create_physical_plan(&query)?;
         let snapshot = self.storage.latest_version();
         let rows = self.execute_plan(&plan, snapshot)?;
@@ -343,16 +560,459 @@ impl QueryExecutor {
         })
     }
 
+    fn execute_cypher_with(&self, query: CypherQuery) -> GdbResult<QueryResult> {
+        let snapshot = self.storage.latest_version();
+        let with_clause = query.with_clause.clone().unwrap();
+
+        // 1. Plan and execute the initial MATCH pattern and WHERE clause
+        let base_query = CypherQuery {
+            pattern: query.pattern.clone(),
+            where_clause: query.where_clause.clone(),
+            with_clause: None,
+            next_match: None,
+            updates: Vec::new(),
+            distinct: false,
+            return_items: Vec::new(),
+            order_by: Vec::new(),
+            skip: None,
+            limit: None,
+        };
+        let base_plan = self.create_physical_plan(&base_query)?;
+        let initial_rows = self.execute_plan(&base_plan, snapshot)?;
+
+        // 2. Evaluate WITH clause (projection, grouping, aggregation, filtering)
+        let mut with_rows = self.evaluate_with_clause(&with_clause, &initial_rows)?;
+
+        // 3. If next_match is present, expand from bound intermediate vertices
+        if let Some((ref next_pat, ref next_where)) = query.next_match {
+            with_rows = self.execute_next_match(next_pat, next_where.as_ref(), with_rows, snapshot)?;
+        }
+
+        // 4. If updates are present, apply them
+        if !query.updates.is_empty() {
+            for row in &with_rows {
+                for update in &query.updates {
+                    match update {
+                        UpdateClause::Set { variable, property, expr } => {
+                            if let Some(&(vid, label_id)) = row.vertices.get(variable) {
+                                let val = eval_expr(expr, row, &self.storage)?;
+                                self.storage.update_vertex_property(vid, label_id, property, val)?;
+                            }
+                        }
+                        UpdateClause::Delete { variable, detach } => {
+                            if let Some(&(vid, label_id)) = row.vertices.get(variable) {
+                                self.storage.delete_vertex(vid, label_id, *detach)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // 5. Final distinct
+        if query.distinct {
+            let mut seen = std::collections::HashSet::new();
+            with_rows.retain(|r| {
+                let key: Vec<DataValue> = query
+                    .return_items
+                    .iter()
+                    .map(|it| eval_expr(&it.expr, r, &self.storage).unwrap_or(DataValue::Null))
+                    .collect();
+                seen.insert(format!("{:?}", key))
+            });
+        }
+
+        // 6. Final order_by
+        if !query.order_by.is_empty() {
+            with_rows.sort_by(|a, b| {
+                for item in &query.order_by {
+                    let va = eval_expr(&item.expr, a, &self.storage).unwrap_or(DataValue::Null);
+                    let vb = eval_expr(&item.expr, b, &self.storage).unwrap_or(DataValue::Null);
+                    let ord = match (va, vb) {
+                        (DataValue::Int64(x), DataValue::Int64(y)) => x.cmp(&y),
+                        (DataValue::Float64(x), DataValue::Float64(y)) => {
+                            x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+                        }
+                        (DataValue::String(x), DataValue::String(y)) => x.cmp(&y),
+                        (DataValue::Boolean(x), DataValue::Boolean(y)) => x.cmp(&y),
+                        _ => std::cmp::Ordering::Equal,
+                    };
+                    if ord != std::cmp::Ordering::Equal {
+                        return if item.ascending { ord } else { ord.reverse() };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+        }
+
+        // 7. Final skip and limit
+        if let Some(skip) = query.skip {
+            if skip < with_rows.len() {
+                with_rows = with_rows.split_off(skip);
+            } else {
+                with_rows.clear();
+            }
+        }
+        if let Some(limit) = query.limit {
+            with_rows.truncate(limit);
+        }
+
+        if query.return_items.is_empty() {
+            let count = with_rows.len();
+            return Ok(QueryResult {
+                message: format!("Query completed, {} rows affected", count),
+                batch: None,
+                rows_affected: count,
+            });
+        }
+
+        let batch = self.build_record_batch(&query.return_items, &with_rows)?;
+        let count = batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
+
+        Ok(QueryResult {
+            message: format!("Query completed, {} rows returned", count),
+            batch,
+            rows_affected: count,
+        })
+    }
+
+    fn evaluate_with_clause(&self, with_clause: &WithClause, rows: &[PathRow]) -> GdbResult<Vec<PathRow>> {
+        let has_aggregates = with_clause.items.iter().any(|item| item.expr.is_aggregate());
+
+        let mut output_rows: Vec<PathRow> = if !has_aggregates {
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut new_row = PathRow::default();
+                for item in &with_clause.items {
+                    let val = eval_expr(&item.expr, row, &self.storage)?;
+                    let alias = item.alias.clone().unwrap_or_else(|| match &item.expr {
+                        Expr::Property { variable, property } => format!("{}.{}", variable, property),
+                        Expr::Variable(v) => v.clone(),
+                        _ => "val".into(),
+                    });
+                    new_row.custom_values.insert(alias.clone(), val.clone());
+
+                    // If expression is a variable referencing a node, preserve the node binding
+                    if let Expr::Variable(v) = &item.expr {
+                        if let Some(&node_binding) = row.vertices.get(v) {
+                            let target_var = item.alias.as_deref().unwrap_or(v.as_str());
+                            new_row.vertices.insert(target_var.to_string(), node_binding);
+                        }
+                    }
+                }
+                out.push(new_row);
+            }
+            out
+        } else {
+            let group_key_indices: Vec<usize> = with_clause
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !item.expr.is_aggregate())
+                .map(|(idx, _)| idx)
+                .collect();
+
+            let mut groups: HashMap<Vec<DataValue>, Vec<usize>> = HashMap::new();
+            for (row_idx, row) in rows.iter().enumerate() {
+                let mut key = Vec::with_capacity(group_key_indices.len());
+                for &k_idx in &group_key_indices {
+                    let val = eval_expr(&with_clause.items[k_idx].expr, row, &self.storage)
+                        .unwrap_or(DataValue::Null);
+                    key.push(val);
+                }
+                groups.entry(key).or_default().push(row_idx);
+            }
+
+            let mut out = Vec::with_capacity(groups.len());
+            for (group_key, row_indices) in &groups {
+                let mut new_row = PathRow::default();
+                let sample_row = &rows[row_indices[0]];
+
+                for (item_idx, item) in with_clause.items.iter().enumerate() {
+                    let alias = item.alias.clone().unwrap_or_else(|| match &item.expr {
+                        Expr::Property { variable, property } => format!("{}.{}", variable, property),
+                        Expr::Variable(v) => v.clone(),
+                        Expr::CountStar => "count(*)".into(),
+                        Expr::FunctionCall { name, .. } => name.to_lowercase(),
+                        _ => format!("col_{}", item_idx),
+                    });
+
+                    if let Some(pos) = group_key_indices.iter().position(|&idx| idx == item_idx) {
+                        let val = group_key[pos].clone();
+                        new_row.custom_values.insert(alias.clone(), val);
+                        if let Expr::Variable(v) = &item.expr {
+                            if let Some(&node_binding) = sample_row.vertices.get(v) {
+                                let target_var = item.alias.as_deref().unwrap_or(v.as_str());
+                                new_row.vertices.insert(target_var.to_string(), node_binding);
+                            }
+                        }
+                    } else {
+                        let agg_val = match &item.expr {
+                            Expr::CountStar => DataValue::Int64(row_indices.len() as i64),
+                            Expr::FunctionCall { name, args } => {
+                                let n = name.to_uppercase();
+                                match n.as_str() {
+                                    "COUNT" => {
+                                        if let Some(arg) = args.first() {
+                                            let mut count = 0i64;
+                                            for &r_idx in row_indices {
+                                                if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                    if v != DataValue::Null {
+                                                        count += 1;
+                                                    }
+                                                }
+                                            }
+                                            DataValue::Int64(count)
+                                        } else {
+                                            DataValue::Int64(row_indices.len() as i64)
+                                        }
+                                    }
+                                    "SUM" => {
+                                        if let Some(arg) = args.first() {
+                                            let mut total_int = 0i64;
+                                            let mut total_float = 0.0f64;
+                                            let mut is_float = false;
+                                            for &r_idx in row_indices {
+                                                if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                    match v {
+                                                        DataValue::Int64(i) => total_int += i,
+                                                        DataValue::Float64(f) => {
+                                                            is_float = true;
+                                                            total_float += f;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            if is_float {
+                                                DataValue::Float64(total_float + total_int as f64)
+                                            } else {
+                                                DataValue::Int64(total_int)
+                                            }
+                                        } else {
+                                            DataValue::Null
+                                        }
+                                    }
+                                    "AVG" => {
+                                        if let Some(arg) = args.first() {
+                                            let mut sum = 0.0f64;
+                                            let mut count = 0usize;
+                                            for &r_idx in row_indices {
+                                                if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                    match v {
+                                                        DataValue::Int64(i) => {
+                                                            sum += i as f64;
+                                                            count += 1;
+                                                        }
+                                                        DataValue::Float64(f) => {
+                                                            sum += f;
+                                                            count += 1;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            if count > 0 {
+                                                DataValue::Float64(sum / count as f64)
+                                            } else {
+                                                DataValue::Null
+                                            }
+                                        } else {
+                                            DataValue::Null
+                                        }
+                                    }
+                                    "MIN" => {
+                                        if let Some(arg) = args.first() {
+                                            let mut min_val: Option<DataValue> = None;
+                                            for &r_idx in row_indices {
+                                                if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                    if v != DataValue::Null {
+                                                        min_val = Some(match min_val {
+                                                            None => v,
+                                                            Some(cur) => if v < cur { v } else { cur },
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            min_val.unwrap_or(DataValue::Null)
+                                        } else {
+                                            DataValue::Null
+                                        }
+                                    }
+                                    "MAX" => {
+                                        if let Some(arg) = args.first() {
+                                            let mut max_val: Option<DataValue> = None;
+                                            for &r_idx in row_indices {
+                                                if let Ok(v) = eval_expr(arg, &rows[r_idx], &self.storage) {
+                                                    if v != DataValue::Null {
+                                                        max_val = Some(match max_val {
+                                                            None => v,
+                                                            Some(cur) => if v > cur { v } else { cur },
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            max_val.unwrap_or(DataValue::Null)
+                                        } else {
+                                            DataValue::Null
+                                        }
+                                    }
+                                    _ => DataValue::Null,
+                                }
+                            }
+                            _ => DataValue::Null,
+                        };
+                        new_row.custom_values.insert(alias, agg_val);
+                    }
+                }
+                out.push(new_row);
+            }
+            out
+        };
+
+        // Filter by WHERE in WITH
+        if let Some(ref where_expr) = with_clause.where_clause {
+            output_rows.retain(|r| {
+                matches!(eval_expr(where_expr, r, &self.storage), Ok(DataValue::Boolean(true)))
+            });
+        }
+
+        // Distinct in WITH
+        if with_clause.distinct {
+            let mut seen = std::collections::HashSet::new();
+            output_rows.retain(|r| {
+                let key: Vec<(&String, &DataValue)> = r.custom_values.iter().collect();
+                seen.insert(format!("{:?}", key))
+            });
+        }
+
+        // Order by in WITH
+        if !with_clause.order_by.is_empty() {
+            output_rows.sort_by(|a, b| {
+                for item in &with_clause.order_by {
+                    let va = eval_expr(&item.expr, a, &self.storage).unwrap_or(DataValue::Null);
+                    let vb = eval_expr(&item.expr, b, &self.storage).unwrap_or(DataValue::Null);
+                    let ord = match (va, vb) {
+                        (DataValue::Int64(x), DataValue::Int64(y)) => x.cmp(&y),
+                        (DataValue::Float64(x), DataValue::Float64(y)) => {
+                            x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+                        }
+                        (DataValue::String(x), DataValue::String(y)) => x.cmp(&y),
+                        (DataValue::Boolean(x), DataValue::Boolean(y)) => x.cmp(&y),
+                        _ => std::cmp::Ordering::Equal,
+                    };
+                    if ord != std::cmp::Ordering::Equal {
+                        return if item.ascending { ord } else { ord.reverse() };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+        }
+
+        // Skip & Limit in WITH
+        if let Some(skip) = with_clause.skip {
+            if skip < output_rows.len() {
+                output_rows = output_rows.split_off(skip);
+            } else {
+                output_rows.clear();
+            }
+        }
+        if let Some(limit) = with_clause.limit {
+            output_rows.truncate(limit);
+        }
+
+        Ok(output_rows)
+    }
+
+    fn execute_next_match(
+        &self,
+        next_pat: &PathPattern,
+        next_where: Option<&Expr>,
+        input_rows: Vec<PathRow>,
+        snapshot: u64,
+    ) -> GdbResult<Vec<PathRow>> {
+        let schema = self.schema.read();
+        let start_var = next_pat.start_node.variable.clone().unwrap_or_else(|| "_next_start".into());
+
+        let mut output_rows = Vec::new();
+
+        for in_row in input_rows {
+            let start_vids: Vec<(VertexId, LabelId)> = if let Some(&binding) = in_row.vertices.get(&start_var) {
+                vec![binding]
+            } else {
+                let target_label_id = if let Some(ref l) = next_pat.start_node.label {
+                    schema.get_vertex_schema(l).map(|s| s.label_id)
+                } else {
+                    None
+                };
+                let all_vids = self.storage.get_all_vertex_ids(target_label_id);
+                all_vids.into_iter().map(|vid| (vid, target_label_id.unwrap_or(LabelId(1)))).collect()
+            };
+
+            for (start_vid, label_id) in start_vids {
+                let mut current_rows = vec![{
+                    let mut r = in_row.clone();
+                    r.vertices.insert(start_var.clone(), (start_vid, label_id));
+                    r
+                }];
+
+                let mut prev_var = start_var.clone();
+                for (edge_pat, node_pat) in &next_pat.hops {
+                    let dst_var = node_pat.variable.clone().unwrap_or_else(|| "_next_dst".into());
+                    let edge_type = if let Some(ref et) = edge_pat.edge_type {
+                        schema.get_edge_schema(et).map(|s| s.edge_type)
+                    } else {
+                        None
+                    };
+
+                    let mut next_hop_rows = Vec::new();
+                    for r in current_rows {
+                        if let Some(&(src_vid, _)) = r.vertices.get(&prev_var) {
+                            let out_edges = self.storage.get_out_edges(src_vid, edge_type, snapshot);
+                            for e in out_edges {
+                                let mut new_r = r.clone();
+                                if let Some(ev) = &edge_pat.variable {
+                                    new_r.edges.insert(ev.clone(), e);
+                                }
+                                let target_label_id = if let Some(ref l) = node_pat.label {
+                                    schema.get_vertex_schema(l).map(|s| s.label_id).unwrap_or(LabelId(1))
+                                } else {
+                                    LabelId(1)
+                                };
+                                new_r.vertices.insert(dst_var.clone(), (e.dst, target_label_id));
+                                next_hop_rows.push(new_r);
+                            }
+                        }
+                    }
+                    current_rows = next_hop_rows;
+                    prev_var = dst_var;
+                }
+
+                if let Some(pred) = next_where {
+                    current_rows.retain(|r| {
+                        matches!(eval_expr(pred, r, &self.storage), Ok(DataValue::Boolean(true)))
+                    });
+                }
+
+                output_rows.extend(current_rows);
+            }
+        }
+
+        Ok(output_rows)
+    }
+
     fn create_physical_plan(&self, query: &CypherQuery) -> GdbResult<PhysicalOperator> {
         let schema = self.schema.read();
         let start = &query.pattern.start_node;
         let start_var = start.variable.clone().unwrap_or_else(|| "_start".into());
 
-        let label_id = if let Some(ref l) = start.label {
-            schema.get_vertex_schema(l).map(|s| s.label_id)
-                .ok_or_else(|| GdbError::Schema(format!("Label not found: {}", l)))?
+        let (label_id, label_id_val) = if let Some(ref l) = start.label {
+            let lid = schema.get_vertex_schema(l).map(|s| s.label_id)
+                .ok_or_else(|| GdbError::Schema(format!("Label not found: {}", l)))?;
+            (Some(lid), lid)
         } else {
-            LabelId(1)
+            (None, LabelId(1))
         };
 
         // Check for index match in WHERE clause
@@ -372,10 +1032,10 @@ impl QueryExecutor {
                 };
 
                 if let Some((prop, val)) = matched {
-                    if self.storage.has_vertex_index(label_id, &prop) {
+                    if start.label.is_some() && self.storage.has_vertex_index(label_id_val, &prop) {
                         index_scan = Some(PhysicalOperator::IndexScan {
                             var_name: start_var.clone(),
-                            label_id,
+                            label_id: label_id_val,
                             property: prop,
                             value: val,
                         });
@@ -482,15 +1142,16 @@ impl QueryExecutor {
         match plan {
             PhysicalOperator::ScanVertices { var_name, label_id, id_filter } => {
                 let mut rows = Vec::new();
+                let default_lid = label_id.unwrap_or(LabelId(1));
                 if let Some(target_id) = id_filter {
                     let mut row = PathRow::default();
-                    row.vertices.insert(var_name.clone(), (*target_id, *label_id));
+                    row.vertices.insert(var_name.clone(), (*target_id, default_lid));
                     rows.push(row);
                 } else {
-                    let all_vids = self.storage.get_all_vertex_ids(Some(*label_id));
+                    let all_vids = self.storage.get_all_vertex_ids(*label_id);
                     for vid in all_vids {
                         let mut row = PathRow::default();
-                        row.vertices.insert(var_name.clone(), (vid, *label_id));
+                        row.vertices.insert(var_name.clone(), (vid, default_lid));
                         rows.push(row);
                     }
                 }

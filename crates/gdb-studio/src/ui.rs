@@ -562,6 +562,138 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
     .node-action-btn:hover {
       background: rgba(88, 166, 255, 0.25);
     }
+
+    /* Schema Manager & Modals */
+    .schema-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 16px;
+    }
+    .schema-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .schema-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .schema-prop-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    .schema-prop-table th {
+      text-align: left;
+      padding: 6px 8px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+    }
+    .schema-prop-table td {
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+      color: var(--text);
+    }
+    .schema-prop-table tr:last-child td {
+      border-bottom: none;
+    }
+    .prop-type-badge {
+      font-family: monospace;
+      font-size: 10px;
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(88, 166, 255, 0.25);
+    }
+    .index-badge {
+      font-size: 9px;
+      font-weight: 700;
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--green);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid rgba(63, 185, 80, 0.3);
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      width: 500px;
+      max-width: 90vw;
+      padding: 20px;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text-bright);
+    }
+    .modal-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 12px;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .form-group label {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+    .form-input {
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 6px 10px;
+      font-size: 12px;
+      outline: none;
+    }
+    .form-input:focus {
+      border-color: var(--accent);
+    }
   </style>
 </head>
 <body>
@@ -648,15 +780,17 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 
         <!-- Schema View -->
         <div id="tab-schema" style="display:none;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <div class="section-title" style="margin-bottom:0;">Schema Catalog</div>
+            <button class="btn btn-secondary btn-sm" style="font-size:10px; padding:2px 8px;" onclick="switchView('schema', document.getElementById('tab-btn-schema'))">📐 Manager</button>
+          </div>
           <div class="section-title">Vertex Tags</div>
           <div id="schema-vertices">
-            <span class="schema-tag" onclick="setQuery('MATCH (a:User) RETURN a.id, a.name, a.age LIMIT 50;')">User (Tag)</span>
-            <span class="schema-tag" onclick="setQuery('MATCH (a:Person) RETURN a LIMIT 50;')">Person</span>
+            <div style="font-size:11px; color:var(--text-muted);">Loading tags...</div>
           </div>
           <div class="section-title" style="margin-top: 14px;">Edge Types</div>
           <div id="schema-edges">
-            <span class="schema-tag edge" onclick="setQuery('MATCH (a)-[:FOLLOWS]->(b) RETURN a, b LIMIT 50;')">FOLLOWS</span>
-            <span class="schema-tag edge" onclick="setQuery('MATCH (a)-[:KNOWS]->(b) RETURN a, b LIMIT 50;')">KNOWS</span>
+            <div style="font-size:11px; color:var(--text-muted);">Loading edge types...</div>
           </div>
         </div>
 
@@ -703,7 +837,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
           </div>
         </div>
         <div class="editor-container">
-          <textarea id="query-input" spellcheck="false" placeholder="Enter openCypher, GQL, or CALL algo query here...">MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name LIMIT 50;</textarea>
+          <textarea id="query-input" spellcheck="false" placeholder="Enter openCypher, GQL, or CALL algo query here...">SHOW SCHEMA;</textarea>
         </div>
       </div>
 
@@ -714,6 +848,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
             <div class="nav-tab active" id="tab-btn-graph" onclick="switchView('graph', this)">🕸️ Graph View</div>
             <div class="nav-tab" id="tab-btn-table" onclick="switchView('table', this)">📊 Table View</div>
             <div class="nav-tab" id="tab-btn-plan" onclick="switchView('plan', this)">🔍 Plan / Explain</div>
+            <div class="nav-tab" id="tab-btn-schema" onclick="switchView('schema', this)">📐 Schema Manager</div>
             <div class="nav-tab" id="tab-btn-cluster" onclick="switchView('cluster', this)">🌐 Cluster Ring</div>
             <div class="nav-tab" id="tab-btn-resources" onclick="switchView('resources', this)">⚡ Storage &amp; Resources</div>
             <div class="nav-tab" id="tab-btn-unity" onclick="switchView('unity', this)">🎮 3D Unity View</div>
@@ -931,15 +1066,65 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
           </div>
         </div>
 
+        <!-- Schema Manager Viewport -->
+        <div id="schema-viewport" class="viewport" style="display:none; padding:20px; overflow-y:auto; background:var(--bg-darker);">
+          <div class="dashboard-container" style="max-width:1200px; margin:0 auto;">
+            <div class="dash-header">
+              <div class="dash-title">
+                <span>📐 Database Schema Catalog &amp; DDL Manager</span>
+                <span id="schema-total-tags-badge" class="dash-badge blue">0 Vertex Tags</span>
+                <span id="schema-total-edges-badge" class="dash-badge purple">0 Edge Types</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary btn-sm" onclick="openCreateVertexModal()">➕ Create Vertex Tag</button>
+                <button class="btn btn-primary btn-sm" style="background:#8957e5;" onclick="openCreateEdgeModal()">➕ Create Edge Type</button>
+                <button class="btn btn-secondary btn-sm" onclick="fetchSchema()">🔄 Refresh Schema</button>
+              </div>
+            </div>
+
+            <!-- Vertex Tags Section -->
+            <div class="dash-section" style="margin-bottom:24px;">
+              <div class="dash-section-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Vertex Tags (Entity Schemas)</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="schema-v-count-label">0 tags</span>
+              </div>
+              <div id="schema-vertex-grid" class="schema-grid">
+                <div style="grid-column: 1/-1; padding:24px; text-align:center; color:var(--text-muted); background:var(--bg-card); border-radius:8px; border:1px dashed var(--border);">
+                  No vertex schemas defined yet. Create your first vertex tag or execute <code>CREATE VERTEX TagName (id: INT64, ...);</code>
+                </div>
+              </div>
+            </div>
+
+            <!-- Edge Types Section -->
+            <div class="dash-section">
+              <div class="dash-section-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Edge Types (Relationship Schemas)</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="schema-e-count-label">0 edge types</span>
+              </div>
+              <div id="schema-edge-grid" class="schema-grid">
+                <div style="grid-column: 1/-1; padding:24px; text-align:center; color:var(--text-muted); background:var(--bg-card); border-radius:8px; border:1px dashed var(--border);">
+                  No edge schemas defined yet. Create your first edge type or execute <code>CREATE EDGE EdgeType (weight: FLOAT64, ...);</code>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 3D Unity Viewport -->
-        <div id="unity-viewport" class="viewport" style="display:none; width:100%; height:100%; position:relative; background:#080b10;">
-          <div id="unity-container" style="width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative;">
-            <canvas id="unity-canvas" style="width:100%; height:100%; display:none;"></canvas>
-            <div id="unity-hud" style="width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:30px; text-align:center;">
-              <div style="font-size:42px; margin-bottom:14px;">🎮</div>
-              <div style="font-weight:700; font-size:16px; color:#58a6ff; margin-bottom:8px;">Unity 3D WebGL Graph Viewport</div>
-              <div style="font-size:13px; max-width:540px; line-height:1.6; color:#8b949e;">GPU Instancing 3D topology visualizer for massive graphs (&gt;100k nodes) with dynamic 60 FPS spatial Force-Directed simulation and camera orbit.</div>
-              <div id="unity-status-badge" style="margin-top:16px; font-size:12px; background:rgba(88,166,255,0.12); border:1px solid #1f6feb; border-radius:6px; padding:6px 14px; color:#58a6ff;">Ready to render query topology in 3D</div>
+        <div id="unity-viewport" class="viewport" style="display:none; width:100%; height:100%; position:relative; background:#080b10; overflow:hidden;">
+          <canvas id="unity-canvas" style="width:100%; height:100%; display:block; outline:none; cursor:grab;"></canvas>
+          <div class="graph-controls" style="top:14px; right:14px;">
+            <button class="control-btn" title="Zoom In" onclick="zoomUnity3D(1.2)">➕</button>
+            <button class="control-btn" title="Zoom Out" onclick="zoomUnity3D(0.8)">➖</button>
+            <button class="control-btn" title="Reset 3D View" onclick="resetUnity3DView()">⟲</button>
+            <button class="control-btn" title="Toggle 3D Physics" id="unity-physics-btn" onclick="toggleUnityPhysics()">⏸</button>
+            <button class="control-btn" title="Auto Rotate" id="unity-rotate-btn" onclick="toggleUnityAutoRotate()">🔄</button>
+          </div>
+          <div id="unity-hud-bar" style="position:absolute; bottom:16px; left:16px; display:flex; align-items:center; gap:10px; background:rgba(13,17,23,0.85); backdrop-filter:blur(6px); border:1px solid var(--border); padding:8px 14px; border-radius:8px; font-size:12px; pointer-events:auto; z-index:10;">
+            <span style="font-size:16px;">🎮</span>
+            <div>
+              <div style="font-weight:600; color:var(--text-bright);" id="unity-stats-title">3D Graph Spatial Visualizer</div>
+              <div style="font-size:11px; color:var(--text-muted);" id="unity-status-badge">Drag to Orbit | Scroll to Zoom | Click Sphere to Inspect</div>
             </div>
           </div>
         </div>
@@ -964,10 +1149,98 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 
   </div>
 
+  <!-- Modal: Create Vertex Tag -->
+  <div class="modal-overlay" id="modal-create-vertex">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span>➕ Create Vertex Tag</span>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeModal('modal-create-vertex')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Vertex Tag Name</label>
+          <input type="text" class="form-input" id="new-vertex-name" placeholder="e.g. Account, Customer, Product" />
+        </div>
+        <div class="form-group">
+          <label>Primary Key Property (Optional)</label>
+          <input type="text" class="form-input" id="new-vertex-pk" placeholder="e.g. id, uid, account_no" value="id" />
+        </div>
+        <div class="form-group">
+          <label>Properties Definition (name: TYPE, separated by commas)</label>
+          <input type="text" class="form-input" id="new-vertex-props" placeholder="e.g. name: STRING, age: INT64, balance: FLOAT64" value="name: STRING, created_at: INT64" />
+          <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">Supported types: STRING, INT64, FLOAT64, BOOLEAN</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-create-vertex')">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="submitCreateVertex()">Create Tag</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Create Edge Type -->
+  <div class="modal-overlay" id="modal-create-edge">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span>➕ Create Edge Type</span>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeModal('modal-create-edge')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Edge Type Name</label>
+          <input type="text" class="form-input" id="new-edge-name" placeholder="e.g. TRANSFERRED_TO, LIKES, BELONGS_TO" />
+        </div>
+        <div class="form-group">
+          <label>Properties Definition (Optional, name: TYPE, separated by commas)</label>
+          <input type="text" class="form-input" id="new-edge-props" placeholder="e.g. amount: FLOAT64, timestamp: INT64" value="weight: FLOAT64, created_at: INT64" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-create-edge')">Cancel</button>
+        <button class="btn btn-primary btn-sm" style="background:#8957e5;" onclick="submitCreateEdge()">Create Edge Type</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Add Property to Vertex/Edge -->
+  <div class="modal-overlay" id="modal-add-prop">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span id="modal-add-prop-title">➕ Add Property</span>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeModal('modal-add-prop')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="add-prop-target-kind" value="vertex" />
+        <input type="hidden" id="add-prop-target-name" value="" />
+        <div class="form-group">
+          <label>Target Schema</label>
+          <input type="text" class="form-input" id="add-prop-target-display" disabled />
+        </div>
+        <div class="form-group">
+          <label>Property Name</label>
+          <input type="text" class="form-input" id="add-prop-name" placeholder="e.g. email, score, status" />
+        </div>
+        <div class="form-group">
+          <label>Data Type</label>
+          <select class="form-input" id="add-prop-type">
+            <option value="STRING">STRING (Text)</option>
+            <option value="INT64">INT64 (Integer)</option>
+            <option value="FLOAT64">FLOAT64 (Float)</option>
+            <option value="BOOLEAN">BOOLEAN (Bool)</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-add-prop')">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="submitAddProperty()">Add Property</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span id="footer-version">GDB Studio v0.4.0</span>
+      <span id="footer-version">GDB Studio v0.4.1</span>
       <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
       <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>
@@ -1444,6 +1717,13 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 
         if (currentView === 'unity') {
           renderUnityGraph();
+        } else {
+          sync3DGraph();
+        }
+
+        const isDdl = /^\s*(create|drop|alter)\s+(vertex|edge|tag|index)/i.test(query);
+        if (isDdl && data.status === 'ok') {
+          fetchSchema();
         }
 
         // Add to history
@@ -1727,10 +2007,20 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
       }
       if (viewName === 'unity') {
         renderUnityGraph();
+      } else if (viewName === 'schema') {
+        fetchSchema();
       } else if (viewName === 'cluster') {
         fetchClusterStatus();
       } else if (viewName === 'resources') {
         fetchResources();
+      }
+    }
+
+    function selectNode(nodeId) {
+      const node = graphNodes.find(n => String(n.id) === String(nodeId)) || unityNodes.find(n => String(n.id) === String(nodeId));
+      if (node) {
+        selectedEntity = node;
+        openInspector(node);
       }
     }
 
@@ -1739,32 +2029,853 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
       selectNode(nodeId);
     };
 
+    // 3D Spatial Visualizer Engine
+    const unityCanvas = document.getElementById('unity-canvas');
+    const unityCtx = unityCanvas ? unityCanvas.getContext('2d') : null;
+    let unityNodes = [];
+    let unityEdges = [];
+    let unity3DRotX = 0.35;
+    let unity3DRotY = 0.45;
+    let unity3DZoom = 550;
+    let unity3DPanX = 0;
+    let unity3DPanY = 0;
+    let unity3DDragging = false;
+    let unity3DDragStart = { x: 0, y: 0 };
+    let unity3DButton = 0;
+    let unityPhysicsRunning = true;
+    let unityAutoRotate = false;
+    let unityHoveredNode = null;
+
+    function resizeUnityCanvas() {
+      if (!unityCanvas) return;
+      const rect = unityCanvas.parentElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      unityCanvas.width = rect.width * window.devicePixelRatio;
+      unityCanvas.height = rect.height * window.devicePixelRatio;
+      if (unityCtx) {
+        unityCtx.setTransform(1, 0, 0, 1, 0, 0);
+        unityCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+      }
+    }
+    window.addEventListener('resize', resizeUnityCanvas);
+    setTimeout(resizeUnityCanvas, 60);
+
+    function sync3DGraph() {
+      const nodeMap = new Map();
+      unityNodes = graphNodes.map(n => {
+        const u = {
+          id: n.id,
+          label: n.label,
+          properties: n.properties || {},
+          x: (Math.random() - 0.5) * 260,
+          y: (Math.random() - 0.5) * 260,
+          z: (Math.random() - 0.5) * 260,
+          vx: 0,
+          vy: 0,
+          vz: 0,
+          radius: 14
+        };
+        nodeMap.set(String(n.id), u);
+        return u;
+      });
+
+      unityEdges = [];
+      for (const e of graphEdges) {
+        const src = nodeMap.get(String(e.source.id));
+        const dst = nodeMap.get(String(e.target.id));
+        if (src && dst) {
+          unityEdges.push({
+            source: src,
+            target: dst,
+            label: e.label || '',
+            properties: e.properties || {}
+          });
+        }
+      }
+    }
+
+    function stepUnity3DSimulation() {
+      if (!unityPhysicsRunning || unityNodes.length === 0 || currentView !== 'unity') return;
+
+      const repulsion = 5500;
+      const springLength = 100;
+      const springStrength = 0.04;
+      const centerGravity = 0.015;
+
+      // 3D Repulsion between nodes
+      for (let i = 0; i < unityNodes.length; i++) {
+        for (let j = i + 1; j < unityNodes.length; j++) {
+          const a = unityNodes[i];
+          const b = unityNodes[j];
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let dz = b.z - a.z;
+          let dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+          if (dist > 350) continue;
+          let force = repulsion / (dist * dist);
+          let fx = (dx / dist) * force;
+          let fy = (dy / dist) * force;
+          let fz = (dz / dist) * force;
+          a.vx -= fx;
+          a.vy -= fy;
+          a.vz -= fz;
+          b.vx += fx;
+          b.vy += fy;
+          b.vz += fz;
+        }
+      }
+
+      // 3D Spring Attraction along edges
+      for (const e of unityEdges) {
+        const a = e.source;
+        const b = e.target;
+        if (!a || !b) continue;
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dz = b.z - a.z;
+        let dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+        let force = (dist - springLength) * springStrength;
+        let fx = (dx / dist) * force;
+        let fy = (dy / dist) * force;
+        let fz = (dz / dist) * force;
+        a.vx += fx;
+        a.vy += fy;
+        a.vz += fz;
+        b.vx -= fx;
+        b.vy -= fy;
+        b.vz -= fz;
+      }
+
+      // Damping & Center Gravity
+      for (const n of unityNodes) {
+        n.vx -= n.x * centerGravity;
+        n.vy -= n.y * centerGravity;
+        n.vz -= n.z * centerGravity;
+        n.vx *= 0.88;
+        n.vy *= 0.88;
+        n.vz *= 0.88;
+        n.x += n.vx;
+        n.y += n.vy;
+        n.z += n.vz;
+      }
+    }
+
+    // 3D Perspective Projection
+    function project3D(x, y, z, cx, cy) {
+      // Rotation Y
+      const cosY = Math.cos(unity3DRotY);
+      const sinY = Math.sin(unity3DRotY);
+      const x1 = x * cosY + z * sinY;
+      const z1 = -x * sinY + z * cosY;
+
+      // Rotation X
+      const cosX = Math.cos(unity3DRotX);
+      const sinX = Math.sin(unity3DRotX);
+      const y2 = y * cosX - z1 * sinX;
+      const z2 = y * sinX + z1 * cosX;
+
+      const camDist = unity3DZoom;
+      const zCam = z2 + camDist;
+      if (zCam <= 20) return null;
+
+      const fov = 500;
+      const scale = fov / zCam;
+      const sx = cx + unity3DPanX + x1 * scale;
+      const sy = cy + unity3DPanY + y2 * scale;
+
+      return { sx, sy, scale, depth: z2, zCam };
+    }
+
+    function renderUnity3DLoop() {
+      if (currentView === 'unity' && unityCtx && unityCanvas) {
+        const w = unityCanvas.clientWidth;
+        const h = unityCanvas.clientHeight;
+        const cx = w / 2;
+        const cy = h / 2;
+
+        if (unityAutoRotate) {
+          unity3DRotY += 0.005;
+        }
+
+        stepUnity3DSimulation();
+
+        unityCtx.clearRect(0, 0, w, h);
+
+        // Draw 3D Grid floor
+        unityCtx.save();
+        unityCtx.strokeStyle = 'rgba(48, 54, 61, 0.25)';
+        unityCtx.lineWidth = 1;
+        const gridSize = 200;
+        const gridStep = 40;
+        const floorY = 120;
+        for (let gx = -gridSize; gx <= gridSize; gx += gridStep) {
+          const p1 = project3D(gx, floorY, -gridSize, cx, cy);
+          const p2 = project3D(gx, floorY, gridSize, cx, cy);
+          if (p1 && p2) {
+            unityCtx.beginPath();
+            unityCtx.moveTo(p1.sx, p1.sy);
+            unityCtx.lineTo(p2.sx, p2.sy);
+            unityCtx.stroke();
+          }
+        }
+        for (let gz = -gridSize; gz <= gridSize; gz += gridStep) {
+          const p1 = project3D(-gridSize, floorY, gz, cx, cy);
+          const p2 = project3D(gridSize, floorY, gz, cx, cy);
+          if (p1 && p2) {
+            unityCtx.beginPath();
+            unityCtx.moveTo(p1.sx, p1.sy);
+            unityCtx.lineTo(p2.sx, p2.sy);
+            unityCtx.stroke();
+          }
+        }
+        unityCtx.restore();
+
+        // Project nodes
+        const projectedNodes = [];
+        for (const n of unityNodes) {
+          const p = project3D(n.x, n.y, n.z, cx, cy);
+          if (p) {
+            projectedNodes.push({
+              node: n,
+              sx: p.sx,
+              sy: p.sy,
+              scale: p.scale,
+              depth: p.depth,
+              radius: Math.max(4, n.radius * p.scale)
+            });
+          }
+        }
+
+        // Draw Edges
+        unityCtx.save();
+        for (const e of unityEdges) {
+          const p1 = project3D(e.source.x, e.source.y, e.source.z, cx, cy);
+          const p2 = project3D(e.target.x, e.target.y, e.target.z, cx, cy);
+          if (p1 && p2) {
+            const avgDepth = (p1.depth + p2.depth) / 2;
+            const alpha = Math.max(0.15, Math.min(0.7, 0.4 - avgDepth / 800));
+            unityCtx.strokeStyle = `rgba(88, 166, 255, ${alpha})`;
+            unityCtx.lineWidth = Math.max(1, 2 * ((p1.scale + p2.scale) / 2));
+            unityCtx.beginPath();
+            unityCtx.moveTo(p1.sx, p1.sy);
+            unityCtx.lineTo(p2.sx, p2.sy);
+            unityCtx.stroke();
+
+            if (e.label && (p1.scale + p2.scale) / 2 > 0.8) {
+              const mx = (p1.sx + p2.sx) / 2;
+              const my = (p1.sy + p2.sy) / 2;
+              unityCtx.fillStyle = 'rgba(139, 148, 158, 0.8)';
+              unityCtx.font = '9px monospace';
+              unityCtx.fillText(e.label, mx + 4, my - 4);
+            }
+          }
+        }
+        unityCtx.restore();
+
+        // Depth sort nodes (farthest first)
+        projectedNodes.sort((a, b) => a.depth - b.depth);
+
+        // Draw Shaded 3D Spheres
+        for (const pn of projectedNodes) {
+          const n = pn.node;
+          const r = pn.radius;
+          const isHovered = (n === unityHoveredNode);
+          const isSelected = (selectedEntity && String(selectedEntity.id) === String(n.id));
+          const baseColor = getNodeColor(n.label, n.id);
+
+          // Selection / Hover Halo
+          if (isSelected || isHovered) {
+            unityCtx.beginPath();
+            unityCtx.arc(pn.sx, pn.sy, r * 1.5, 0, Math.PI * 2);
+            unityCtx.fillStyle = isSelected ? 'rgba(88, 166, 255, 0.35)' : 'rgba(255, 255, 255, 0.2)';
+            unityCtx.fill();
+          }
+
+          // Shaded Sphere (Radial Gradient)
+          const grad = unityCtx.createRadialGradient(
+            pn.sx - r * 0.35, pn.sy - r * 0.35, r * 0.05,
+            pn.sx, pn.sy, r
+          );
+          grad.addColorStop(0, '#ffffff');
+          grad.addColorStop(0.35, baseColor);
+          grad.addColorStop(1, '#05070a');
+
+          unityCtx.beginPath();
+          unityCtx.arc(pn.sx, pn.sy, r, 0, Math.PI * 2);
+          unityCtx.fillStyle = grad;
+          unityCtx.fill();
+
+          if (isSelected) {
+            unityCtx.strokeStyle = '#ffffff';
+            unityCtx.lineWidth = 2;
+            unityCtx.stroke();
+          }
+
+          // 3D Billboard Label
+          if (r > 6) {
+            unityCtx.fillStyle = '#f0f6fc';
+            unityCtx.font = `${Math.max(9, Math.round(11 * pn.scale))}px sans-serif`;
+            unityCtx.textAlign = 'center';
+            unityCtx.textBaseline = 'middle';
+            const displayLabel = String(n.label || n.id).substring(0, 5);
+            unityCtx.fillText(displayLabel, pn.sx, pn.sy);
+
+            if (r > 10) {
+              unityCtx.fillStyle = 'rgba(139, 148, 158, 0.9)';
+              unityCtx.font = '9px monospace';
+              unityCtx.fillText(String(n.id), pn.sx, pn.sy + r + 12);
+            }
+          }
+        }
+      }
+
+      requestAnimationFrame(renderUnity3DLoop);
+    }
+    requestAnimationFrame(renderUnity3DLoop);
+
+    // 3D Controls & Event Handlers
+    if (unityCanvas) {
+      unityCanvas.addEventListener('mousedown', (e) => {
+        unity3DDragging = true;
+        unity3DButton = e.button;
+        unity3DDragStart = { x: e.clientX, y: e.clientY };
+
+        // Raycast click
+        const rect = unityCanvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const w = unityCanvas.clientWidth;
+        const h = unityCanvas.clientHeight;
+        const cx = w / 2;
+        const cy = h / 2;
+
+        let bestNode = null;
+        let bestDist = Infinity;
+        for (const n of unityNodes) {
+          const p = project3D(n.x, n.y, n.z, cx, cy);
+          if (p) {
+            const r = Math.max(6, n.radius * p.scale);
+            const dx = mx - p.sx;
+            const dy = my - p.sy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist <= r + 4 && dist < bestDist) {
+              bestDist = dist;
+              bestNode = n;
+            }
+          }
+        }
+
+        if (bestNode) {
+          unityHoveredNode = bestNode;
+          selectedEntity = bestNode;
+          openInspector(bestNode);
+          if (typeof window.onUnityNodeSelected === 'function') {
+            window.onUnityNodeSelected(bestNode.id);
+          }
+        }
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!unity3DDragging || currentView !== 'unity') {
+          if (currentView === 'unity' && unityCanvas) {
+            const rect = unityCanvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const cx = unityCanvas.clientWidth / 2;
+            const cy = unityCanvas.clientHeight / 2;
+            unityHoveredNode = null;
+            for (const n of unityNodes) {
+              const p = project3D(n.x, n.y, n.z, cx, cy);
+              if (p) {
+                const r = Math.max(6, n.radius * p.scale);
+                const dx = mx - p.sx;
+                const dy = my - p.sy;
+                if (Math.sqrt(dx * dx + dy * dy) <= r + 2) {
+                  unityHoveredNode = n;
+                  unityCanvas.style.cursor = 'pointer';
+                  break;
+                }
+              }
+            }
+            if (!unityHoveredNode) unityCanvas.style.cursor = 'grab';
+          }
+          return;
+        }
+
+        const dx = e.clientX - unity3DDragStart.x;
+        const dy = e.clientY - unity3DDragStart.y;
+        unity3DDragStart = { x: e.clientX, y: e.clientY };
+
+        if (unity3DButton === 2 || e.shiftKey) {
+          // Pan
+          unity3DPanX += dx;
+          unity3DPanY += dy;
+        } else {
+          // Orbit
+          unity3DRotY += dx * 0.008;
+          unity3DRotX += dy * 0.008;
+          unity3DRotX = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, unity3DRotX));
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        unity3DDragging = false;
+      });
+
+      unityCanvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const factor = e.deltaY > 0 ? 1.08 : 0.92;
+        unity3DZoom = Math.max(100, Math.min(2500, unity3DZoom * factor));
+      }, { passive: false });
+
+      unityCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    }
+
+    function zoomUnity3D(factor) {
+      unity3DZoom = Math.max(100, Math.min(2500, unity3DZoom / factor));
+    }
+
+    function resetUnity3DView() {
+      unity3DRotX = 0.35;
+      unity3DRotY = 0.45;
+      unity3DZoom = 550;
+      unity3DPanX = 0;
+      unity3DPanY = 0;
+    }
+
+    function toggleUnityPhysics() {
+      unityPhysicsRunning = !unityPhysicsRunning;
+      const btn = document.getElementById('unity-physics-btn');
+      if (btn) btn.textContent = unityPhysicsRunning ? '⏸' : '▶';
+    }
+
+    function toggleUnityAutoRotate() {
+      unityAutoRotate = !unityAutoRotate;
+      const btn = document.getElementById('unity-rotate-btn');
+      if (btn) btn.style.color = unityAutoRotate ? 'var(--accent)' : 'inherit';
+    }
+
     function renderUnityGraph() {
+      resizeUnityCanvas();
+      sync3DGraph();
+
       const badge = document.getElementById('unity-status-badge');
-      const nodes = Array.from(graphNodes.values()).map(n => ({ id: n.id, label: n.label, category: n.category, score: n.score }));
-      const edges = graphEdges.map(e => ({ src: e.src, dst: e.dst, type: e.type }));
-      const payload = { nodes, edges };
+      const statsTitle = document.getElementById('unity-stats-title');
+      const count = unityNodes.length;
+
+      if (statsTitle) {
+        statsTitle.textContent = `3D Topology: ${count} Nodes, ${unityEdges.length} Edges`;
+      }
 
       if (window.unityInstance) {
+        const payload = {
+          nodes: unityNodes.map(n => ({ id: n.id, label: n.label, properties: n.properties })),
+          edges: unityEdges.map(e => ({ src: e.source.id, dst: e.target.id, label: e.label }))
+        };
         window.unityInstance.SendMessage('GraphController', 'ReceiveGraphData', JSON.stringify(payload));
         if (badge) {
-          badge.textContent = `Unity WebGL Active: ${nodes.length} nodes, ${edges.length} edges rendered in 3D.`;
+          badge.textContent = `Unity WebGL Active | Drag to Orbit | Click Sphere to Inspect`;
           badge.style.color = '#3fb950';
-          badge.style.borderColor = '#238636';
         }
         return;
       }
 
       if (badge) {
-        const count = nodes.length;
         if (count > 0) {
-          badge.textContent = `Active 3D Viewport: ${count} nodes, ${edges.length} edges loaded. Ready for Unity WebGL / GPU Instancing.`;
+          badge.textContent = `${count} 3D Spheres Active | Drag to Orbit | Scroll to Zoom | Click to Inspect`;
           badge.style.color = '#3fb950';
-          badge.style.borderColor = '#238636';
         } else {
-          badge.textContent = 'Ready to render query topology in 3D';
+          badge.textContent = `Ready: Execute a query to visualize 3D graph nodes`;
           badge.style.color = '#58a6ff';
-          badge.style.borderColor = '#1f6feb';
+        }
+      }
+    }
+
+    // Modal Helpers
+    function openModal(id) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'flex';
+    }
+    function closeModal(id) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    }
+
+    // Modal Triggers
+    function openCreateVertexModal() {
+      document.getElementById('new-vertex-name').value = '';
+      document.getElementById('new-vertex-pk').value = 'id';
+      document.getElementById('new-vertex-props').value = 'name: STRING, created_at: INT64';
+      openModal('modal-create-vertex');
+      document.getElementById('new-vertex-name').focus();
+    }
+
+    function openCreateEdgeModal() {
+      document.getElementById('new-edge-name').value = '';
+      document.getElementById('new-edge-props').value = 'weight: FLOAT64, created_at: INT64';
+      openModal('modal-create-edge');
+      document.getElementById('new-edge-name').focus();
+    }
+
+    function openAddPropertyModal(targetKind, targetName) {
+      document.getElementById('add-prop-target-kind').value = targetKind;
+      document.getElementById('add-prop-target-name').value = targetName;
+      document.getElementById('add-prop-target-display').value = `${targetKind.toUpperCase()}: ${targetName}`;
+      document.getElementById('add-prop-name').value = '';
+      document.getElementById('modal-add-prop-title').textContent = `➕ Add Property to ${targetKind === 'vertex' ? 'Tag' : 'Edge'} [${targetName}]`;
+      openModal('modal-add-prop');
+      document.getElementById('add-prop-name').focus();
+    }
+
+    // DDL Execution Helper
+    async function executeQueryDirect(query) {
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      try {
+        const resp = await fetch('/api/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query, endpoint: endpoint })
+        });
+        const data = await resp.json();
+        if (data.status !== 'ok') {
+          alert('DDL Error: ' + (data.error || JSON.stringify(data)));
+          return false;
+        }
+        addHistory(query, true);
+        return true;
+      } catch (err) {
+        alert('Network Error: ' + err.message);
+        return false;
+      }
+    }
+
+    // Modal Submissions
+    async function submitCreateVertex() {
+      const name = document.getElementById('new-vertex-name').value.trim();
+      const propsStr = document.getElementById('new-vertex-props').value.trim();
+      if (!name) {
+        alert('Please enter a vertex tag name.');
+        return;
+      }
+      let ddl = `CREATE VERTEX ${name}`;
+      if (propsStr) {
+        ddl += ` (${propsStr})`;
+      } else {
+        ddl += ` (id: INT64)`;
+      }
+      ddl += `;`;
+
+      closeModal('modal-create-vertex');
+      const ok = await executeQueryDirect(ddl);
+      if (ok) {
+        await fetchSchema();
+      }
+    }
+
+    async function submitCreateEdge() {
+      const name = document.getElementById('new-edge-name').value.trim();
+      const propsStr = document.getElementById('new-edge-props').value.trim();
+      if (!name) {
+        alert('Please enter an edge type name.');
+        return;
+      }
+      let ddl = `CREATE EDGE ${name}`;
+      if (propsStr) {
+        ddl += ` (${propsStr})`;
+      }
+      ddl += `;`;
+
+      closeModal('modal-create-edge');
+      const ok = await executeQueryDirect(ddl);
+      if (ok) {
+        await fetchSchema();
+      }
+    }
+
+    async function submitAddProperty() {
+      const kind = document.getElementById('add-prop-target-kind').value;
+      const targetName = document.getElementById('add-prop-target-name').value;
+      const propName = document.getElementById('add-prop-name').value.trim();
+      const propType = document.getElementById('add-prop-type').value;
+
+      if (!propName) {
+        alert('Please enter a property name.');
+        return;
+      }
+
+      let ddl = '';
+      if (kind === 'vertex') {
+        ddl = `ALTER VERTEX ${targetName} ADD ${propName}: ${propType};`;
+      } else {
+        ddl = `ALTER EDGE ${targetName} ADD ${propName}: ${propType};`;
+      }
+
+      closeModal('modal-add-prop');
+      const ok = await executeQueryDirect(ddl);
+      if (ok) {
+        await fetchSchema();
+      }
+    }
+
+    async function dropVertexLabel(labelName) {
+      if (!confirm(`Are you sure you want to drop vertex tag [${labelName}]?\nAll associated schema metadata and properties will be removed.`)) {
+        return;
+      }
+      const ok = await executeQueryDirect(`DROP VERTEX ${labelName};`);
+      if (ok) await fetchSchema();
+    }
+
+    async function dropEdgeType(typeName) {
+      if (!confirm(`Are you sure you want to drop edge type [${typeName}]?\nAll associated schema metadata will be removed.`)) {
+        return;
+      }
+      const ok = await executeQueryDirect(`DROP EDGE ${typeName};`);
+      if (ok) await fetchSchema();
+    }
+
+    async function dropVertexProperty(labelName, propName) {
+      if (!confirm(`Drop property "${propName}" from tag [${labelName}]?`)) {
+        return;
+      }
+      const ok = await executeQueryDirect(`ALTER VERTEX ${labelName} DROP ${propName};`);
+      if (ok) await fetchSchema();
+    }
+
+    async function createIndex(labelName, propName) {
+      const ok = await executeQueryDirect(`CREATE INDEX ON :${labelName}(${propName});`);
+      if (ok) await fetchSchema();
+    }
+
+    async function dropIndex(labelName, propName) {
+      const ok = await executeQueryDirect(`DROP INDEX ON :${labelName}(${propName});`);
+      if (ok) await fetchSchema();
+    }
+
+    function queryTag(labelName) {
+      setQuery(`MATCH (n:${labelName}) RETURN n LIMIT 50;`);
+      executeQuery();
+      switchView('graph', document.getElementById('tab-btn-graph'));
+    }
+
+    function queryEdge(edgeType) {
+      setQuery(`MATCH ()-[r:${edgeType}]->() RETURN r LIMIT 50;`);
+      executeQuery();
+      switchView('graph', document.getElementById('tab-btn-graph'));
+    }
+
+    // Fetch Schema and Render UI
+    async function fetchSchema() {
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      try {
+        const resp = await fetch(`/api/schema?endpoint=${encodeURIComponent(endpoint)}`);
+        if (resp.ok) {
+          const schema = await resp.json();
+          renderSchemaUI(schema);
+        }
+      } catch (err) {
+        console.error("Failed to fetch schema:", err);
+      }
+    }
+
+    function renderSchemaUI(schema) {
+      const vSchemas = schema.vertices || schema.vertex_schemas || [];
+      const eSchemas = schema.edges || schema.edge_schemas || [];
+
+      // Update Badges
+      const vBadge = document.getElementById('schema-total-tags-badge');
+      if (vBadge) vBadge.textContent = `${vSchemas.length} Vertex Tags`;
+      const eBadge = document.getElementById('schema-total-edges-badge');
+      if (eBadge) eBadge.textContent = `${eSchemas.length} Edge Types`;
+
+      const vCountLabel = document.getElementById('schema-v-count-label');
+      if (vCountLabel) vCountLabel.textContent = `${vSchemas.length} defined tags`;
+      const eCountLabel = document.getElementById('schema-e-count-label');
+      if (eCountLabel) eCountLabel.textContent = `${eSchemas.length} defined types`;
+
+      // Update Sidebar Schema Tab
+      const sbV = document.getElementById('schema-vertices');
+      if (sbV) {
+        if (vSchemas.length === 0) {
+          sbV.innerHTML = '<div style="font-size:11px; color:var(--text-muted); font-style:italic;">No vertex tags defined.</div>';
+        } else {
+          sbV.innerHTML = '';
+          vSchemas.forEach(v => {
+            const labelName = v.label || v.name;
+            const propsCount = (v.properties || []).length;
+            const span = document.createElement('span');
+            span.className = 'schema-tag';
+            span.textContent = `${labelName} (${propsCount}p)`;
+            span.onclick = () => queryTag(labelName);
+            sbV.appendChild(span);
+          });
+        }
+      }
+
+      const sbE = document.getElementById('schema-edges');
+      if (sbE) {
+        if (eSchemas.length === 0) {
+          sbE.innerHTML = '<div style="font-size:11px; color:var(--text-muted); font-style:italic;">No edge types defined.</div>';
+        } else {
+          sbE.innerHTML = '';
+          eSchemas.forEach(e => {
+            const edgeName = e.edge_type_name || e.name;
+            const span = document.createElement('span');
+            span.className = 'schema-tag edge';
+            span.textContent = edgeName;
+            span.onclick = () => queryEdge(edgeName);
+            sbE.appendChild(span);
+          });
+        }
+      }
+
+      // Render Vertex Cards Grid
+      const vGrid = document.getElementById('schema-vertex-grid');
+      if (vGrid) {
+        if (vSchemas.length === 0) {
+          vGrid.innerHTML = `
+            <div style="grid-column: 1/-1; padding:30px; text-align:center; color:var(--text-muted); background:var(--bg-card); border-radius:8px; border:1px dashed var(--border);">
+              <div style="font-size:24px; margin-bottom:8px;">🏷️</div>
+              <div style="font-weight:600; color:var(--text); margin-bottom:4px;">No Vertex Tags Defined</div>
+              <div style="font-size:12px; margin-bottom:12px;">Create a new vertex tag schema or run <code>CREATE VERTEX TagName (id: INT64, ...);</code></div>
+              <button class="btn btn-primary btn-sm" onclick="openCreateVertexModal()">➕ Create First Tag</button>
+            </div>
+          `;
+        } else {
+          vGrid.innerHTML = '';
+          vSchemas.forEach(v => {
+            const card = document.createElement('div');
+            card.className = 'schema-card';
+
+            const labelName = v.label || v.name;
+            const labelId = v.label_id !== undefined ? v.label_id : '-';
+            const indexes = new Set(v.indexes || []);
+            const pk = v.primary_key || '';
+            const props = v.properties || [];
+
+            let propRows = '';
+            props.forEach(p => {
+              const pType = p.type || p.data_type || 'String';
+              const hasIdx = indexes.has(p.name) || p.indexed === true;
+              const isPk = (p.name === pk);
+              propRows += `
+                <tr>
+                  <td style="font-weight:600; font-family:monospace; color:var(--text-bright);">${p.name}</td>
+                  <td><span class="prop-type-badge">${pType}</span></td>
+                  <td>
+                    ${isPk ? '<span class="index-badge" style="background:rgba(210,153,34,0.15); color:var(--yellow); border-color:rgba(210,153,34,0.3);">🔑 PK</span> ' : ''}
+                    ${hasIdx ? '<span class="index-badge">⚡ INDEX</span>' : '<span style="color:var(--text-muted);">-</span>'}
+                  </td>
+                  <td style="text-align:right;">
+                    <div style="display:inline-flex; gap:4px;">
+                      ${hasIdx 
+                        ? \`<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Index" onclick="dropIndex('\${labelName}', '\${p.name}')">Drop Idx</button>\`
+                        : \`<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Create Secondary Index" onclick="createIndex('\${labelName}', '\${p.name}')">+ Index</button>\`
+                      }
+                      <button class="btn btn-danger btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Property" onclick="dropVertexProperty('\${labelName}', '\${p.name}')">🗑</button>
+                    </div>
+                  </td>
+                </tr>
+              `;
+            });
+
+            card.innerHTML = `
+              <div class="schema-card-header">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span style="font-size:16px;">🏷️</span>
+                  <div>
+                    <span style="font-size:14px; font-weight:700; color:var(--accent); font-family:monospace;">\${labelName}</span>
+                    <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">ID: \${labelId}</span>
+                  </div>
+                </div>
+                <div style="display:flex; gap:4px;">
+                  <button class="btn btn-secondary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="queryTag('\${labelName}')" title="Query Vertices">🔍 Query</button>
+                  <button class="btn btn-primary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="openAddPropertyModal('vertex', '\${labelName}')" title="Add Property">➕ Prop</button>
+                  <button class="btn btn-danger btn-sm" style="font-size:11px; padding:2px 8px;" onclick="dropVertexLabel('\${labelName}')" title="Drop Tag">🗑</button>
+                </div>
+              </div>
+              <table class="schema-prop-table">
+                <thead>
+                  <tr>
+                    <th>Property</th>
+                    <th>Type</th>
+                    <th>Flags</th>
+                    <th style="text-align:right;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  \${propRows || '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No properties defined</td></tr>'}
+                </tbody>
+              </table>
+            `;
+            vGrid.appendChild(card);
+          });
+        }
+      }
+
+      // Render Edge Cards Grid
+      const eGrid = document.getElementById('schema-edge-grid');
+      if (eGrid) {
+        if (eSchemas.length === 0) {
+          eGrid.innerHTML = `
+            <div style="grid-column: 1/-1; padding:30px; text-align:center; color:var(--text-muted); background:var(--bg-card); border-radius:8px; border:1px dashed var(--border);">
+              <div style="font-size:24px; margin-bottom:8px;">➡️</div>
+              <div style="font-weight:600; color:var(--text); margin-bottom:4px;">No Edge Types Defined</div>
+              <div style="font-size:12px; margin-bottom:12px;">Create a new edge schema or run <code>CREATE EDGE EdgeType (weight: FLOAT64, ...);</code></div>
+              <button class="btn btn-primary btn-sm" style="background:#8957e5;" onclick="openCreateEdgeModal()">➕ Create First Edge Type</button>
+            </div>
+          `;
+        } else {
+          eGrid.innerHTML = '';
+          eSchemas.forEach(e => {
+            const card = document.createElement('div');
+            card.className = 'schema-card';
+
+            const edgeName = e.edge_type_name || e.name;
+            const edgeId = e.edge_type !== undefined ? e.edge_type : (e.type_id !== undefined ? e.type_id : '-');
+            const props = e.properties || [];
+
+            let propRows = '';
+            props.forEach(p => {
+              const pType = p.type || p.data_type || 'String';
+              propRows += `
+                <tr>
+                  <td style="font-weight:600; font-family:monospace; color:var(--text-bright);">${p.name}</td>
+                  <td><span class="prop-type-badge">${pType}</span></td>
+                  <td><span style="color:var(--text-muted);">-</span></td>
+                </tr>
+              `;
+            });
+
+            card.innerHTML = `
+              <div class="schema-card-header">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span style="font-size:16px;">➡️</span>
+                  <div>
+                    <span style="font-size:14px; font-weight:700; color:var(--purple); font-family:monospace;">\${edgeName}</span>
+                    <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">ID: \${edgeId}</span>
+                  </div>
+                </div>
+                <div style="display:flex; gap:4px;">
+                  <button class="btn btn-secondary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="queryEdge('\${edgeName}')" title="Query Edges">🔍 Query</button>
+                  <button class="btn btn-primary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="openAddPropertyModal('edge', '\${edgeName}')" title="Add Property">➕ Prop</button>
+                  <button class="btn btn-danger btn-sm" style="font-size:11px; padding:2px 8px;" onclick="dropEdgeType('\${edgeName}')" title="Drop Edge Type">🗑</button>
+                </div>
+              </div>
+              <table class="schema-prop-table">
+                <thead>
+                  <tr>
+                    <th>Property</th>
+                    <th>Type</th>
+                    <th>Flags</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  \${propRows || '<tr><td colspan="3" style="text-align:center; color:var(--text-muted);">No properties defined</td></tr>'}
+                </tbody>
+              </table>
+            `;
+            eGrid.appendChild(card);
+          });
         }
       }
     }
@@ -1777,6 +2888,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
       document.getElementById('tab-cluster').style.display = tabName === 'cluster' ? 'block' : 'none';
       document.getElementById('tab-history').style.display = tabName === 'history' ? 'block' : 'none';
       if (tabName === 'cluster') fetchClusterStatus();
+      if (tabName === 'schema') fetchSchema();
     }
 
     function setQuery(text) {
@@ -2107,6 +3219,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
     // Check Cluster Health on Load and periodic background refresh
     async function checkHealth() {
       await fetchClusterStatus();
+      await fetchSchema();
       if (currentView === 'resources') {
         await fetchResources();
       }

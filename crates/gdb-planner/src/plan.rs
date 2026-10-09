@@ -7,7 +7,7 @@ pub enum PhysicalOperator {
     /// Scans vertices of a label from storage.
     ScanVertices {
         var_name: String,
-        label_id: LabelId,
+        label_id: Option<LabelId>,
         id_filter: Option<VertexId>,
     },
     /// Fast secondary property index scan: looks up vertices where label.prop == val

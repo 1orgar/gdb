@@ -2,6 +2,11 @@
 
 # GDB — Distributed High-Performance In-Memory Graph Database (Nebula Graph Alternative)
 
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](Cargo.toml)
+[![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-63.6%25-brightgreen)](docs/COVERAGE.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
+
 A next-generation, high-performance distributed HTAP graph database engine built with **Rust**, featuring in-memory Compressed Sparse Row (CSR) topology, Apache Arrow columnar properties, openCypher/GQL query support, secondary property indexing, Cypher DML mutations, Multi-Raft leaderless replication, S3-backed tiered persistence, MPP distributed exchange over Arrow Flight, and **Apple Metal (UMA Zero-Copy) / NVIDIA CUDA hardware acceleration**.
 
 ---
@@ -17,6 +22,7 @@ A next-generation, high-performance distributed HTAP graph database engine built
 
 2. **Query Language, DML & Analytics (openCypher / GQL / CALL algo):**
    - **Patterns & Multi-Hop Traversal:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name`.
+   - **`WITH` Operator Pipeline:** Inter-clause pipeline transformations, intermediate projections, and aggregations: `MATCH (u:User) WITH u.department AS dept, count(u) AS cnt WHERE cnt > 1 RETURN dept, cnt ORDER BY dept ASC`.
    - **Cypher DML (Mutations & Merges):** `MATCH (u:User {name: 'Alice'}) SET u.age = 31`, `MATCH (u:User) DELETE u`, `MATCH (u:User) DETACH DELETE u`, `MERGE (u:User {name: 'Charlie', age: 35})`.
    - **Aggregations & Pagination:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `DISTINCT`, `ORDER BY prop [ASC|DESC]`, `SKIP N` / `OFFSET N`, `LIMIT N`.
    - **Physical Execution Plan (EXPLAIN):** `EXPLAIN <query>` produces an optimized physical execution plan DAG with operator metrics (`IndexScan`, `Filter`, `Projection`, `Sort`, `Aggregate`, `Mutate`).
@@ -34,9 +40,10 @@ A next-generation, high-performance distributed HTAP graph database engine built
    - **Flexible Configuration:** `--enable-gpu` flag (default `false`), `--gpu-device <ID>` device selector, and `--gpu-offload-threshold <N>` edge threshold.
    - **CPU SIMD Fallback:** When GPU is disabled or absent, computations automatically execute via a vectorized Rayon CPU backend.
 
-5. **GDB Studio v0.4.0 (Interactive Web Workspace):**
-   - Built-in openCypher / GQL editor with query history and schema catalogs.
-   - Force-directed physics visualization (60 FPS Canvas & 3D Unity WebGL).
+5. **GDB Studio v0.4.1 (Interactive Web Workspace):**
+   - **Clean Catalog Boot:** Database boots with zero default vertex tags or edge types (clean slate).
+   - **Interactive Schema Manager:** Inspect, create, alter, and drop vertex tags and edge types visually or via Cypher DDL.
+   - Force-directed physics visualization (60 FPS 2D Canvas & Unity 3D WebGL).
    - **🔍 Execution Plan DAG Viewer:** Visual operator hierarchy with step-by-step badges and ASCII tree.
    - **📈 Real-Time Engine Telemetry:** Live sparkline telemetry for QPS, execution latency, and RAM trend.
    - **Export Tools:** Direct graph and tabular exports to PNG, SVG, CSV, and JSON.
@@ -237,9 +244,29 @@ SHOW GPU;
 
 ---
 
+## 🧪 Testing & Code Coverage
+
+GDB includes comprehensive unit, integration, and end-to-end (E2E) test suites with continuous tracking:
+
+```bash
+# Run full workspace test suite
+cargo test --workspace
+
+# Run code coverage analysis pipeline (cargo-llvm-cov)
+./scripts/coverage.sh
+
+# Open interactive HTML coverage report
+cargo llvm-cov --workspace --html --open
+```
+
+Detailed test suites and subsystem breakdown can be viewed in **[docs/COVERAGE.md](docs/COVERAGE.md)**.
+
+---
+
 ## 📖 In-Depth Documentation
 
 - 👉 **[Server Configuration & Query Reference (SERVER_AND_QUERY_GUIDE.md)](docs/SERVER_AND_QUERY_GUIDE.md)**
+- 👉 **[Test Coverage & Reliability Report (COVERAGE.md)](docs/COVERAGE.md)**
 - 👉 **[Operations Guide & Bulk Ingestion (OPERATIONS_GUIDE.md)](docs/OPERATIONS_GUIDE.md)**
 
 ---

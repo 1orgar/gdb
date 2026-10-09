@@ -2,7 +2,7 @@
 
 # GDB: Руководство по запуску, конфигурированию сервера и справочник запросов
 
-Полная техническая документация по эксплуатации распределенной in-memory графовой СУБД **GDB** (высокопроизводительный аналог Nebula Graph / Nebula Enterprise) версии **v0.4.0**.
+Полная техническая документация по эксплуатации распределенной in-memory графовой СУБД **GDB** (высокопроизводительный аналог Nebula Graph / Nebula Enterprise) версии **v0.4.1**.
 
 ---
 
@@ -15,6 +15,7 @@
 - Аппаратный ускоритель вычислений (Apple Metal Compute UMA Zero-Copy / NVIDIA CUDA / CPU SIMD).
 - Транспортный уровень: Apache Arrow Flight (gRPC) + HTTP REST API (:8847).
 - Сетевую репликацию мутаций на ведомые узлы кластера (`/raft/replicate`).
+- Эндпоинт интроспекции схемы каталога (`/schema`).
 - Экспортер метрик Prometheus (`/metrics`).
 
 ### 1.1. Полный справочник параметров запуска `gdb-server`
@@ -31,7 +32,7 @@ gdb-server [OPTIONS]
 | `--partitions` | — | — | `u32` | `4` | Количество независимых Multi-Raft групп и локальных партиций графового хранилища на ноде. |
 | `--port` | `-p` | — | `u16` | `8848` | Сетевой порт сервиса **Internal Apache Arrow Flight gRPC**. Обеспечивает векторный MPP обмен RecordBatch и межсетевой шаффл при распределенных запросах между узлами кластера. |
 | `--client-flight-port` | — | `GDB_CLIENT_FLIGHT_PORT` | `u16` | `8860` | Сетевой порт **External Client Flight gRPC**. Обеспечивает высокоскоростную потоковую параллельную загрузку (`do_put`) и прямое исполнение Cypher запросов (`do_get`) для внешних клиентов (`gdb-py-client`). |
-| `--http-port` | — | — | `u16` | `8847` | Сетевой порт **HTTP REST API**. Принимает запросы пользователей (`POST /query`), межрепликационные вызовы (`POST /replicate`), отдает метрики Prometheus (`GET /metrics`), статус кластера (`GET /cluster`), статус ресурсов (`GET /resources`) и health-check (`GET /health`). |
+| `--http-port` | — | — | `u16` | `8847` | Сетевой порт **HTTP REST API**. Принимает запросы пользователей (`POST /query`), инспекцию схемы (`GET /schema`), межрепликационные вызовы (`POST /replicate`), отдает метрики Prometheus (`GET /metrics`), статус кластера (`GET /cluster`), статус ресурсов (`GET /resources`) и health-check (`GET /health`). |
 | `--wal-dir` | — | — | `path` | `./data/wal` | Каталог на диске для журнала упреждающей записи **Write-Ahead Log (WAL)** с верификацией контрольных сумм CRC32. |
 | `--peers` | — | — | `string` | *(пусто)* | Список HTTP REST адресов других участников кольца через запятую (например: `"http://127.0.0.1:8846,http://127.0.0.1:8845"`). На основе этого списка нода динамически строит топологию кольца. |
 | `--replication-factor` | `-r` | `GDB_REPLICATION_FACTOR` | `u32` | `3` | **Фактор репликации кольца (RF):**<br>• `1` — чистое шардирование без дублирования (режим MPP, $\sum\text{RAM}$).<br>• `k` — частичная репликация на $k$ последовательных узлов кольца.<br>• `N` — полное зеркалирование (100% данных на всех узлах). Автоматически ограничивается количеством активных нод. |
@@ -137,8 +138,16 @@ CREATE EDGE CONNECTS ();
 CREATE INDEX ON :User(name);
 CREATE INDEX ON :User(age);
 
--- 4. Удаление вторичного индекса
+-- 4. Изменение тегов вершин и типов ребер (ALTER)
+ALTER VERTEX User ADD (email STRING, country STRING);
+ALTER VERTEX User DROP (country);
+ALTER EDGE FOLLOWS ADD (since INT64);
+ALTER EDGE FOLLOWS DROP (since);
+
+-- 5. Удаление элементов схемы
 DROP INDEX ON :User(age);
+DROP VERTEX Device;
+DROP EDGE CONNECTS;
 ```
 
 ---
@@ -189,6 +198,19 @@ RETURN a.name, b.name;
 MATCH (a:User)-[:FOLLOWS*1..3]->(b:User)
 WHERE a.id = 1
 RETURN a.name, b.name;
+
+-- Конвейеризация промежуточных вычислений через оператор WITH:
+MATCH (u:User)
+WITH u.department AS dept, count(u) AS team_size, avg(u.salary) AS avg_sal
+WHERE team_size >= 2
+RETURN dept, team_size, avg_sal
+ORDER BY team_size DESC;
+
+-- Передача переменных между шаблонами через WITH:
+MATCH (a:User)-[:FOLLOWS]->(b:User)
+WITH b.name AS followee, b.age AS followee_age
+WHERE followee_age > 20
+RETURN followee, followee_age;
 
 -- Агрегации и Group By:
 MATCH (a:User)-[:FOLLOWS]->(b:User)
@@ -313,3 +335,22 @@ df_edges = pl.DataFrame({
 })
 client.scatter_ingest_edges(df_edges, edge_type="FOLLOWS")
 ```
+
+---
+
+## Часть 4. Тестирование, верификация и покрытие кода
+
+В GDB встроен непрерывный конвейер тестирования и измерения покрытия:
+
+```bash
+# 1. Запуск всех тестов рабочего пространства (юнит-, интеграционные и E2E)
+cargo test --workspace
+
+# 2. Автоматизированный запуск пайплайна покрытия (cargo-llvm-cov)
+./scripts/coverage.sh
+
+# 3. Просмотр интерактивного HTML-отчета
+cargo llvm-cov --workspace --html --open
+```
+
+Подробные метрики покрытия по всем подсистемам и тестам приведены в документе **[COVERAGE.md](COVERAGE.md)**.

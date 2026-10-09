@@ -15,6 +15,12 @@ pub enum Token {
     Merge,
     Index,
     Drop,
+    Alter,
+    Show,
+    Tag,
+    Add,
+    Schema,
+    As,
     On,
     Explain,
     From,
@@ -23,6 +29,7 @@ pub enum Token {
     Values,
     Match,
     Where,
+    With,
     Return,
     Distinct,
     Order,
@@ -225,8 +232,14 @@ impl Lexer {
                         "DETACH" => Token::Detach,
                         "SET" => Token::Set,
                         "MERGE" => Token::Merge,
-                        "INDEX" => Token::Index,
+                        "INDEX" | "INDEXES" => Token::Index,
                         "DROP" => Token::Drop,
+                        "ALTER" => Token::Alter,
+                        "SHOW" => Token::Show,
+                        "TAG" | "TAGS" => Token::Tag,
+                        "ADD" => Token::Add,
+                        "SCHEMA" => Token::Schema,
+                        "AS" => Token::As,
                         "ON" => Token::On,
                         "EXPLAIN" => Token::Explain,
                         "FROM" => Token::From,
@@ -235,6 +248,7 @@ impl Lexer {
                         "VALUES" => Token::Values,
                         "MATCH" => Token::Match,
                         "WHERE" => Token::Where,
+                        "WITH" => Token::With,
                         "RETURN" => Token::Return,
                         "DISTINCT" => Token::Distinct,
                         "ORDER" => Token::Order,
@@ -247,6 +261,8 @@ impl Lexer {
                         "COUNT" => Token::Count,
                         "AND" => Token::And,
                         "OR" => Token::Or,
+                        "VERTICES" => Token::Vertex,
+                        "EDGES" => Token::Edge,
                         _ => Token::Ident(ident),
                     };
                     tokens.push(token);
@@ -328,6 +344,8 @@ impl Parser {
             Some(Token::Call) => self.parse_call(),
             Some(Token::Create) => self.parse_create(),
             Some(Token::Drop) => self.parse_drop(),
+            Some(Token::Alter) => self.parse_alter(),
+            Some(Token::Show) => self.parse_show(),
             Some(Token::Insert) => self.parse_insert(),
             Some(Token::Delete) => self.parse_delete(),
             Some(Token::Merge) => self.parse_merge_statement(),
@@ -414,7 +432,7 @@ impl Parser {
     fn parse_create(&mut self) -> GdbResult<Statement> {
         self.expect(&Token::Create)?;
         match self.peek() {
-            Some(Token::Vertex) => {
+            Some(Token::Vertex) | Some(Token::Tag) => {
                 self.advance();
                 let label = self.expect_ident()?;
                 self.expect(&Token::LParen)?;
@@ -449,25 +467,182 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Statement::CreateIndex { label, property })
             }
-            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, EDGE, or INDEX after CREATE, found {:?}", other))),
+            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, TAG, EDGE, or INDEX after CREATE, found {:?}", other))),
             None => Err(GdbError::Parser("Unexpected EOF after CREATE".into())),
         }
     }
 
     fn parse_drop(&mut self) -> GdbResult<Statement> {
         self.expect(&Token::Drop)?;
-        self.expect(&Token::Index)?;
-        if self.peek() == Some(&Token::On) {
-            self.advance();
+        match self.peek() {
+            Some(Token::Vertex) | Some(Token::Tag) => {
+                self.advance();
+                let label = self.expect_ident()?;
+                Ok(Statement::DropVertexLabel { label })
+            }
+            Some(Token::Edge) => {
+                self.advance();
+                let edge_type = self.expect_ident()?;
+                Ok(Statement::DropEdgeType { edge_type })
+            }
+            Some(Token::Index) => {
+                self.advance();
+                if self.peek() == Some(&Token::On) {
+                    self.advance();
+                }
+                if self.peek() == Some(&Token::Colon) {
+                    self.advance();
+                }
+                let label = self.expect_ident()?;
+                self.expect(&Token::LParen)?;
+                let property = self.expect_ident()?;
+                self.expect(&Token::RParen)?;
+                Ok(Statement::DropIndex { label, property })
+            }
+            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, TAG, EDGE, or INDEX after DROP, found {:?}", other))),
+            None => Err(GdbError::Parser("Unexpected EOF after DROP".into())),
         }
-        if self.peek() == Some(&Token::Colon) {
-            self.advance();
+    }
+
+    fn parse_alter(&mut self) -> GdbResult<Statement> {
+        self.expect(&Token::Alter)?;
+        match self.peek() {
+            Some(Token::Vertex) | Some(Token::Tag) => {
+                self.advance();
+                let label = self.expect_ident()?;
+                let mut add_properties = Vec::new();
+                let mut drop_properties = Vec::new();
+                match self.peek() {
+                    Some(Token::Add) => {
+                        self.advance();
+                        let has_paren = if self.peek() == Some(&Token::LParen) {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        add_properties = self.parse_property_specs()?;
+                        if has_paren {
+                            self.expect(&Token::RParen)?;
+                        }
+                    }
+                    Some(Token::Drop) => {
+                        self.advance();
+                        let has_paren = if self.peek() == Some(&Token::LParen) {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        loop {
+                            let prop = self.expect_ident()?;
+                            drop_properties.push(prop);
+                            if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        if has_paren {
+                            self.expect(&Token::RParen)?;
+                        }
+                    }
+                    Some(other) => return Err(GdbError::Parser(format!("Expected ADD or DROP after ALTER VERTEX, found {:?}", other))),
+                    None => return Err(GdbError::Parser("Unexpected EOF after ALTER VERTEX".into())),
+                }
+                Ok(Statement::AlterVertexLabel {
+                    label,
+                    add_properties,
+                    drop_properties,
+                })
+            }
+            Some(Token::Edge) => {
+                self.advance();
+                let edge_type = self.expect_ident()?;
+                let mut add_properties = Vec::new();
+                let mut drop_properties = Vec::new();
+                match self.peek() {
+                    Some(Token::Add) => {
+                        self.advance();
+                        let has_paren = if self.peek() == Some(&Token::LParen) {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        add_properties = self.parse_property_specs()?;
+                        if has_paren {
+                            self.expect(&Token::RParen)?;
+                        }
+                    }
+                    Some(Token::Drop) => {
+                        self.advance();
+                        let has_paren = if self.peek() == Some(&Token::LParen) {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        loop {
+                            let prop = self.expect_ident()?;
+                            drop_properties.push(prop);
+                            if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        if has_paren {
+                            self.expect(&Token::RParen)?;
+                        }
+                    }
+                    Some(other) => return Err(GdbError::Parser(format!("Expected ADD or DROP after ALTER EDGE, found {:?}", other))),
+                    None => return Err(GdbError::Parser("Unexpected EOF after ALTER EDGE".into())),
+                }
+                Ok(Statement::AlterEdgeType {
+                    edge_type,
+                    add_properties,
+                    drop_properties,
+                })
+            }
+            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, TAG, or EDGE after ALTER, found {:?}", other))),
+            None => Err(GdbError::Parser("Unexpected EOF after ALTER".into())),
         }
-        let label = self.expect_ident()?;
-        self.expect(&Token::LParen)?;
-        let property = self.expect_ident()?;
-        self.expect(&Token::RParen)?;
-        Ok(Statement::DropIndex { label, property })
+    }
+
+    fn parse_show(&mut self) -> GdbResult<Statement> {
+        self.expect(&Token::Show)?;
+        match self.peek() {
+            Some(Token::Schema) => {
+                self.advance();
+                Ok(Statement::ShowSchema)
+            }
+            Some(Token::Vertex) | Some(Token::Tag) => {
+                self.advance();
+                Ok(Statement::ShowVertexLabels)
+            }
+            Some(Token::Edge) => {
+                self.advance();
+                Ok(Statement::ShowEdgeTypes)
+            }
+            Some(Token::Index) => {
+                self.advance();
+                Ok(Statement::ShowSchema)
+            }
+            Some(Token::Ident(s)) => {
+                let s_upper = s.to_uppercase();
+                self.advance();
+                match s_upper.as_str() {
+                    "SCHEMA" => Ok(Statement::ShowSchema),
+                    "TAGS" | "VERTICES" => Ok(Statement::ShowVertexLabels),
+                    "EDGES" => Ok(Statement::ShowEdgeTypes),
+                    "INDEXES" => Ok(Statement::ShowSchema),
+                    _ => Err(GdbError::Parser(format!("Unknown SHOW target: {}", s_upper))),
+                }
+            }
+            Some(other) => Err(GdbError::Parser(format!("Expected SCHEMA, TAGS, VERTICES, or EDGES after SHOW, found {:?}", other))),
+            None => Err(GdbError::Parser("Unexpected EOF after SHOW".into())),
+        }
     }
 
     fn parse_property_specs(&mut self) -> GdbResult<Vec<PropertySpec>> {
@@ -478,6 +653,9 @@ impl Parser {
 
         loop {
             let name = self.expect_ident()?;
+            if self.peek() == Some(&Token::Colon) {
+                self.advance();
+            }
             let type_ident = self.expect_ident()?.to_uppercase();
             let data_type = match type_ident.as_str() {
                 "STRING" | "VARCHAR" | "TEXT" => DataType::String,
@@ -775,6 +953,112 @@ impl Parser {
             where_clause = Some(self.parse_expr()?);
         }
 
+        let mut with_clause = None;
+        let mut next_match = None;
+
+        if self.peek() == Some(&Token::With) {
+            self.advance();
+            let mut with_distinct = false;
+            if self.peek() == Some(&Token::Distinct) {
+                self.advance();
+                with_distinct = true;
+            }
+
+            let mut with_items = Vec::new();
+            loop {
+                let expr = self.parse_expr()?;
+                let mut alias = None;
+                if self.peek() == Some(&Token::As) {
+                    self.advance();
+                    alias = Some(self.expect_ident()?);
+                } else if let Some(Token::Ident(a)) = self.peek() {
+                    if !a.eq_ignore_ascii_case("LIMIT")
+                        && !a.eq_ignore_ascii_case("ORDER")
+                        && !a.eq_ignore_ascii_case("SKIP")
+                        && !a.eq_ignore_ascii_case("OFFSET")
+                        && !a.eq_ignore_ascii_case("WHERE")
+                        && !a.eq_ignore_ascii_case("MATCH")
+                        && !a.eq_ignore_ascii_case("RETURN")
+                    {
+                        alias = Some(a.clone());
+                        self.advance();
+                    }
+                }
+                with_items.push(ReturnItem { expr, alias });
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+
+            let mut with_order_by = Vec::new();
+            if self.peek() == Some(&Token::Order) {
+                self.advance();
+                self.expect(&Token::By)?;
+                loop {
+                    let expr = self.parse_expr()?;
+                    let mut ascending = true;
+                    if self.peek() == Some(&Token::Asc) {
+                        self.advance();
+                    } else if self.peek() == Some(&Token::Desc) {
+                        self.advance();
+                        ascending = false;
+                    }
+                    with_order_by.push(OrderByItem { expr, ascending });
+                    if self.peek() == Some(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let mut with_skip = None;
+            let mut with_limit = None;
+            while self.peek() == Some(&Token::Skip) || self.peek() == Some(&Token::Offset) || self.peek() == Some(&Token::Limit) {
+                if self.peek() == Some(&Token::Skip) || self.peek() == Some(&Token::Offset) {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::IntLit(s)) => with_skip = Some(*s as usize),
+                        _ => return Err(GdbError::Parser("Expected integer after SKIP/OFFSET in WITH".into())),
+                    }
+                } else if self.peek() == Some(&Token::Limit) {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::IntLit(l)) => with_limit = Some(*l as usize),
+                        _ => return Err(GdbError::Parser("Expected integer after LIMIT in WITH".into())),
+                    }
+                }
+            }
+
+            let mut with_where = None;
+            if self.peek() == Some(&Token::Where) {
+                self.advance();
+                with_where = Some(self.parse_expr()?);
+            }
+
+            with_clause = Some(WithClause {
+                distinct: with_distinct,
+                items: with_items,
+                order_by: with_order_by,
+                skip: with_skip,
+                limit: with_limit,
+                where_clause: with_where,
+            });
+
+            if self.peek() == Some(&Token::Match) {
+                self.advance();
+                let next_pat = self.parse_path_pattern()?;
+                let mut next_where = None;
+                if self.peek() == Some(&Token::Where) {
+                    self.advance();
+                    next_where = Some(self.parse_expr()?);
+                }
+                next_match = Some((next_pat, next_where));
+            }
+        }
+
         // Parse optional mutation clauses: SET, DELETE, DETACH DELETE
         let mut updates = Vec::new();
         loop {
@@ -834,7 +1118,10 @@ impl Parser {
             loop {
                 let expr = self.parse_expr()?;
                 let mut alias = None;
-                if let Some(Token::Ident(a)) = self.peek() {
+                if self.peek() == Some(&Token::As) {
+                    self.advance();
+                    alias = Some(self.expect_ident()?);
+                } else if let Some(Token::Ident(a)) = self.peek() {
                     if !a.eq_ignore_ascii_case("LIMIT")
                         && !a.eq_ignore_ascii_case("ORDER")
                         && !a.eq_ignore_ascii_case("SKIP")
@@ -862,7 +1149,6 @@ impl Parser {
                 let mut ascending = true;
                 if self.peek() == Some(&Token::Asc) {
                     self.advance();
-                    ascending = true;
                 } else if self.peek() == Some(&Token::Desc) {
                     self.advance();
                     ascending = false;
@@ -898,6 +1184,8 @@ impl Parser {
         Ok(Statement::Query(CypherQuery {
             pattern,
             where_clause,
+            with_clause,
+            next_match,
             updates,
             distinct,
             return_items,
