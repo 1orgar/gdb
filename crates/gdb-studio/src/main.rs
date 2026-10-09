@@ -692,5 +692,21 @@ mod tests {
         assert_eq!(body.status, "ok");
         assert!(body.plan.is_some());
     }
+
+    #[test]
+    fn test_studio_html_and_javascript_integrity() {
+        let html = crate::ui::HTML_INDEX;
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+        // Ensure no invalid backslash escapes before backticks or template literals in scripts
+        assert!(!html.contains("\\`"), "HTML contains invalid escaped backtick \\`");
+        assert!(!html.contains("\\${"), "HTML contains invalid escaped template literal \\${{");
+        // Ensure core Studio DOM IDs and functions exist
+        assert!(html.contains("id=\"query-input\""));
+        assert!(html.contains("id=\"run-btn\""));
+        assert!(html.contains("executeQuery"));
+        assert!(html.contains("switchView"));
+        assert!(html.contains("switchSidebarTab"));
+    }
 }
 

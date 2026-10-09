@@ -2768,10 +2768,10 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
                   <td style="text-align:right;">
                     <div style="display:inline-flex; gap:4px;">
                       ${hasIdx 
-                        ? \`<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Index" onclick="dropIndex('\${labelName}', '\${p.name}')">Drop Idx</button>\`
-                        : \`<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Create Secondary Index" onclick="createIndex('\${labelName}', '\${p.name}')">+ Index</button>\`
+                        ? `<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Index" onclick="dropIndex('${labelName}', '${p.name}')">Drop Idx</button>`
+                        : `<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Create Secondary Index" onclick="createIndex('${labelName}', '${p.name}')">+ Index</button>`
                       }
-                      <button class="btn btn-danger btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Property" onclick="dropVertexProperty('\${labelName}', '\${p.name}')">🗑</button>
+                      <button class="btn btn-danger btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Property" onclick="dropVertexProperty('${labelName}', '${p.name}')">🗑</button>
                     </div>
                   </td>
                 </tr>
@@ -2783,14 +2783,14 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
                 <div style="display:flex; align-items:center; gap:8px;">
                   <span style="font-size:16px;">🏷️</span>
                   <div>
-                    <span style="font-size:14px; font-weight:700; color:var(--accent); font-family:monospace;">\${labelName}</span>
-                    <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">ID: \${labelId}</span>
+                    <span style="font-size:14px; font-weight:700; color:var(--accent); font-family:monospace;">${labelName}</span>
+                    <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">ID: ${labelId}</span>
                   </div>
                 </div>
                 <div style="display:flex; gap:4px;">
-                  <button class="btn btn-secondary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="queryTag('\${labelName}')" title="Query Vertices">🔍 Query</button>
-                  <button class="btn btn-primary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="openAddPropertyModal('vertex', '\${labelName}')" title="Add Property">➕ Prop</button>
-                  <button class="btn btn-danger btn-sm" style="font-size:11px; padding:2px 8px;" onclick="dropVertexLabel('\${labelName}')" title="Drop Tag">🗑</button>
+                  <button class="btn btn-secondary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="queryTag('${labelName}')" title="Query Vertices">🔍 Query</button>
+                  <button class="btn btn-primary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="openAddPropertyModal('vertex', '${labelName}')" title="Add Property">➕ Prop</button>
+                  <button class="btn btn-danger btn-sm" style="font-size:11px; padding:2px 8px;" onclick="dropVertexLabel('${labelName}')" title="Drop Tag">🗑</button>
                 </div>
               </div>
               <table class="schema-prop-table">
@@ -2803,7 +2803,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
                   </tr>
                 </thead>
                 <tbody>
-                  \${propRows || '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No properties defined</td></tr>'}
+                  ${propRows || '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No properties defined</td></tr>'}
                 </tbody>
               </table>
             `;
@@ -2851,14 +2851,14 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
                 <div style="display:flex; align-items:center; gap:8px;">
                   <span style="font-size:16px;">➡️</span>
                   <div>
-                    <span style="font-size:14px; font-weight:700; color:var(--purple); font-family:monospace;">\${edgeName}</span>
-                    <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">ID: \${edgeId}</span>
+                    <span style="font-size:14px; font-weight:700; color:var(--purple); font-family:monospace;">${edgeName}</span>
+                    <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">ID: ${edgeId}</span>
                   </div>
                 </div>
                 <div style="display:flex; gap:4px;">
-                  <button class="btn btn-secondary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="queryEdge('\${edgeName}')" title="Query Edges">🔍 Query</button>
-                  <button class="btn btn-primary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="openAddPropertyModal('edge', '\${edgeName}')" title="Add Property">➕ Prop</button>
-                  <button class="btn btn-danger btn-sm" style="font-size:11px; padding:2px 8px;" onclick="dropEdgeType('\${edgeName}')" title="Drop Edge Type">🗑</button>
+                  <button class="btn btn-secondary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="queryEdge('${edgeName}')" title="Query Edges">🔍 Query</button>
+                  <button class="btn btn-primary btn-sm" style="font-size:11px; padding:2px 8px;" onclick="openAddPropertyModal('edge', '${edgeName}')" title="Add Property">➕ Prop</button>
+                  <button class="btn btn-danger btn-sm" style="font-size:11px; padding:2px 8px;" onclick="dropEdgeType('${edgeName}')" title="Drop Edge Type">🗑</button>
                 </div>
               </div>
               <table class="schema-prop-table">
@@ -2870,7 +2870,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
                   </tr>
                 </thead>
                 <tbody>
-                  \${propRows || '<tr><td colspan="3" style="text-align:center; color:var(--text-muted);">No properties defined</td></tr>'}
+                  ${propRows || '<tr><td colspan="3" style="text-align:center; color:var(--text-muted);">No properties defined</td></tr>'}
                 </tbody>
               </table>
             `;
