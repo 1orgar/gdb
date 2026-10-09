@@ -24,10 +24,18 @@ def send_query(endpoint, query_str):
             body = json.loads(resp.read().decode("utf-8"))
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             is_ok = body.get("status") == "ok"
-            return is_ok, elapsed_ms
-    except Exception:
+            err = body.get("error") if not is_ok else None
+            return is_ok, elapsed_ms, err
+    except urllib.error.HTTPError as e:
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        return False, elapsed_ms
+        try:
+            body = json.loads(e.read().decode("utf-8"))
+            return False, elapsed_ms, body.get("error", f"HTTP {e.code}")
+        except Exception:
+            return False, elapsed_ms, f"HTTP {e.code}"
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return False, elapsed_ms, str(e)
 
 def fetch_metrics(endpoint):
     url = f"{endpoint}/metrics"
@@ -48,9 +56,20 @@ def fetch_metrics(endpoint):
     except Exception:
         return {}
 
+def ensure_schema(endpoint):
+    """Ensures vertex tags and edge types expected by the stress workload exist."""
+    stmts = [
+        "CREATE VERTEX User (name STRING, age INT64);",
+        "CREATE VERTEX Device (model STRING);",
+        "CREATE EDGE KNOWS ();",
+        "CREATE EDGE LINKED ();",
+    ]
+    for s in stmts:
+        send_query(endpoint, s)
+
 def worker_loop(endpoint, stop_time, write_ratio, results):
     local_times = []
-    local_errors = 0
+    local_errors = {}
     queries_pool = [
         "MATCH (a:User)-[:KNOWS]->(b:User) RETURN a.name, b.name LIMIT 20;",
         "MATCH (a:Device)-[:LINKED]->(b:Device) RETURN a.model, b.model LIMIT 20;",
@@ -65,11 +84,12 @@ def worker_loop(endpoint, stop_time, write_ratio, results):
         else:
             q = random.choice(queries_pool)
 
-        ok, lat = send_query(endpoint, q)
+        ok, lat, err = send_query(endpoint, q)
         if ok:
             local_times.append(lat)
         else:
-            local_errors += 1
+            err_key = err or "Unknown Error"
+            local_errors[err_key] = local_errors.get(err_key, 0) + 1
 
     results.append((local_times, local_errors))
 
@@ -79,6 +99,7 @@ def main():
     parser.add_argument("--concurrency", type=int, default=8, help="Number of concurrent worker threads")
     parser.add_argument("--duration", type=int, default=5, help="Test duration in seconds")
     parser.add_argument("--write-ratio", type=float, default=0.25, help="Fraction of write queries (0.0 - 1.0)")
+    parser.add_argument("--no-schema-init", action="store_true", help="Skip automatic vertex/edge schema creation")
     args = parser.parse_args()
 
     print("\033[1;36m" + "=" * 65)
@@ -89,6 +110,10 @@ def main():
     print(f"[*] Duration:         {args.duration} seconds")
     print(f"[*] Workload Mix:     {int(args.write_ratio * 100)}% Writes / {int((1 - args.write_ratio) * 100)}% Reads")
     print("-" * 65)
+
+    if not args.no_schema_init:
+        print("[*] Ensuring required schema (User, Device, KNOWS, LINKED)...")
+        ensure_schema(args.endpoint)
 
     # 1. Fetch baseline metrics
     initial_metrics = fetch_metrics(args.endpoint)
@@ -109,9 +134,12 @@ def main():
     # Aggregate results
     all_latencies = []
     total_errors = 0
-    for lats, errs in results:
+    all_error_reasons = {}
+    for lats, err_dict in results:
         all_latencies.extend(lats)
-        total_errors += errs
+        for err_msg, count in err_dict.items():
+            total_errors += count
+            all_error_reasons[err_msg] = all_error_reasons.get(err_msg, 0) + count
 
     all_latencies.sort()
     total_queries = len(all_latencies)
@@ -146,6 +174,11 @@ def main():
     print(f"p95:                  {p95:.3f} ms")
     print(f"p99:                  \033[1;36m{p99:.3f} ms\033[0m")
     print(f"Max Latency:          {max_lat:.3f} ms")
+    if total_errors > 0:
+        print("-" * 65)
+        print("\033[1;31mTOP ERROR REASONS:\033[0m")
+        for err_msg, count in sorted(all_error_reasons.items(), key=lambda x: x[1], reverse=True)[:5]:
+            print(f"  • {err_msg}: {count:,} occurrences")
     print("-" * 65)
     print("PROMETHEUS METRICS DELTA (/metrics):")
     print(f"  • Cluster Total Queries: +{int(fin_queries - init_queries):,}")
