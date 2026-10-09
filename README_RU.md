@@ -2,7 +2,7 @@
 
 # GDB — Распределенная высокопроизводительная In-Memory Графовая СУБД (Альтернатива Nebula Graph)
 
-[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.4.2-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-81.6%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
@@ -265,6 +265,7 @@ cargo llvm-cov --workspace --html --open
 
 ## 📖 Подробная документация
 
+- 👉 **[Руководство по тестированию и бенчмаркам (TESTING_AND_BENCHMARKS_RU.md)](docs/TESTING_AND_BENCHMARKS_RU.md)**
 - 👉 **[Руководство по серверу и запросам (SERVER_AND_QUERY_GUIDE_RU.md)](docs/SERVER_AND_QUERY_GUIDE_RU.md)**
 - 👉 **[Отчет о тестировании и покрытии кода (COVERAGE.md)](docs/COVERAGE.md)**
 - 👉 **[Руководство по эксплуатации и загрузке данных (OPERATIONS_GUIDE_RU.md)](docs/OPERATIONS_GUIDE_RU.md)**

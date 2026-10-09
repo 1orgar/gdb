@@ -16,7 +16,7 @@ async fn test_e2e_http_server_full_lifecycle() {
     assert_eq!(resp.status(), 200);
     let health: Value = resp.json().await.unwrap();
     assert_eq!(health["status"], "UP");
-    assert_eq!(health["version"], "0.4.1");
+    assert_eq!(health["version"], "0.4.2");
     assert_eq!(health["role"], "Peer");
 
     // 2. Cluster check

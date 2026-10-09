@@ -49,8 +49,17 @@ def main():
     parser.add_argument("--edges", type=int, default=100000, help="Number of edges to generate (default: 100000)")
     parser.add_argument("--file", type=str, default=None, help="Save to a .gdb batch file instead of sending over HTTP")
     parser.add_argument("--compact", action="store_true", default=True, help="Trigger CSR compaction after ingestion")
+    parser.add_argument("--no-recreate", action="store_true", help="Do not drop and recreate schema before ingesting")
+    parser.add_argument("--teardown", action="store_true", help="Drop User and FOLLOWS schema and exit")
 
     args = parser.parse_args()
+
+    if args.teardown:
+        print("[*] Tearing down graph schema (User, FOLLOWS)...")
+        send_query(args.url, "DROP VERTEX User;")
+        send_query(args.url, "DROP EDGE FOLLOWS;")
+        print("[✓] Schema dropped successfully.")
+        return
 
     print("\x1b[1;36m")
     print("============================================================")
@@ -70,11 +79,16 @@ def main():
             res = send_query(args.url, statement)
             if res.get("status") == "error":
                 err = res.get("error", "")
-                if "already exists" not in err:
+                if "already exists" not in err and "not found" not in err:
                     print(f"\x1b[1;31m[!] Query failed: {err}\x1b[0m")
 
     # 1. Initialize Schema
-    print("\x1b[1;33m[1/3] Creating Graph Schema (User, FOLLOWS)...\x1b[0m")
+    if not args.no_recreate:
+        print("\x1b[1;33m[1/3] Recreating Graph Schema (User, FOLLOWS)...\x1b[0m")
+        emit("DROP VERTEX User;")
+        emit("DROP EDGE FOLLOWS;")
+    else:
+        print("\x1b[1;33m[1/3] Ensuring Graph Schema (User, FOLLOWS)...\x1b[0m")
     emit("CREATE VERTEX User (name STRING, age INT64);")
     emit("CREATE EDGE FOLLOWS ();")
 

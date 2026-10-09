@@ -1240,7 +1240,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span id="footer-version">GDB Studio v0.4.1</span>
+      <span id="footer-version">GDB Studio v0.4.2</span>
       <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
       <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>

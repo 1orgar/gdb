@@ -56,13 +56,32 @@ def fetch_metrics(endpoint):
     except Exception:
         return {}
 
-def ensure_schema(endpoint):
-    """Ensures vertex tags and edge types expected by the stress workload exist."""
+def setup_schema(endpoint):
+    """Drops existing test schemas, recreates fresh schema, and pre-seeds base entities."""
+    print("[*] Recreating fresh test schema (User, Device, KNOWS, LINKED)...")
+    teardown_schema(endpoint, silent=True)
     stmts = [
         "CREATE VERTEX User (name STRING, age INT64);",
         "CREATE VERTEX Device (model STRING);",
         "CREATE EDGE KNOWS ();",
         "CREATE EDGE LINKED ();",
+    ]
+    for s in stmts:
+        send_query(endpoint, s)
+    # Seed initial vertices so MATCH traversals find real entities
+    for i in range(1, 51):
+        send_query(endpoint, f"INSERT VERTEX User (id, name, age) VALUES ({i}, 'User_{i}', {20 + i % 40});")
+        send_query(endpoint, f"INSERT VERTEX Device (id, model) VALUES ({i}, 'Model_{i}');")
+
+def teardown_schema(endpoint, silent=False):
+    """Cleans up and drops test schemas created for the benchmark."""
+    if not silent:
+        print("[*] Cleaning up and dropping test schemas (User, Device, KNOWS, LINKED)...")
+    stmts = [
+        "DROP VERTEX User;",
+        "DROP VERTEX Device;",
+        "DROP EDGE KNOWS;",
+        "DROP EDGE LINKED;",
     ]
     for s in stmts:
         send_query(endpoint, s)
@@ -99,7 +118,7 @@ def main():
     parser.add_argument("--concurrency", type=int, default=8, help="Number of concurrent worker threads")
     parser.add_argument("--duration", type=int, default=5, help="Test duration in seconds")
     parser.add_argument("--write-ratio", type=float, default=0.25, help="Fraction of write queries (0.0 - 1.0)")
-    parser.add_argument("--no-schema-init", action="store_true", help="Skip automatic vertex/edge schema creation")
+    parser.add_argument("--keep-schema", action="store_true", help="Preserve test schemas after benchmark completion")
     args = parser.parse_args()
 
     print("\033[1;36m" + "=" * 65)
@@ -111,9 +130,8 @@ def main():
     print(f"[*] Workload Mix:     {int(args.write_ratio * 100)}% Writes / {int((1 - args.write_ratio) * 100)}% Reads")
     print("-" * 65)
 
-    if not args.no_schema_init:
-        print("[*] Ensuring required schema (User, Device, KNOWS, LINKED)...")
-        ensure_schema(args.endpoint)
+    # Recreate fresh schema before test
+    setup_schema(args.endpoint)
 
     # 1. Fetch baseline metrics
     initial_metrics = fetch_metrics(args.endpoint)
@@ -187,6 +205,11 @@ def main():
     print(f"  • CSR Compacted Edges:   {int(final_metrics.get('gdb_csr_edges_count', 0)):,}")
     print(f"  • GPU Acceleration:      Active ({final_metrics.get('gdb_gpu_active', 1):.0f})")
     print("=" * 65 + "\n")
+
+    if not args.keep_schema:
+        teardown_schema(args.endpoint)
+    else:
+        print("[*] Preserving test schema (--keep-schema specified).\n")
 
 if __name__ == "__main__":
     main()

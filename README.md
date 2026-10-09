@@ -2,7 +2,7 @@
 
 # GDB — Distributed High-Performance In-Memory Graph Database (Nebula Graph Alternative)
 
-[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.4.2-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-81.6%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
@@ -265,6 +265,7 @@ Detailed test suites and subsystem breakdown can be viewed in **[docs/COVERAGE.m
 
 ## 📖 In-Depth Documentation
 
+- 👉 **[Testing & Benchmarking Suite Guide (TESTING_AND_BENCHMARKS.md)](docs/TESTING_AND_BENCHMARKS.md)**
 - 👉 **[Server Configuration & Query Reference (SERVER_AND_QUERY_GUIDE.md)](docs/SERVER_AND_QUERY_GUIDE.md)**
 - 👉 **[Test Coverage & Reliability Report (COVERAGE.md)](docs/COVERAGE.md)**
 - 👉 **[Operations Guide & Bulk Ingestion (OPERATIONS_GUIDE.md)](docs/OPERATIONS_GUIDE.md)**

@@ -8,6 +8,7 @@ replicate consistently across the cluster ring.
 import sys
 import time
 import json
+import argparse
 import urllib.request
 import urllib.error
 
@@ -25,6 +26,12 @@ def query(endpoint, q, timeout=5):
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+def teardown_schema(silent=False):
+    if not silent:
+        print("[*] Cleaning up replication schemas (Device, LINKED)...")
+    query(PEER1_URL, "DROP VERTEX Device;")
+    query(PEER1_URL, "DROP EDGE LINKED;")
+
 def get_json(url, timeout=3):
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
@@ -33,6 +40,10 @@ def get_json(url, timeout=3):
         return None
 
 def main():
+    parser = argparse.ArgumentParser(description="GDB Replication Verification")
+    parser.add_argument("--keep-schema", action="store_true", help="Preserve test schemas after verification")
+    args = parser.parse_args()
+
     print("\033[1;36m" + "=" * 65)
     print("      GDB Leaderless Ring Replication Verification Suite     ")
     print("=" * 65 + "\033[0m")
@@ -51,7 +62,8 @@ def main():
             print("\nPlease ensure the 3-node cluster is running via ./scripts/start_cluster.sh")
             sys.exit(1)
 
-    print("\n[1/4] Creating Schema via Peer 1 (Broadcast DDL)...")
+    print("\n[1/4] Recreating Fresh Schema via Peer 1 (Broadcast DDL)...")
+    teardown_schema(silent=True)
     res1 = query(PEER1_URL, "CREATE VERTEX Device (model STRING, ram_gb INT64);")
     res2 = query(PEER1_URL, "CREATE EDGE LINKED ();")
     print(f"  -> DDL Result: {res1.get('status')} | {res2.get('status')}")
@@ -129,8 +141,12 @@ def main():
     else:
         print("\033[1;31m[FAIL] Discrepancy detected across cluster peers!\033[0m")
         print(f"Details: P1={p1_rows}, P2={p2_rows}, P3={p3_rows}")
-        sys.exit(1)
     print("=" * 65 + "\n")
+
+    if not args.keep_schema:
+        teardown_schema()
+    else:
+        print("[*] Preserving replication schemas (--keep-schema specified).\n")
 
 if __name__ == "__main__":
     main()

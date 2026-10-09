@@ -69,11 +69,37 @@ def run_latency_benchmark(base_url, queries, name, concurrency=1):
         "total_s": total_time,
     }
 
+def setup_schema(base_url):
+    print("[*] Recreating fresh benchmark schema (User, KNOWS, FOLLOWS)...")
+    teardown_schema(base_url, silent=True)
+    send_query(base_url, "CREATE VERTEX User (name STRING, age INT64);")
+    send_query(base_url, "CREATE EDGE KNOWS ();")
+    send_query(base_url, "CREATE EDGE FOLLOWS ();")
+
+    print("[*] Pre-seeding benchmark graph topology (100 vertices, 500 edges)...")
+    for vid in range(1, 101):
+        send_query(base_url, f"INSERT VERTEX User (id, name, age) VALUES ({vid}, 'User_{vid}', {20 + vid % 40});")
+    for _ in range(500):
+        u = random.randint(1, 100)
+        v = random.randint(1, 100)
+        send_query(base_url, f"INSERT EDGE KNOWS FROM {u} TO {v};")
+        send_query(base_url, f"INSERT EDGE FOLLOWS FROM {u} TO {v};")
+    send_query(base_url, "compact;")
+    print("[✓] Seed graph generated and compacted into CSR.\n")
+
+def teardown_schema(base_url, silent=False):
+    if not silent:
+        print("[*] Cleaning up and dropping benchmark schema (User, KNOWS, FOLLOWS)...")
+    send_query(base_url, "DROP VERTEX User;")
+    send_query(base_url, "DROP EDGE KNOWS;")
+    send_query(base_url, "DROP EDGE FOLLOWS;")
+
 def main():
     parser = argparse.ArgumentParser(description="GDB Benchmark Suite")
     parser.add_argument("--url", default="http://localhost:8847", help="GDB HTTP endpoint (default: http://localhost:8847)")
     parser.add_argument("--samples", type=int, default=500, help="Number of query samples for traversal tests (default: 500)")
     parser.add_argument("--concurrency", type=int, default=4, help="Concurrency workers for OLTP tests (default: 4)")
+    parser.add_argument("--keep-schema", action="store_true", help="Preserve benchmark schemas after completion")
 
     args = parser.parse_args()
 
@@ -96,6 +122,9 @@ def main():
         print(f"\x1b[1;31m[!] Failed to connect to GDB at {args.url}: {e}\x1b[0m")
         print("    Please start the server first via: ./bin/gdb-server")
         sys.exit(1)
+
+    # Initialize fresh schema
+    setup_schema(args.url)
 
     results = []
 
@@ -173,6 +202,11 @@ def main():
             f"{r['p99_ms']:<9.3f}"
         )
     print("=========================================================================================================\x1b[0m\n")
+
+    if not args.keep_schema:
+        teardown_schema(args.url)
+    else:
+        print("[*] Preserving benchmark schema (--keep-schema specified).\n")
 
 if __name__ == "__main__":
     main()

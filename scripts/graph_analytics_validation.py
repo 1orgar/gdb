@@ -6,13 +6,14 @@ Validates all 12 graph algorithms against deterministic ground-truth graph topol
 
 import sys
 import json
+import argparse
 import urllib.request
 import urllib.error
 
 ENDPOINT = "http://127.0.0.1:8847"
 
-def query(q):
-    url = f"{ENDPOINT}/query"
+def query(q, endpoint=None):
+    url = f"{endpoint or ENDPOINT}/query"
     data = json.dumps({"query": q}).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
@@ -20,6 +21,12 @@ def query(q):
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+def teardown_schema(endpoint, silent=False):
+    if not silent:
+        print("[*] Cleaning up validation schemas (Node, REL)...")
+    query("DROP VERTEX Node;", endpoint)
+    query("DROP EDGE REL;", endpoint)
 
 def run_test(name, fn):
     try:
@@ -35,6 +42,13 @@ def run_test(name, fn):
         return False
 
 def main():
+    global ENDPOINT
+    parser = argparse.ArgumentParser(description="GDB Analytics Mathematical Validator")
+    parser.add_argument("--endpoint", default="http://127.0.0.1:8847", help="Target server endpoint")
+    parser.add_argument("--keep-schema", action="store_true", help="Preserve test schemas after validation")
+    args = parser.parse_args()
+    ENDPOINT = args.endpoint
+
     print("\033[1;36m" + "=" * 68)
     print("      GDB Nebula Enterprise Analytics Mathematical Validator     ")
     print("=" * 68 + "\033[0m\n")
@@ -44,14 +58,15 @@ def main():
         with urllib.request.urlopen(f"{ENDPOINT}/health", timeout=2) as r:
             assert json.loads(r.read().decode("utf-8")).get("status") == "UP"
     except Exception:
-        print("\033[1;31m[!] Server at http://127.0.0.1:8847 is not reachable.\033[0m")
+        print(f"\033[1;31m[!] Server at {ENDPOINT} is not reachable.\033[0m")
         print("    Please run ./scripts/start_cluster.sh first.\n")
         sys.exit(1)
 
-    print("[*] Setting up deterministic benchmark topology...")
+    print("[*] Recreating fresh deterministic benchmark topology (Node, REL)...")
     # Clean setup
-    query("CREATE VERTEX Node (val INT64);")
-    query("CREATE EDGE REL ();")
+    teardown_schema(ENDPOINT, silent=True)
+    query("CREATE VERTEX Node (val INT64);", ENDPOINT)
+    query("CREATE EDGE REL ();", ENDPOINT)
 
     # 1. Triangle (Undirected / Bidirectional): 101 <-> 102 <-> 103 <-> 101
     query("INSERT EDGE REL FROM 101 TO 102;")
@@ -191,6 +206,11 @@ def main():
     else:
         print(f"\033[1;33m[PARTIAL] {passed}/{len(tests)} Algorithms Validated.\033[0m")
     print("=" * 68 + "\n")
+
+    if not args.keep_schema:
+        teardown_schema(ENDPOINT)
+    else:
+        print("[*] Preserving validation schemas (--keep-schema specified).\n")
 
 if __name__ == "__main__":
     main()
