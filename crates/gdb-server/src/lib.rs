@@ -871,8 +871,12 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
         }
     }
 
-    match state.executor.execute(stmt) {
-        Ok(res) => {
+    let exec_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.executor.execute(stmt)
+    }));
+
+    match exec_res {
+        Ok(Ok(res)) => {
             let elapsed_us = start.elapsed().as_micros();
             state.queries_ok.fetch_add(1, Ordering::Relaxed);
             state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
@@ -914,11 +918,27 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
                 "rows": rows,
             })
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             state.queries_err.fetch_add(1, Ordering::Relaxed);
             serde_json::json!({
                 "status": "error",
                 "error": format!("Execution error: {}", e),
+                "elapsed_us": start.elapsed().as_micros()
+            })
+        }
+        Err(panic_err) => {
+            state.queries_err.fetch_add(1, Ordering::Relaxed);
+            let panic_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Internal execution panic".to_string()
+            };
+            tracing::error!("Query execution panicked: {}", panic_msg);
+            serde_json::json!({
+                "status": "error",
+                "error": format!("Internal execution panic: {}", panic_msg),
                 "elapsed_us": start.elapsed().as_micros()
             })
         }
