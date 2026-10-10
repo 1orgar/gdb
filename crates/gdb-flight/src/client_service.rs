@@ -52,6 +52,8 @@ impl GdbClientFlightService {
 
     pub fn into_server(self) -> FlightServiceServer<Self> {
         FlightServiceServer::new(self)
+            .max_decoding_message_size(256 * 1024 * 1024)
+            .max_encoding_message_size(256 * 1024 * 1024)
     }
 }
 
