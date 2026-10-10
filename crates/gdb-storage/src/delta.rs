@@ -172,5 +172,12 @@ impl DeltaMemTable {
         }
         false
     }
+
+    /// Drops all edges of a given edge type from the Delta MemTable.
+    pub fn drop_edge_type(&self, edge_type: EdgeType) {
+        for mut entry in self.out_edges.iter_mut() {
+            entry.value_mut().retain(|e| e.edge_type != edge_type);
+        }
+    }
 }
 

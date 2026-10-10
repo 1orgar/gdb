@@ -124,10 +124,11 @@ impl QueryExecutor {
                 })
             }
             Statement::DropEdgeType { edge_type } => {
-                {
+                let et = {
                     let mut schema = self.schema.write();
-                    schema.drop_edge_type(&edge_type)?;
-                }
+                    schema.drop_edge_type(&edge_type)?
+                };
+                self.storage.drop_edge_type(et);
                 Ok(QueryResult {
                     message: format!("Dropped edge type '{}'", edge_type),
                     batch: None,

@@ -21,9 +21,10 @@
 ## 🎯 Архитектура тестового набора
 
 Тестовый стек GDB построен на трех ключевых принципах:
-1. **Чистый Python (Zero Dependencies)**: Все утилиты и бенчмарки работают исключительно на стандартной библиотеке Python 3 (`urllib.request`, `concurrent.futures`, `json`, `random`, `statistics`). Никаких внешних библиотек и `pip install`.
-2. **Изоляция и чистый каталог**: База данных стартует с чистым каталогом. Скрипты автоматически пересоздают необходимые сущности схемы при старте, наполняют граф базовыми данными и **гарантированно удаляют тестовые схемы при завершении работы**.
-3. **Аппаратная верификация GPU**: Автоматическое определение бэкенда ускорения — Apple Metal UMA на macOS или NVIDIA CUDA Driver Context на Linux.
+1. **Официальный Python SDK `gdb-client`**: Все утилиты и бенчмарки работают на базе высокопроизводительного официального SDK `gdb-client` (`pip install 'gdb-client[all]'`), поддерживающего параллельный scatter-инжест и векторную передачу данных через Apache Arrow Flight MPP и Polars.
+2. **Два режима транспорта (`--mode {http, flight, mpp}`)**: Все скрипты поддерживают переключение между HTTP REST и высокоскоростным потоковым Arrow Flight MPP для всестороннего тестирования транзакционного и аналитического профилей.
+3. **Изоляция и чистый каталог**: База данных стартует с чистым каталогом. Скрипты автоматически пересоздают необходимые сущности схемы при старте, наполняют граф базовыми данными и **гарантированно удаляют тестовые схемы при завершении работы**.
+4. **Аппаратная верификация GPU**: Автоматическое определение бэкенда ускорения — Apple Metal UMA на macOS или NVIDIA CUDA Driver Context на Linux.
 
 ---
 
@@ -70,33 +71,42 @@ graph TD
 
 ### Запуск
 ```bash
-python3 scripts/stress_test.py --endpoint http://127.0.0.1:8847 --concurrency 8 --duration 30
+# HTTP REST режим
+python3 scripts/stress_test.py --endpoint http://127.0.0.1:8847 --threads 8 --duration 30 --mode http
+
+# Arrow Flight MPP режим
+python3 scripts/stress_test.py --endpoint http://127.0.0.1:8847 --threads 8 --duration 30 --mode flight
 ```
 
 ### Параметры запуска
 * `--endpoint`: HTTP URL ноды (по умолчанию: `http://127.0.0.1:8847`).
-* `--concurrency`: Количество параллельных воркеров (по умолчанию: `8`).
+* `--mode`: Режим передачи данных: `http` или `flight`/`mpp` (по умолчанию: `http`).
+* `--threads`: Количество параллельных воркеров (по умолчанию: `4`).
 * `--duration`: Длительность теста в секундах (по умолчанию: `5`).
-* `--write-ratio`: Доля запросов на запись от `0.0` до `1.0` (по умолчанию: `0.25` = 25% записей / 75% чтений).
+* `--read-ratio`: Доля запросов на чтение от `0.0` до `1.0` (по умолчанию: `0.7` = 70% чтений / 30% записей).
 * `--keep-schema`: Не удалять тестовую схему и данные после завершения.
 
 ---
 
 ## 📊 Комплексный бенчмарк аналитики и обходов (`benchmark_suite.py`)
 
-Замеряет задержки на 8 ключевых операциях графовой базы данных:
-1. **1-Hop Traversal**: `MATCH (a:User)-[:KNOWS]->(b:User) WHERE a.id = $id RETURN b.name`
-2. **2-Hop Traversal**: `MATCH (a:User)-[:KNOWS]->(b:User)-[:KNOWS]->(c:User) WHERE a.id = $id RETURN c.name`
+Замеряет задержки на ключевых операциях графовой базы данных:
+1. **1-Hop Traversal**: `MATCH (a:User)-[:FOLLOWS]->(b:User) WHERE a.id = $id RETURN b.name`
+2. **2-Hop Traversal**: `MATCH (a:User)-[:FOLLOWS*2..2]->(b:User) WHERE a.id = $id RETURN count(b)`
 3. **PageRank Analytics**: 20 итераций с коэффициентом затухания 0.85
 4. **Louvain Community Detection**: Детекция сообществ на основе модулярности
 5. **Weakly Connected Components (WCC)**: Поиск компонент связности
 6. **Triangle Counting & Clustering**: Подсчет треугольников и коэффициент кластеризации
 7. **Single-Source Shortest Path (SSSP)**: Поиск кратчайших путей
-8. **Jaccard & Cosine Similarity**: Попарное сходство окрестностей вершин
+8. **Node2Vec Graph ML Embeddings**: Векторные эмбеддинги графа
 
 ### Запуск
 ```bash
-python3 scripts/benchmark_suite.py --url http://127.0.0.1:8847 --samples 1000 --concurrency 4
+# HTTP режим
+python3 scripts/benchmark_suite.py --url http://127.0.0.1:8847 --oltp-ops 1000 --concurrency 4 --mode http
+
+# Arrow Flight MPP режим
+python3 scripts/benchmark_suite.py --url http://127.0.0.1:8847 --oltp-ops 1000 --concurrency 4 --mode flight
 ```
 
 ---
@@ -110,8 +120,11 @@ python3 scripts/benchmark_suite.py --url http://127.0.0.1:8847 --samples 1000 --
 # 1. Запустить сервер с флагом GPU-ускорения
 ./bin/gdb-server --enable-gpu &
 
-# 2. Запустить GPU-тест
-python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 10000 --edges 50000 --iterations 5
+# 2. Запустить GPU-тест через HTTP
+python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 10000 --edges 20000 --runs 3 --mode http
+
+# 3. Запустить GPU-тест через Arrow Flight MPP
+python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 10000 --edges 20000 --runs 3 --mode flight
 ```
 
 ### Что проверяет скрипт:
@@ -128,8 +141,11 @@ python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 100
 Генерирует масштабируемые графы социальных связей с безмасштабным распределением степеней вершин (Power-Law preferential attachment).
 
 ```bash
-# Загрузка 10 000 вершин и 100 000 ребер через REST API
-python3 scripts/data_loader.py --url http://127.0.0.1:8847 --vertices 10000 --edges 100000
+# Загрузка 10 000 вершин и 100 000 ребер через HTTP Batch
+python3 scripts/data_loader.py --url http://127.0.0.1:8847 --vertices 10000 --edges 100000 --mode http
+
+# Параллельный scatter-инжест через Arrow Flight MPP по узлам кластера
+python3 scripts/data_loader.py --url http://127.0.0.1:8847 --vertices 10000 --edges 100000 --mode flight
 
 # Генерация высокоскоростного батч-файла для консоли gdb-cli
 python3 scripts/data_loader.py --file data/social_100k.gdb --vertices 10000 --edges 100000
@@ -140,15 +156,20 @@ python3 scripts/data_loader.py --url http://127.0.0.1:8847 --teardown
 
 ---
 
-## 📐 Математическая валидация 12 алгоритмов (`graph_analytics_validation.py`)
+## 📐 Математическая валидация алгоритмов (`graph_analytics_validation.py`)
 
 Проверяет математическую корректность графовых алгоритмов на эталонных графах:
-- **Треугольный клик** (`101 <-> 102 <-> 103`): проверка равенства количества треугольников 1.
-- **Звезда** (`200 -> 201..204`): проверка распределения PageRank и степеней вершин.
-- **Гантель (Barbell Graph)**: проверка пика Betweenness Centrality на мостовом ребре и корректности разделения сообществ в Louvain.
+- **Triangle Counting**: корректность числа треугольников в цикле.
+- **PageRank**: сходимость ранжирования на циклических и стоковых топологиях.
+- **WCC & SCC**: разбиение компонент слабой и сильной связности.
+- **SSSP & Node2Vec**: корректность длин путей и размерности эмбеддингов.
 
 ```bash
-python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847
+# Валидация через HTTP
+python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847 --mode http
+
+# Валидация через Arrow Flight MPP
+python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847 --mode flight
 ```
 
 ---
@@ -163,7 +184,8 @@ python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847
 
 ```bash
 ./scripts/start_cluster.sh
-python3 scripts/test_replication.py
+python3 scripts/test_replication.py --mode http
+python3 scripts/test_replication.py --mode flight
 ```
 
 ---
@@ -172,8 +194,8 @@ python3 scripts/test_replication.py
 
 Высокопроизводительный бенчмарк клиентского уровня на базе официального пакета `gdb-client`:
 1. **Автоматический жизненный цикл схемы**: Создание `BenchUser` и `BENCH_KNOWS` с автоматическим удалением по завершении (или сохранением при `--keep-schema`).
-2. **Пачечная загрузка вершин и ребер**: Замер пропускной способности при групповых вставках через Cypher.
-3. **Графовая аналитика и обходы**: Оценка 1-hop и 2-hop обходов, алгоритмов PageRank и Louvain из Python.
+2. **Два режима инжеста**: Замер пропускной способности при групповых вставках через HTTP REST или параллельный scatter-инжест через Arrow Flight MPP.
+3. **Графовая аналитика и обходы**: Оценка 1-hop и 2-hop обходов, алгоритмов PageRank и Node2Vec из Python.
 4. **Экспорт в NetworkX / Polars**: Проверка прямой конвертации результатов запросов в датафреймы Polars и графы NetworkX.
 
 ### Установка зависимостей
@@ -184,14 +206,20 @@ pip install -r scripts/requirements.txt
 
 ### Запуск
 ```bash
-python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --batch-size 500
+# HTTP Batch режим
+python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --mode http
+
+# Arrow Flight MPP режим
+python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --mode flight
 ```
 
 ### Параметры запуска
 * `--endpoint`: HTTP REST эндпоинт GDB (по умолчанию: `http://127.0.0.1:8847`).
-* `--vertices`: Количество синтетических вершин для генерации (по умолчанию: `5000`).
-* `--edges`: Количество синтетических ребер для генерации (по умолчанию: `15000`).
-* `--batch-size`: Размер пачки сущностей в одном Cypher-запросе (по умолчанию: `500`).
-* `--concurrency`: Число параллельных рабочих потоков (по умолчанию: `4`).
+* `--mode`: Режим передачи: `http` или `flight`/`mpp` (по умолчанию: `http`).
+* `--client-flight-port`: Flight client порт (по умолчанию: `8860`).
+* `--vertices`: Количество синтетических вершин для генерации (по умолчанию: `20000`).
+* `--edges`: Количество синтетических ребер для генерации (по умолчанию: `60000`).
+* `--queries`: Количество итераций запросов (по умолчанию: `50`).
 * `--keep-schema`: Сохранить тестовую схему и данные в базе после завершения бенчмарка.
+
 

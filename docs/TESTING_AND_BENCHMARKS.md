@@ -21,9 +21,10 @@ Comprehensive guide to executing stress testing, graph traversal benchmarks, GPU
 ## 🎯 Overview & Philosophy
 
 The GDB testing suite is engineered around three foundational principles:
-1. **Zero External Dependencies**: All test scripts are implemented strictly using the Python 3 standard library (`urllib.request`, `concurrent.futures`, `json`, `random`, `statistics`). No `pip install` or virtual environments required.
-2. **Deterministic & Isolated Schema Lifecycle**: Scripts recreate clean schemas at startup, seed baseline data if needed, and cleanly drop all test tags and edge types upon exit.
-3. **Hardware-Aware Verification**: Native detection and verification of Apple Metal UMA zero-copy memory and NVIDIA CUDA compute context allocation.
+1. **Powered by Official `gdb-client` SDK**: All test and benchmark scripts are built on the high-performance `gdb-client` Python SDK (`pip install gdb-client[all]`), leveraging zero-copy Arrow Flight MPP scatter-ingest and vectorized Polars DataFrames.
+2. **Dual Transport Modes (`--mode {http, flight, mpp}`)**: All scripts allow toggling between HTTP REST and high-throughput Apache Arrow Flight MPP streaming to validate both OLTP and distributed OLAP pipelines.
+3. **Deterministic & Isolated Schema Lifecycle**: Scripts recreate clean schemas at startup, seed baseline data if needed, and cleanly drop all test tags and edge types upon exit.
+4. **Hardware-Aware Verification**: Native detection and verification of Apple Metal UMA zero-copy memory and NVIDIA CUDA compute context allocation.
 
 ---
 
@@ -70,14 +71,19 @@ Generates mixed OLTP write transactions and OLAP read traversals across multiple
 
 ### Basic Execution
 ```bash
-python3 scripts/stress_test.py --endpoint http://127.0.0.1:8847 --concurrency 8 --duration 30
+# HTTP REST Mode
+python3 scripts/stress_test.py --endpoint http://127.0.0.1:8847 --threads 8 --duration 30 --mode http
+
+# Arrow Flight MPP Mode
+python3 scripts/stress_test.py --endpoint http://127.0.0.1:8847 --threads 8 --duration 30 --mode flight
 ```
 
 ### CLI Parameters
 * `--endpoint`: Target GDB HTTP REST endpoint (default: `http://127.0.0.1:8847`).
-* `--concurrency`: Number of concurrent worker threads (default: `8`).
+* `--mode`: Query transport mode: `http` or `flight`/`mpp` (default: `http`).
+* `--threads`: Number of concurrent worker threads (default: `4`).
 * `--duration`: Workload duration in seconds (default: `5`).
-* `--write-ratio`: Fraction of write queries between `0.0` and `1.0` (default: `0.25` for 25% writes / 75% reads).
+* `--read-ratio`: Fraction of read queries between `0.0` and `1.0` (default: `0.7` for 70% reads / 30% writes).
 * `--keep-schema`: Retain the test schema and data after the test concludes.
 
 ### Sample Output
@@ -114,32 +120,39 @@ Executes an 8-stage enterprise benchmark measuring latencies across transactiona
 
 ### Execution
 ```bash
-python3 scripts/benchmark_suite.py --url http://127.0.0.1:8847 --samples 1000 --concurrency 4
+# HTTP Mode
+python3 scripts/benchmark_suite.py --url http://127.0.0.1:8847 --oltp-ops 1000 --concurrency 4 --mode http
+
+# Arrow Flight MPP Mode
+python3 scripts/benchmark_suite.py --url http://127.0.0.1:8847 --oltp-ops 1000 --concurrency 4 --mode flight
 ```
 
 ### Measured Stages
-1. **1-Hop Traversal**: `MATCH (a:User)-[:KNOWS]->(b:User) WHERE a.id = $id RETURN b.name`
-2. **2-Hop Traversal**: `MATCH (a:User)-[:KNOWS]->(b:User)-[:KNOWS]->(c:User) WHERE a.id = $id RETURN c.name`
+1. **1-Hop Traversal**: `MATCH (a:User)-[:FOLLOWS]->(b:User) WHERE a.id = $id RETURN b.name`
+2. **2-Hop Traversal**: `MATCH (a:User)-[:FOLLOWS*2..2]->(b:User) WHERE a.id = $id RETURN count(b)`
 3. **PageRank Analytics**: 20 iterations with damping factor $0.85$
 4. **Louvain Community Detection**: Modularity optimization
 5. **Weakly Connected Components (WCC)**: Disjoint set union-find
 6. **Triangle Counting & Clustering**: Local clustering coefficients
 7. **Single-Source Shortest Path (SSSP)**: Weighted graph path finding
-8. **Jaccard & Cosine Similarity**: Pairwise neighborhood comparison
+8. **Node2Vec Graph ML Embeddings**: High-dimensional graph representations
 
 ---
 
 ## 🚀 Hardware GPU Acceleration Benchmark (`gpu_benchmark.py`)
 
-Specifically verifies hardware acceleration kernels on **Apple Metal** (UMA Zero-Copy) and **NVIDIA CUDA** (Primary Context & Scratchpad).
+Specifically verifies hardware acceleration kernels on **Apple Metal** (UMA Zero-Copy) and **NVIDIA CUDA** (Linux SpMV Dedicated PCIe).
 
 ### Execution
 ```bash
 # Start server with GPU acceleration enabled
 ./bin/gdb-server --enable-gpu &
 
-# Run GPU Benchmark
-python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 10000 --edges 50000 --iterations 5
+# Run GPU Benchmark (HTTP batch ingest)
+python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 10000 --edges 20000 --runs 3 --mode http
+
+# Run GPU Benchmark (Arrow Flight MPP scatter ingest)
+python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 10000 --edges 20000 --runs 3 --mode flight
 ```
 
 ### What It Verifies
@@ -155,16 +168,19 @@ python3 scripts/gpu_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 100
                    GPU ACCELERATION BENCHMARK RESULTS                    
 ============================================================================
 Hardware Backend:   Apple Metal Compute (UMA Zero-Copy)
-Graph in CSR:       50,000 compacted edges (10,000 vertices)
-GPU Telemetry:      Active Flag = 1 (Prometheus: gdb_gpu_active)
+Graph in CSR:       20,000 compacted edges (10,000 vertices)
+Ingest Mode:        Arrow Flight MPP
 ----------------------------------------------------------------------------
-Kernel Algorithm                     | Avg Latency  | Min Latency  | Throughput  
+Kernel Algorithm                      | Avg Latency  | Min Latency  | Throughput  
 ----------------------------------------------------------------------------
-Vectorized PageRank (20 iters)       |     3.42 ms  |     2.10 ms  | 14,619,883 e/s
-Weakly Connected Components (WCC)    |     1.12 ms  |     0.94 ms  | 44,642,857 e/s
-Triangle Counting & Clustering       |     2.18 ms  |     1.98 ms  | 22,935,779 e/s
-Single Source Shortest Path (SSSP)   |     0.88 ms  |     0.79 ms  | 56,818,181 e/s
-Louvain Community Detection          |     8.45 ms  |     8.12 ms  |  5,917,159 e/s
+Vectorized PageRank (20 iters)        |      5.82 ms  |      3.25 ms  |  3,438,396 e/s
+Weakly Connected Components (WCC)     |      1.78 ms  |      1.59 ms  | 11,222,032 e/s
+Triangle Counting & Clustering        |      2.47 ms  |      2.41 ms  |  8,087,479 e/s
+Single Source Shortest Path (SSSP)    |      1.90 ms  |      1.86 ms  | 10,547,361 e/s
+Louvain Community Detection           |      4.95 ms  |      4.81 ms  |  4,043,706 e/s
+Multi-Hop Wavefront BFS (1..3)        |      0.66 ms  |      0.60 ms  | 30,489,757 e/s
+Parallel Vector Similarity Search     |      0.51 ms  |      0.48 ms  | 39,545,269 e/s
+Graph ML Node2Vec Embeddings          |     22.85 ms  |     22.77 ms  |    875,135 e/s
 ============================================================================
 ```
 
@@ -175,8 +191,11 @@ Louvain Community Detection          |     8.45 ms  |     8.12 ms  |  5,917,159 
 Populates the cluster with realistic social and interaction graphs using scale-free power-law degree distributions (preferential attachment).
 
 ```bash
-# Ingest 10,000 vertices and 100,000 edges over HTTP
-python3 scripts/data_loader.py --url http://127.0.0.1:8847 --vertices 10000 --edges 100000
+# Ingest 10,000 vertices and 100,000 edges over HTTP Batch
+python3 scripts/data_loader.py --url http://127.0.0.1:8847 --vertices 10000 --edges 100000 --mode http
+
+# Ingest via Arrow Flight MPP parallel scatter across cluster nodes
+python3 scripts/data_loader.py --url http://127.0.0.1:8847 --vertices 10000 --edges 100000 --mode flight
 
 # Export directly to a high-speed .gdb batch file for gdb-cli
 python3 scripts/data_loader.py --file data/social_100k.gdb --vertices 10000 --edges 100000
@@ -189,14 +208,18 @@ python3 scripts/data_loader.py --url http://127.0.0.1:8847 --teardown
 
 ## 📐 Mathematical Algorithm Validation (`graph_analytics_validation.py`)
 
-Validates the numerical and topological accuracy of all 12 graph algorithms against deterministic ground-truth topologies:
-- **Triangle Clique** (`101 <-> 102 <-> 103`): Validates triangle count $= 1$.
-- **Star Graph** (`200 -> 201..204`): Validates in/out degrees and PageRank distribution.
-- **Barbell Graph** (`Clique A <-> Bridge <-> Clique B`): Validates Betweenness Centrality peak on bridge edges and Louvain community splitting.
-- **Bipartite & Isolated Nodes**: Validates WCC component separation.
+Validates the numerical and topological accuracy of graph analytics algorithms against deterministic ground-truth topologies:
+- **Triangle Counting**: Validates triangle count on 3-node cycle.
+- **PageRank**: Validates convergence on directed cycles and sinks.
+- **WCC & SCC**: Validates disjoint component and strongly connected cycle identification.
+- **SSSP & Node2Vec**: Validates shortest path distances and dimensional vector embeddings.
 
 ```bash
-python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847
+# Validate via HTTP
+python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847 --mode http
+
+# Validate via Arrow Flight MPP
+python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847 --mode flight
 ```
 
 ---
@@ -207,11 +230,12 @@ Validates symmetric peer-to-peer data ingestion across a 3-node cluster ring:
 1. Verifies that all 3 peers (`:8847`, `:8846`, `:8845`) are UP.
 2. Creates schema broadcast from Peer 1.
 3. Ingests vertices and edges symmetrically through different nodes (Peer 1, Peer 2, Peer 3).
-4. Asserts that data converges identically across all replica sets and that analytics return identical results on every peer.
+4. Asserts that data converges identically across all replica sets and that reads return identical counts on every peer.
 
 ```bash
 ./scripts/start_cluster.sh
-python3 scripts/test_replication.py
+python3 scripts/test_replication.py --mode http
+python3 scripts/test_replication.py --mode flight
 ```
 
 ---
@@ -220,8 +244,8 @@ python3 scripts/test_replication.py
 
 High-throughput client-side benchmark utilizing the official `gdb-client` package:
 1. **Automated Schema Lifecycle**: Recreates `BenchUser` and `BENCH_KNOWS` with clean schema drop upon completion (retained with `--keep-schema`).
-2. **Batch Vertex & Edge Ingestion**: Measures ingestion throughput utilizing batched multi-value Cypher statements.
-3. **Graph Analytics & Traversals**: Evaluates 1-hop and 2-hop traversals, PageRank, and Louvain algorithms from Python.
+2. **Dual-Transport Ingestion**: Measures ingestion throughput utilizing HTTP batch inserts or Arrow Flight MPP scatter-ingest.
+3. **Graph Analytics & Traversals**: Evaluates 1-hop and 2-hop traversals, PageRank, and Node2Vec embeddings from Python.
 4. **NetworkX / Polars Export**: Verifies zero-copy conversion of query results into Polars DataFrames and NetworkX graphs.
 
 ### Dependencies
@@ -232,15 +256,20 @@ pip install -r scripts/requirements.txt
 
 ### Execution
 ```bash
-python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --batch-size 500
+# HTTP Batch Mode
+python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --mode http
+
+# Arrow Flight MPP Mode
+python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --mode flight
 ```
 
 ### CLI Parameters
 * `--endpoint`: Target GDB HTTP REST endpoint (default: `http://127.0.0.1:8847`).
-* `--vertices`: Number of synthetic vertices to ingest (default: `5000`).
-* `--edges`: Number of synthetic edges to ingest (default: `15000`).
-* `--batch-size`: Number of entities per Cypher batch statement (default: `500`).
-* `--concurrency`: Number of concurrent worker threads (default: `4`).
+* `--mode`: Ingest mode: `http` or `flight`/`mpp` (default: `http`).
+* `--client-flight-port`: Flight client port (default: `8860`).
+* `--vertices`: Number of synthetic vertices to ingest (default: `20000`).
+* `--edges`: Number of synthetic edges to ingest (default: `60000`).
+* `--queries`: Number of query iterations (default: `50`).
 * `--keep-schema`: Retain the test schema and data after the test concludes.
 
 ---

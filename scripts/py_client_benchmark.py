@@ -3,11 +3,11 @@
 GDB Python Client Benchmark Suite
 ==================================
 Comprehensive performance, throughput, and latency percentile benchmark
-evaluating the official `gdb-client` SDK, Polars batch ingest, multi-statement DML,
-vector similarity search, and Graph ML algorithms against a running GDB cluster.
+evaluating the official `gdb-client` SDK, Polars batch / Flight scatter ingest,
+multi-statement DML, vector similarity search, and Graph ML algorithms against a running GDB cluster.
 
 Usage:
-    python3 scripts/py_client_benchmark.py [--endpoint http://localhost:8847] [--vertices 2000] [--edges 5000] [--keep-schema]
+    ./scripts/py_client_benchmark.py [--endpoint http://localhost:8847] [--mode http|flight] [--vertices 2000] [--edges 5000] [--keep-schema]
 """
 
 import argparse
@@ -27,20 +27,14 @@ except ImportError:
     try:
         from gdb_client import GdbClient
     except ImportError:
-        print("[-] Could not load official `gdb_client` package.")
-        print("    Please install it via: pip install gdb-client")
-        print("    Or install locally: pip install ../gdb-py-client")
+        print("\033[1;31m[-] Could not load official `gdb_client` package.\033[0m")
+        print("    Please install it via: pip install 'gdb-client[arrow]'")
         sys.exit(1)
 
 try:
     import polars as pl
 except ImportError:
     pl = None
-
-try:
-    import numpy as np
-except ImportError:
-    np = None
 
 
 def print_banner():
@@ -59,11 +53,11 @@ def setup_benchmark_schema(client: GdbClient):
         client.execute_script(setup_script)
         print("[✓] Schema registered successfully.")
     except Exception as e:
-        print(f"[*] Schema initialization note: {e}")
+        print(f"[-] Schema setup error: {e}")
 
 
 def teardown_benchmark_schema(client: GdbClient):
-    print("[*] Cleaning up benchmark schema...")
+    print("[*] Tearing down benchmark schema...")
     try:
         client.execute("DROP EDGE PY_LINK;")
     except Exception:
@@ -75,58 +69,73 @@ def teardown_benchmark_schema(client: GdbClient):
     print("[✓] Benchmark schema dropped.")
 
 
-def benchmark_vertex_ingest(client: GdbClient, count: int, batch_size: int = 500) -> Tuple[float, float]:
-    print(f"\n[1/5] Benchmarking Vertex Batch Ingest ({count} vertices, batch_size={batch_size})...")
-    
-    # Generate data
-    records = []
-    for i in range(1, count + 1):
-        emb = [float(i % 10) / 10.0, float((i * 2) % 10) / 10.0, 0.5, 0.1]
-        records.append({
-            "id": i,
-            "name": f"node_{i}",
-            "score": float(i * 1.5),
-            "emb": emb,
-        })
+def benchmark_vertex_ingest(client: GdbClient, count: int, mode: str = "http", batch_size: int = 500) -> Tuple[float, float]:
+    use_flight = mode in ("flight", "mpp")
+    print(f"\n[1/5] Benchmarking Vertex Ingest ({count} vertices, mode={mode}, batch_size={batch_size})...")
 
-    # Test via Polars if available
+    vids = list(range(1, count + 1))
+    names = [f"node_{i}" for i in vids]
+    scores = [float(i * 1.5) for i in vids]
+    embs = [[float(i % 10) / 10.0, float((i * 2) % 10) / 10.0, 0.5, 0.1] for i in vids]
+
     start = time.perf_counter()
-    if pl is not None:
-        df = pl.DataFrame(records)
-        inserted = client.insert_vertices("PyBenchNode", df, batch_size=batch_size)
+    if use_flight:
+        if pl is None:
+            print("\033[1;31m[!] Polars required for Flight mode.\033[0m")
+            sys.exit(1)
+        df = pl.DataFrame({"id": vids, "name": names, "score": scores, "emb": embs})
+        res = client.scatter_ingest_vertices(df, label="PyBenchNode", id_col="id")
+        inserted = res.get("rows_ingested", count)
     else:
-        inserted = client.insert_vertices("PyBenchNode", records, batch_size=batch_size)
+        if pl is not None:
+            df = pl.DataFrame({"id": vids, "name": names, "score": scores, "emb": embs})
+            inserted = client.insert_vertices("PyBenchNode", df, batch_size=batch_size)
+        else:
+            records = [{"id": v, "name": n, "score": s, "emb": e} for v, n, s, e in zip(vids, names, scores, embs)]
+            inserted = client.insert_vertices("PyBenchNode", records, batch_size=batch_size)
+
     elapsed = time.perf_counter() - start
-    
     throughput = count / elapsed if elapsed > 0 else 0
     print(f"      Inserted: {inserted} vertices in {elapsed:.3f}s ({throughput:,.1f} vertices/sec)")
     return elapsed, throughput
 
 
-def benchmark_edge_ingest(client: GdbClient, count: int, total_vertices: int, batch_size: int = 500) -> Tuple[float, float]:
-    print(f"\n[2/5] Benchmarking Edge Batch Ingest ({count} edges, batch_size={batch_size})...")
-    edges = []
-    for i in range(count):
-        src = (i % total_vertices) + 1
-        dst = ((i * 7 + 1) % total_vertices) + 1
-        edges.append((src, dst))
+def benchmark_edge_ingest(client: GdbClient, count: int, total_vertices: int, mode: str = "http", batch_size: int = 500) -> Tuple[float, float]:
+    use_flight = mode in ("flight", "mpp")
+    print(f"\n[2/5] Benchmarking Edge Ingest ({count} edges, mode={mode}, batch_size={batch_size})...")
+
+    srcs = [(i % total_vertices) + 1 for i in range(count)]
+    dsts = [((i * 7 + 1) % total_vertices) + 1 for i in range(count)]
 
     start = time.perf_counter()
-    inserted = client.insert_edges("PY_LINK", edges, batch_size=batch_size)
+    if use_flight:
+        if pl is None:
+            print("\033[1;31m[!] Polars required for Flight mode.\033[0m")
+            sys.exit(1)
+        df = pl.DataFrame({"src": srcs, "dst": dsts})
+        res = client.scatter_ingest_edges(df, edge_type="PY_LINK", src_col="src", dst_col="dst")
+        inserted = res.get("rows_ingested", count)
+    else:
+        edges = list(zip(srcs, dsts))
+        inserted = client.insert_edges("PY_LINK", edges, batch_size=batch_size)
+
     elapsed = time.perf_counter() - start
     throughput = count / elapsed if elapsed > 0 else 0
     print(f"      Inserted: {inserted} edges in {elapsed:.3f}s ({throughput:,.1f} edges/sec)")
     return elapsed, throughput
 
 
-def benchmark_queries(client: GdbClient, iterations: int = 500) -> dict:
-    print(f"\n[3/5] Benchmarking Traversal Latencies ({iterations} iterations)...")
+def benchmark_queries(client: GdbClient, iterations: int = 500, use_flight: bool = False) -> dict:
+    print(f"\n[3/5] Benchmarking Traversal Latencies ({iterations} iterations, flight={use_flight})...")
     latencies_ms = []
 
     for i in range(1, iterations + 1):
         vid = (i % 100) + 1
         t0 = time.perf_counter()
-        client.query(f"MATCH (a:PyBenchNode)-[:PY_LINK]->(b:PyBenchNode) WHERE a.id = {vid} RETURN b.name LIMIT 10;")
+        client.query(
+            f"MATCH (a:PyBenchNode)-[:PY_LINK]->(b:PyBenchNode) WHERE a.id = {vid} RETURN b.name LIMIT 10;",
+            use_flight=use_flight,
+        )
         t1 = time.perf_counter()
         latencies_ms.append((t1 - t0) * 1000.0)
 
@@ -162,7 +171,7 @@ def benchmark_cbo_and_analytics(client: GdbClient):
 
     # 2. PageRank
     t0 = time.perf_counter()
-    pr = client.query("CALL algo.pageRank({damping: 0.85, max_iterations: 10}) YIELD vertex_id, score;")
+    pr = client.query("CALL algo.pageRank({max_iter: 10}) YIELD vertex_id, score;")
     t_pr = time.perf_counter() - t0
     print(f"      [✓] PageRank (10 iter) completed in {t_pr * 1000:.2f}ms ({len(pr)} vertices scored)")
 
@@ -176,15 +185,18 @@ def benchmark_cbo_and_analytics(client: GdbClient):
 def main():
     parser = argparse.ArgumentParser(description="GDB Python SDK Client Benchmark")
     parser.add_argument("--endpoint", default="http://localhost:8847", help="GDB HTTP endpoint")
+    parser.add_argument("--mode", choices=["http", "flight", "mpp"], default="http", help="Ingest mode: 'http' or 'flight'/'mpp'")
+    parser.add_argument("--client-flight-port", type=int, default=8860, help="Initial Flight client port")
     parser.add_argument("--vertices", type=int, default=2000, help="Number of vertices to benchmark")
     parser.add_argument("--edges", type=int, default=5000, help="Number of edges to benchmark")
     parser.add_argument("--queries", type=int, default=200, help="Number of query iterations")
     parser.add_argument("--keep-schema", action="store_true", help="Keep benchmark schema after completion")
     args = parser.parse_args()
+    use_flight = args.mode in ("flight", "mpp")
 
     print_banner()
 
-    client = GdbClient(endpoint=args.endpoint)
+    client = GdbClient(endpoint=args.endpoint, client_flight_port=args.client_flight_port)
 
     try:
         health = client.health()
@@ -196,25 +208,27 @@ def main():
 
     gpu = client.gpu()
     print(f"[+] Hardware Accelerator: {gpu.get('backend', 'CPU Fallback')} (Active: {gpu.get('enabled', False)})")
+    print(f"[+] Ingestion Mode:       {'Arrow Flight MPP' if use_flight else 'HTTP Batch'}")
 
     # Schema setup (clean recreate)
     teardown_benchmark_schema(client)
     setup_benchmark_schema(client)
 
     try:
-        v_elapsed, v_qps = benchmark_vertex_ingest(client, args.vertices)
-        e_elapsed, e_qps = benchmark_edge_ingest(client, args.edges, args.vertices)
+        v_elapsed, v_qps = benchmark_vertex_ingest(client, args.vertices, mode=args.mode)
+        e_elapsed, e_qps = benchmark_edge_ingest(client, args.edges, args.vertices, mode=args.mode)
 
         client.compact()
         print("[✓] Chunked-CSR Compaction triggered.")
 
-        q_stats = benchmark_queries(client, args.queries)
+        q_stats = benchmark_queries(client, args.queries, use_flight=use_flight)
         vec_qps = benchmark_vector_similarity(client, 50)
         benchmark_cbo_and_analytics(client)
 
         print("\n" + "=" * 70)
         print("                       BENCHMARK SUMMARY                          ")
         print("=" * 70)
+        print(f"  Ingest Transport Mode:      {'Arrow Flight MPP' if use_flight else 'HTTP Batch'}")
         print(f"  Vertex Batch Throughput:    {v_qps:,.1f} vertices/sec")
         print(f"  Edge Batch Throughput:      {e_qps:,.1f} edges/sec")
         print(f"  Traversal Latency (P50):    {q_stats['p50']:.2f} ms")
@@ -223,7 +237,7 @@ def main():
         print(f"  Traversal Query QPS:        {q_stats['qps']:,.1f} queries/sec")
         print(f"  Vector Similarity QPS:      {vec_qps:,.1f} queries/sec")
         print("=" * 70)
-        print("\x1b[1;32m[✓] Python SDK Benchmark completed successfully.\x1b[0m\n")
+        print("\033[1;32m[✓] Python SDK Benchmark completed successfully.\033[0m\n")
 
     finally:
         if not args.keep_schema:

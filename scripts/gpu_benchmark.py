@@ -3,265 +3,266 @@
 GDB Hardware Acceleration & GPU Kernel Benchmark Suite.
 
 Validates and benchmarks GPU compute acceleration (Apple Metal UMA / NVIDIA CUDA):
-- Probes /gpu and /metrics endpoints
+- Uses official `gdb-client` SDK for cluster communication
+- Supports HTTP batch ingestion and Arrow Flight MPP scatter ingestion
 - Recreates fresh GPU test schema (GpuNode, GPU_EDGE)
 - Generates high-volume graph topology exceeding the GPU offload threshold (>= 10,000 edges)
 - Triggers CSR compaction and computes CBO graph statistics
-- Executes GPU-accelerated graph algorithms (PageRank, WCC, SSSP, Triangles, Louvain, Multi-Hop Wavefront BFS)
+- Executes GPU-accelerated graph algorithms (PageRank, WCC, SSSP, Triangles, Louvain, Multi-Hop Wavefront BFS, Vector Search, Node2Vec)
 - Compares latency, edges/sec processing throughput, and GPU telemetry
 - Automatically cleans up and drops test schemas upon completion
 """
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json
 import os
 import random
 import sys
 import time
-import urllib.error
-import urllib.request
+from typing import List, Tuple
 
+# Import official gdb-client with sibling repo path fallback for local dev
 try:
     from gdb_client import GdbClient
-    HAS_SDK = True
 except ImportError:
-    sibling_sdk = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "gdb-py-client", "src"))
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sibling_sdk = os.path.abspath(os.path.join(os.path.dirname(current_dir), "..", "gdb-py-client", "src"))
     if os.path.exists(sibling_sdk):
         sys.path.insert(0, sibling_sdk)
-        try:
-            from gdb_client import GdbClient
-            HAS_SDK = True
-        except ImportError:
-            HAS_SDK = False
-    else:
-        HAS_SDK = False
-
-
-def send_query(base_url, query_str, timeout=30):
-    url = f"{base_url.rstrip('/')}/query"
-    data = json.dumps({"query": query_str}).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    t0 = time.perf_counter()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            return body, elapsed_ms
-    except Exception as e:
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        return {"status": "error", "error": str(e)}, elapsed_ms
+        from gdb_client import GdbClient
+    except ImportError:
+        print("\033[1;31m[-] Could not import official `gdb_client` package.\033[0m")
+        print("    Please install it via: pip install 'gdb-client[arrow]'")
+        sys.exit(1)
+
+try:
+    import polars as pl
+except ImportError:
+    pl = None
 
 
-def get_json(url, timeout=5):
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
-
-
-def fetch_metrics(endpoint):
-    url = f"{endpoint.rstrip('/')}/metrics"
-    try:
-        with urllib.request.urlopen(url, timeout=3) as resp:
-            text = resp.read().decode("utf-8")
-            metrics = {}
-            for line in text.splitlines():
-                if line and not line.startswith("#"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        try:
-                            metrics[parts[0]] = float(parts[1])
-                        except ValueError:
-                            pass
-            return metrics
-    except Exception:
-        return {}
-
-
-def teardown_gpu_schema(endpoint, silent=False):
+def teardown_gpu_schema(client: GdbClient, silent: bool = False):
     if not silent:
         print("[*] Cleaning up GPU test schemas (GpuNode, GPU_EDGE)...")
-    send_query(endpoint, "DROP VERTEX GpuNode;")
-    send_query(endpoint, "DROP EDGE GPU_EDGE;")
+    try:
+        client.execute("DROP VERTEX GpuNode;")
+    except Exception:
+        pass
+    try:
+        client.execute("DROP EDGE GPU_EDGE;")
+    except Exception:
+        pass
 
 
-def setup_gpu_schema(endpoint):
+def setup_gpu_schema(client: GdbClient):
     print("[*] Recreating fresh GPU benchmark schema (GpuNode, GPU_EDGE)...")
-    teardown_gpu_schema(endpoint, silent=True)
-    res_v, _ = send_query(endpoint, "CREATE VERTEX GpuNode (score FLOAT64, emb VECTOR(4));")
-    res_e, _ = send_query(endpoint, "CREATE EDGE GPU_EDGE ();")
-    if res_v.get("status") != "ok" or res_e.get("status") != "ok":
-        print(f"\033[1;31m[!] Schema setup error: V={res_v.get('error')} | E={res_e.get('error')}\033[0m")
+    teardown_gpu_schema(client, silent=True)
+    try:
+        client.execute("CREATE VERTEX GpuNode (score FLOAT64, emb VECTOR(4));")
+    except Exception as e:
+        print(f"\033[1;31m[!] Schema setup error (Vertex): {e}\033[0m")
+        sys.exit(1)
+    try:
+        client.execute("CREATE EDGE GPU_EDGE ();")
+    except Exception as e:
+        print(f"\033[1;31m[!] Schema setup error (Edge): {e}\033[0m")
         sys.exit(1)
 
 
-def ingest_gpu_graph(endpoint, num_vertices, num_edges, workers=4):
-    print(f"[*] Ingesting {num_vertices:,} vertices and {num_edges:,} edges for GPU offload (workers={workers})...")
-    t0 = time.time()
+def ingest_gpu_graph(client: GdbClient, num_vertices: int, num_edges: int, mode: str = "http", workers: int = 4):
+    use_flight = mode in ("flight", "mpp")
+    print(f"[*] Ingesting {num_vertices:,} vertices and {num_edges:,} edges (mode={mode}, workers={workers})...")
+    start_t = time.perf_counter()
 
-    # 1. Parallel Batch Vertex Ingestion
-    batch_size = 500
-    v_queries = []
-    for start_id in range(1, num_vertices + 1, batch_size):
-        end_id = min(start_id + batch_size, num_vertices + 1)
-        vals = ", ".join([
-            f"({vid}, {random.random():.4f}, [{random.random():.3f}, {random.random():.3f}, 0.5, 0.1])"
-            for vid in range(start_id, end_id)
-        ])
-        v_queries.append(f"INSERT VERTEX GpuNode (id, score, emb) VALUES {vals};")
+    if use_flight:
+        if pl is None:
+            print("\033[1;31m[!] Polars is required for Arrow Flight mode.\033[0m")
+            sys.exit(1)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(send_query, endpoint, q) for q in v_queries]
-        for f in as_completed(futures):
-            f.result()
+        # 1. Vertices
+        vids = list(range(1, num_vertices + 1))
+        scores = [float(i * 1.5) for i in vids]
+        embs = [[0.1, 0.2, 0.3, 0.4] for _ in vids]
+        df_v = pl.DataFrame({"id": vids, "score": scores, "emb": embs})
+        client.scatter_ingest_vertices(df_v, label="GpuNode", id_col="id", max_workers=workers)
 
-    # 2. Parallel Batch Edge Ingestion (power law / random attachment)
-    edge_batch_size = 1000
-    edges_created = 0
-    e_queries = []
-    while edges_created < num_edges:
-        chunk = min(edge_batch_size, num_edges - edges_created)
-        items = [f"({random.randint(1, num_vertices)}, {random.randint(1, num_vertices)})" for _ in range(chunk)]
-        e_queries.append(f"INSERT EDGE GPU_EDGE VALUES {', '.join(items)};")
-        edges_created += chunk
+        # 2. Edges
+        influencer_bound = max(1, num_vertices // 10)
+        srcs = [random.randint(1, num_vertices) for _ in range(num_edges)]
+        dsts = []
+        for s in srcs:
+            d = random.randint(1, influencer_bound) if random.random() < 0.6 else random.randint(1, num_vertices)
+            while d == s:
+                d = random.randint(1, num_vertices)
+            dsts.append(d)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(send_query, endpoint, q) for q in e_queries]
-        for f in as_completed(futures):
-            f.result()
+        df_e = pl.DataFrame({"src": srcs, "dst": dsts})
+        client.scatter_ingest_edges(df_e, edge_type="GPU_EDGE", src_col="src", dst_col="dst", max_workers=workers)
+    else:
+        # HTTP Batch Mode
+        # Vertices in parallel chunks
+        v_batch_size = 5000
+        v_chunks = [(i, min(i + v_batch_size, num_vertices + 1)) for i in range(1, num_vertices + 1, v_batch_size)]
 
-    elapsed = time.time() - t0
+        def send_v_chunk(start_idx, end_idx):
+            rows = []
+            for vid in range(start_idx, end_idx):
+                rows.append(f"({vid}, 1.5, [0.1, 0.2, 0.3, 0.4])")
+            client.execute(f"INSERT VERTEX GpuNode (id, score, emb) VALUES {', '.join(rows)};")
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(send_v_chunk, s, e) for s, e in v_chunks]
+            for f in as_completed(futures):
+                f.result()
+
+        # Edges in parallel chunks
+        e_batch_size = 2000
+        influencer_bound = max(1, num_vertices // 10)
+        e_chunks = []
+        for i in range(0, num_edges, e_batch_size):
+            count = min(e_batch_size, num_edges - i)
+            e_chunks.append(count)
+
+        def send_e_chunk(count):
+            stmts = []
+            for _ in range(count):
+                src = random.randint(1, num_vertices)
+                dst = random.randint(1, influencer_bound) if random.random() < 0.6 else random.randint(1, num_vertices)
+                while dst == src:
+                    dst = random.randint(1, num_vertices)
+                stmts.append(f"INSERT EDGE GPU_EDGE FROM {src} TO {dst};")
+            client.execute(" ".join(stmts))
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(send_e_chunk, c) for c in e_chunks]
+            for f in as_completed(futures):
+                f.result()
+
+    elapsed = time.perf_counter() - start_t
     print(f"\033[1;32m[✓] Graph generated in {elapsed:.2f}s ({num_edges / elapsed:,.0f} edges/sec)\033[0m")
-
-    # 3. Compact into CSR
-    print("[*] Triggering Chunked-CSR compaction for zero-copy GPU memory layout...")
-    c_res, c_ms = send_query(endpoint, "compact;")
-    print(f"\033[1;32m[✓] CSR Compaction finished in {c_ms:.2f} ms ({c_res.get('message', 'ok')})\033[0m")
-
-    # 4. Analyze graph for CBO statistics
-    print("[*] Running ANALYZE GRAPH for Cost-Based Optimizer (CBO)...")
-    a_res, a_ms = send_query(endpoint, "ANALYZE GRAPH;")
-    print(f"\033[1;32m[✓] CBO Analyzed in {a_ms:.2f} ms ({a_res.get('message', 'ok')})\033[0m\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GDB Hardware Acceleration & GPU Benchmark")
-    parser.add_argument("--endpoint", default="http://127.0.0.1:8847", help="GDB HTTP endpoint (default: http://127.0.0.1:8847)")
-    parser.add_argument("--vertices", type=int, default=5000, help="Number of vertices to generate (default: 5,000)")
-    parser.add_argument("--edges", type=int, default=25000, help="Number of edges to generate (default: 25,000, exceeds 10k GPU threshold)")
-    parser.add_argument("--iterations", type=int, default=3, help="Benchmark iterations per algorithm kernel (default: 3)")
-    parser.add_argument("--workers", type=int, default=4, help="Parallel workers for data ingestion (default: 4)")
-    parser.add_argument("--timeout", type=int, default=30, help="Query timeout in seconds (default: 30)")
-    parser.add_argument("--keep-schema", action="store_true", help="Preserve test schemas after benchmark completion")
+    parser = argparse.ArgumentParser(description="GDB GPU Acceleration Benchmark Suite")
+    parser.add_argument("--endpoint", default="http://127.0.0.1:8847", help="Target server endpoint")
+    parser.add_argument("--mode", choices=["http", "flight", "mpp"], default="http", help="Ingest mode: 'http' or 'flight'/'mpp'")
+    parser.add_argument("--client-flight-port", type=int, default=8860, help="Initial Flight client port")
+    parser.add_argument("--vertices", type=int, default=20000, help="Number of vertices to generate")
+    parser.add_argument("--edges", type=int, default=60000, help="Number of edges to generate")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel ingest workers (default: 4)")
+    parser.add_argument("--runs", type=int, default=3, help="Benchmark iterations per algorithm")
+    parser.add_argument("--timeout", type=float, default=60.0, help="HTTP/query timeout in seconds (default: 60.0)")
+    parser.add_argument("--keep-schema", action="store_true", help="Preserve test schemas after benchmark")
     args = parser.parse_args()
 
     print("\033[1;36m" + "=" * 70)
     print("      GDB HARDWARE ACCELERATION & GPU COMPUTE BENCHMARK SUITE          ")
     print("=" * 70 + "\033[0m")
     print(f"[*] Target Endpoint:  {args.endpoint}")
+    print(f"[*] Ingest Mode:      {'Arrow Flight MPP' if args.mode in ('flight', 'mpp') else 'HTTP Batch'}")
     print(f"[*] Test Graph:       {args.vertices:,} Vertices | {args.edges:,} Edges")
-    print(f"[*] Kernel Runs:      {args.iterations} iterations per algorithm")
+    print(f"[*] Kernel Runs:      {args.runs} iterations per algorithm")
     print(f"[*] Ingest Workers:   {args.workers}")
-    print(f"[*] Client SDK:       {'Official gdb-client' if HAS_SDK else 'Standard Library HTTP'}")
-    print("-" * 70)
+    print("----------------------------------------------------------------------")
 
-    # 1. Health check
-    health = get_json(f"{args.endpoint}/health")
-    if not health or health.get("status") != "UP":
-        print(f"\033[1;31m[!] Failed to connect to GDB at {args.endpoint}\033[0m")
-        print("    Please start the server first via: ./bin/gdb-server --enable-gpu")
-        sys.exit(1)
+    with GdbClient(endpoint=args.endpoint, client_flight_port=args.client_flight_port, timeout=args.timeout) as client:
+        # Probe GPU status
+        try:
+            gpu_info = client.gpu()
+        except Exception as e:
+            print(f"\033[1;31m[!] Failed to connect to GDB at {args.endpoint}: {e}\033[0m")
+            print("    Please start the server first via: ./bin/gdb-server --enable-gpu")
+            sys.exit(1)
 
-    # 2. Inspect GPU Hardware Acceleration
-    gpu_info = get_json(f"{args.endpoint}/gpu")
-    if not gpu_info:
-        print("\033[1;31m[!] Unable to retrieve GPU status from /gpu endpoint\033[0m")
-        sys.exit(1)
+        is_gpu = gpu_info.get("enabled", False)
+        backend = gpu_info.get("backend", "Unknown")
+        memory_model = gpu_info.get("memory_model", "N/A")
+        threshold = gpu_info.get("threshold_edges", 10000)
 
-    backend = gpu_info.get("backend", "Unknown")
-    is_active = gpu_info.get("active", False)
-    mem_model = gpu_info.get("memory_model", "Unknown")
-    threshold = gpu_info.get("threshold_edges", 10000)
+        print(f"[*] Compute Backend:   {backend}")
+        print(f"[*] GPU Active:        {'✅ YES (Active Hardware Offload)' if is_gpu else '❌ NO (CPU Fallback)'}")
+        print(f"[*] Memory Model:      {memory_model}")
+        print(f"[*] Offload Threshold: {threshold:,} edges")
+        print("----------------------------------------------------------------------\n")
 
-    print(f"[*] Compute Backend:   \033[1;33m{backend}\033[0m")
-    print(f"[*] GPU Active:        {'✅ YES (Active Hardware Offload)' if is_active else '⚠️ NO (CPU Vectorized Fallback)'}")
-    print(f"[*] Memory Model:      {mem_model}")
-    print(f"[*] Offload Threshold: {threshold:,} edges")
-    if not is_active:
-        print("\n\033[1;33m[Notice] Server is running without active GPU acceleration.")
-        print("         To enable GPU offload: restart server with '--enable-gpu'\033[0m")
-    print("-" * 70 + "\n")
+        # 1. Setup & Ingestion
+        setup_gpu_schema(client)
+        ingest_gpu_graph(client, args.vertices, args.edges, mode=args.mode, workers=args.workers)
 
-    # 3. Schema Setup & Ingestion
-    setup_gpu_schema(args.endpoint)
-    ingest_gpu_graph(args.endpoint, args.vertices, args.edges, workers=args.workers)
+        # 2. Compaction into CSR
+        print("[*] Triggering Chunked-CSR compaction for zero-copy GPU memory layout...")
+        comp_t0 = time.perf_counter()
+        comp_res = client.compact()
+        comp_time = (time.perf_counter() - comp_t0) * 1000.0
+        print(f"\033[1;32m[✓] CSR Compaction finished in {comp_time:.2f} ms ({comp_res.get('message', 'Done')})\033[0m")
 
-    # 4. GPU Graph Analytics Benchmark Suite
-    kernels = [
-        ("Vectorized PageRank (20 iters)", "CALL algo.pageRank({damping: 0.85, max_iter: 20}) YIELD vertex_id, score;"),
-        ("Weakly Connected Components (WCC)", "CALL algo.wcc() YIELD vertex_id, component_id;"),
-        ("Triangle Counting & Clustering", "CALL algo.triangleCount() YIELD vertex_id, triangles;"),
-        ("Single Source Shortest Path (SSSP)", "CALL algo.sssp({source: 1}) YIELD vertex_id, distance;"),
-        ("Louvain Community Detection", "CALL algo.louvain({max_iter: 10}) YIELD vertex_id, community_id;"),
-        ("Multi-Hop Wavefront BFS (1..3)", "MATCH (a:GpuNode)-[:GPU_EDGE*1..3]->(b:GpuNode) WHERE a.id = 1 RETURN b.score LIMIT 20;"),
-        ("Parallel Vector Similarity Search", "CALL vector.similaritySearch('GpuNode', 'emb', [0.5, 0.5, 0.5, 0.1], 5, 'cosine') YIELD vertex_id, score;"),
-        ("Graph ML Node2Vec Embeddings", "CALL algo.node2vec({walk_length: 5, walks_per_vertex: 2, dimensions: 16}) YIELD vertex_id, embedding;"),
-    ]
+        # 3. Analyze Graph for CBO
+        print("[*] Running ANALYZE GRAPH for Cost-Based Optimizer (CBO)...")
+        an_t0 = time.perf_counter()
+        an_res = client.analyze()
+        an_time = (time.perf_counter() - an_t0) * 1000.0
+        an_msg = getattr(an_res, "message", None) or (an_res.get("message", "Done") if isinstance(an_res, dict) else "Done")
+        print(f"\033[1;32m[✓] CBO Analyzed in {an_time:.2f} ms ({an_msg})\033[0m\n")
 
-    print("\033[1;33m[*] Executing GPU-Accelerated Analytics Kernels...\033[0m\n")
-    results = []
+        # 4. Analytics Benchmarking Suite
+        benchmarks = [
+            ("Vectorized PageRank (20 iters)", "CALL algo.pageRank({max_iter: 20}) YIELD vertex_id, score;"),
+            ("Weakly Connected Components (WCC)", "CALL algo.wcc() YIELD vertex_id, component_id;"),
+            ("Triangle Counting & Clustering", "CALL algo.triangleCount() YIELD vertex_id, triangles;"),
+            ("Single Source Shortest Path (SSSP)", "CALL algo.sssp(1) YIELD vertex_id, distance;"),
+            ("Louvain Community Detection", "CALL algo.louvain({max_iter: 10}) YIELD vertex_id, community_id;"),
+            ("Multi-Hop Wavefront BFS (1..3)", "MATCH (a:GpuNode)-[:GPU_EDGE*1..3]->(b:GpuNode) WHERE a.id = 1 RETURN count(b);"),
+            ("Parallel Vector Similarity Search", "CALL vector.similaritySearch('GpuNode', 'emb', [0.1, 0.2, 0.3, 0.4], 10, 'cosine') YIELD vertex_id, score;"),
+            ("Graph ML Node2Vec Embeddings", "CALL algo.node2vec({walk_length: 5, walks_per_vertex: 2, dimensions: 16}) YIELD vertex_id, embedding;"),
+        ]
 
-    for name, query_str in kernels:
-        latencies = []
-        rows_count = 0
-        for _ in range(args.iterations):
-            body, lat_ms = send_query(args.endpoint, query_str, timeout=args.timeout)
-            if body.get("status") == "ok":
-                latencies.append(lat_ms)
-                rows_count = body.get("num_rows", len(body.get("rows", [])))
+        print("[*] Executing GPU-Accelerated Analytics Kernels...\n")
+        results = []
+
+        for name, query_str in benchmarks:
+            latencies = []
+            err_msg = None
+
+            for run_i in range(args.runs):
+                t0 = time.perf_counter()
+                try:
+                    res = client.query(query_str)
+                    elapsed = (time.perf_counter() - t0) * 1000.0
+                    if res.is_ok:
+                        latencies.append(elapsed)
+                    else:
+                        err_msg = res.error
+                        break
+                except Exception as e:
+                    err_msg = str(e)
+                    break
+
+            if latencies:
+                avg_lat = sum(latencies) / len(latencies)
+                min_lat = min(latencies)
+                throughput = (args.edges / (avg_lat / 1000.0)) if avg_lat > 0 else 0
+                results.append((name, avg_lat, min_lat, throughput))
+                print(f"  \033[1;32m[✓]\033[0m {name:<36} : {avg_lat:7.2f} ms (min: {min_lat:6.2f} ms | {throughput:>10,.0f} edges/s)")
             else:
-                print(f"  \033[1;31m[!] Kernel Error in {name}: {body.get('error')}\033[0m")
-                break
+                print(f"  \033[1;31m[!]\033[0m Kernel Error in {name}: {err_msg}")
 
-        if latencies:
-            avg_ms = sum(latencies) / len(latencies)
-            min_ms = min(latencies)
-            throughput = (args.edges / (avg_ms / 1000.0)) if avg_ms > 0 else 0
-            results.append({
-                "name": name,
-                "avg_ms": avg_ms,
-                "min_ms": min_ms,
-                "rows": rows_count,
-                "throughput": throughput,
-            })
-            print(f"  \033[1;32m[✓]\033[0m {name:<36} : \033[1;36m{avg_ms:>7.2f} ms\033[0m (min: {min_ms:.2f} ms | {throughput:>10,.0f} edges/s)")
+        # 5. Teardown
+        if not args.keep_schema:
+            teardown_gpu_schema(client)
 
-    # 5. Fetch telemetry metrics
-    metrics = fetch_metrics(args.endpoint)
-    csr_edges = int(metrics.get("gdb_csr_edges_count", args.edges))
-    gpu_active_val = metrics.get("gdb_gpu_active", 1.0 if is_active else 0.0)
-
-    # 6. Performance Summary Table
-    print("\n\033[1;36m" + "=" * 76)
-    print("                   GPU ACCELERATION BENCHMARK RESULTS                    ")
-    print("=" * 76)
-    print(f"Hardware Backend:   {backend}")
-    print(f"Graph in CSR:       {csr_edges:,} compacted edges ({args.vertices:,} vertices)")
-    print(f"GPU Telemetry:      Active Flag = {gpu_active_val:.0f} (Prometheus: gdb_gpu_active)")
-    print("-" * 76)
-    print(f"{'Kernel Algorithm':<36} | {'Avg Latency':<12} | {'Min Latency':<12} | {'Throughput':<12}")
-    print("-" * 76)
-    for r in results:
-        print(f"{r['name']:<36} | {r['avg_ms']:>8.2f} ms  | {r['min_ms']:>8.2f} ms  | {r['throughput']:>8,.0f} e/s")
-    print("=" * 76 + "\033[0m\n")
-
-    # 7. Teardown
-    if not args.keep_schema:
-        teardown_gpu_schema(args.endpoint)
-    else:
-        print("[*] Preserving GPU benchmark schema (--keep-schema specified).\n")
+        print("\n" + "=" * 76)
+        print("                   GPU ACCELERATION BENCHMARK RESULTS                    ")
+        print("=" * 76)
+        print(f"Hardware Backend:   {backend}")
+        print(f"Graph in CSR:       {args.edges:,} compacted edges ({args.vertices:,} vertices)")
+        print(f"Ingest Mode:        {'Arrow Flight MPP' if args.mode in ('flight', 'mpp') else 'HTTP Batch'}")
+        print("-" * 76)
+        print(f"{'Kernel Algorithm':<37} | {'Avg Latency':<12} | {'Min Latency':<12} | {'Throughput':<12}")
+        print("-" * 76)
+        for name, avg_l, min_l, tp in results:
+            print(f"{name:<37} | {avg_l:9.2f} ms  | {min_l:9.2f} ms  | {tp:>10,.0f} e/s")
+        print("=" * 76 + "\n")
 
 
 if __name__ == "__main__":

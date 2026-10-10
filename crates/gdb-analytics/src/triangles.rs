@@ -15,23 +15,27 @@ pub fn triangle_count(csr: &ChunkedCsr) -> HashMap<VertexId, TriangleMetric> {
         return HashMap::new();
     }
 
-    // Pre-extract sorted neighbor index lists for each vertex
-    let mut adj: Vec<Vec<usize>> = Vec::with_capacity(num_v);
+    // Pre-extract sorted neighbor index lists for each vertex (undirected projection)
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_v];
     for u in 0..num_v {
         let start = csr.offsets[u] as usize;
         let end = csr.offsets[u + 1] as usize;
         let actual_end = end.min(csr.targets.len());
 
-        let mut neighbors = Vec::new();
         for off in start..actual_end {
             let target_raw = csr.targets[off];
             if let Some(&v_idx) = csr.vertex_map.get(&target_raw) {
-                neighbors.push(v_idx as usize);
+                let v = v_idx as usize;
+                if u != v {
+                    adj[u].push(v);
+                    adj[v].push(u);
+                }
             }
         }
-        neighbors.sort_unstable();
-        neighbors.dedup();
-        adj.push(neighbors);
+    }
+    for u in 0..num_v {
+        adj[u].sort_unstable();
+        adj[u].dedup();
     }
 
     let mut triangles = vec![0u64; num_v];

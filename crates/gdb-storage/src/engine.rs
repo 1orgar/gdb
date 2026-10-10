@@ -154,6 +154,24 @@ impl PartitionStorageEngine {
         }
     }
 
+    /// Drops all edges of a given edge type from both Delta MemTable and CSR.
+    pub fn drop_edge_type(&self, edge_type: EdgeType) {
+        self.delta.drop_edge_type(edge_type);
+        let current_csr = self.csr.read().clone();
+        let mut remaining_edges = Vec::new();
+        for &src_raw in &current_csr.reverse_map {
+            let src = VertexId(src_raw);
+            let edges = current_csr.get_out_edges(src, None);
+            for e in edges {
+                if e.edge_type != edge_type {
+                    remaining_edges.push(e);
+                }
+            }
+        }
+        let new_csr = Arc::new(ChunkedCsr::from_edges(remaining_edges));
+        *self.csr.write() = new_csr;
+    }
+
     /// Traverses outgoing edges of a vertex combining CSR + Delta MemTable with MVCC visibility.
     pub fn get_out_edges(
         &self,

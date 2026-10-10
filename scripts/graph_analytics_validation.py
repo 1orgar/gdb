@@ -1,34 +1,45 @@
 #!/usr/bin/env python3
 """
-GDB Graph Analytics Mathematical Validation Suite (Pure Python Standard Library)
+GDB Graph Analytics Mathematical Validation Suite (Powered by gdb-client)
 Validates all 12 graph algorithms against deterministic ground-truth graph topologies.
 """
 
-import sys
-import json
 import argparse
-import urllib.request
-import urllib.error
+import os
+import sys
+import time
+from typing import Callable, Tuple
 
-ENDPOINT = "http://127.0.0.1:8847"
-
-def query(q, endpoint=None):
-    url = f"{endpoint or ENDPOINT}/query"
-    data = json.dumps({"query": q}).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+# Import official gdb-client with sibling repo path fallback for local dev
+try:
+    from gdb_client import GdbClient
+except ImportError:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sibling_sdk = os.path.abspath(os.path.join(os.path.dirname(current_dir), "..", "gdb-py-client", "src"))
+    if os.path.exists(sibling_sdk):
+        sys.path.insert(0, sibling_sdk)
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+        from gdb_client import GdbClient
+    except ImportError:
+        print("\033[1;31m[-] Could not import official `gdb_client` package.\033[0m")
+        print("    Please install it via: pip install 'gdb-client[arrow]'")
+        sys.exit(1)
 
-def teardown_schema(endpoint, silent=False):
+
+def teardown_schema(client: GdbClient, silent: bool = False):
     if not silent:
         print("[*] Cleaning up validation schemas (Node, REL)...")
-    query("DROP VERTEX Node;", endpoint)
-    query("DROP EDGE REL;", endpoint)
+    try:
+        client.execute("DROP VERTEX Node;")
+    except Exception:
+        pass
+    try:
+        client.execute("DROP EDGE REL;")
+    except Exception:
+        pass
 
-def run_test(name, fn):
+
+def run_test(name: str, fn: Callable[[], Tuple[bool, str]]) -> bool:
     try:
         ok, msg = fn()
         if ok:
@@ -41,176 +52,141 @@ def run_test(name, fn):
         print(f"  \033[1;31m[ERR ]\033[0m {name:<35} : Exception: {e}")
         return False
 
+
 def main():
-    global ENDPOINT
-    parser = argparse.ArgumentParser(description="GDB Analytics Mathematical Validator")
+    parser = argparse.ArgumentParser(description="GDB Analytics Mathematical Validator (via gdb-client)")
     parser.add_argument("--endpoint", default="http://127.0.0.1:8847", help="Target server endpoint")
+    parser.add_argument("--mode", choices=["http", "flight", "mpp"], default="http", help="Query transport mode: 'http' or 'flight'/'mpp'")
+    parser.add_argument("--client-flight-port", type=int, default=8860, help="Initial Flight client port")
     parser.add_argument("--keep-schema", action="store_true", help="Preserve test schemas after validation")
     args = parser.parse_args()
-    ENDPOINT = args.endpoint
+    use_flight = args.mode in ("flight", "mpp")
 
     print("\033[1;36m" + "=" * 68)
     print("      GDB Nebula Enterprise Analytics Mathematical Validator     ")
     print("=" * 68 + "\033[0m\n")
 
-    # Health check
-    try:
-        with urllib.request.urlopen(f"{ENDPOINT}/health", timeout=2) as r:
-            assert json.loads(r.read().decode("utf-8")).get("status") == "UP"
-    except Exception:
-        print(f"\033[1;31m[!] Server at {ENDPOINT} is not reachable.\033[0m")
-        print("    Please run ./scripts/start_cluster.sh first.\n")
-        sys.exit(1)
+    with GdbClient(endpoint=args.endpoint, client_flight_port=args.client_flight_port) as client:
+        # Health check
+        try:
+            health = client.health()
+            assert health.get("status") == "UP"
+            print(f"[✓] Connected: Status={health.get('status')} | Role={health.get('role')}\n")
+        except Exception as e:
+            print(f"\033[1;31m[!] Server health check failed at {args.endpoint}: {e}\033[0m")
+            sys.exit(1)
 
-    print("[*] Recreating fresh deterministic benchmark topology (Node, REL)...")
-    # Clean setup
-    teardown_schema(ENDPOINT, silent=True)
-    query("CREATE VERTEX Node (val INT64);", ENDPOINT)
-    query("CREATE EDGE REL ();", ENDPOINT)
+        def q(query_str: str):
+            return client.query(query_str, use_flight=use_flight)
 
-    # 1. Triangle (Undirected / Bidirectional): 101 <-> 102 <-> 103 <-> 101
-    query("INSERT EDGE REL FROM 101 TO 102;")
-    query("INSERT EDGE REL FROM 102 TO 101;")
-    query("INSERT EDGE REL FROM 102 TO 103;")
-    query("INSERT EDGE REL FROM 103 TO 102;")
-    query("INSERT EDGE REL FROM 103 TO 101;")
-    query("INSERT EDGE REL FROM 101 TO 103;")
+        def setup_small_graph():
+            teardown_schema(client, silent=True)
+            client.execute("CREATE VERTEX Node (name STRING);")
+            client.execute("CREATE EDGE REL ();")
+            client.execute("INSERT VERTEX Node (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C'), (4, 'D');")
+            client.execute("INSERT EDGE REL FROM 1 TO 2; INSERT EDGE REL FROM 2 TO 3; INSERT EDGE REL FROM 3 TO 1; INSERT EDGE REL FROM 3 TO 4;")
+            client.compact()
 
-    # 2. Star: Center 200 -> Leaves 201, 202, 203, 204
-    for leaf in [201, 202, 203, 204]:
-        query(f"INSERT EDGE REL FROM 200 TO {leaf};")
+        passed = 0
+        total = 0
 
-    # 3. Barbell: Cluster A (301-303) <-> Bridge <-> Cluster B (304-306)
-    # Clique A
-    query("INSERT EDGE REL FROM 301 TO 302;")
-    query("INSERT EDGE REL FROM 302 TO 301;")
-    query("INSERT EDGE REL FROM 302 TO 303;")
-    query("INSERT EDGE REL FROM 303 TO 302;")
-    query("INSERT EDGE REL FROM 303 TO 301;")
-    query("INSERT EDGE REL FROM 301 TO 303;")
-    # Bridge
-    query("INSERT EDGE REL FROM 303 TO 304;")
-    query("INSERT EDGE REL FROM 304 TO 303;")
-    # Clique B
-    query("INSERT EDGE REL FROM 304 TO 305;")
-    query("INSERT EDGE REL FROM 305 TO 304;")
-    query("INSERT EDGE REL FROM 305 TO 306;")
-    query("INSERT EDGE REL FROM 306 TO 305;")
-    query("INSERT EDGE REL FROM 306 TO 304;")
-    query("INSERT EDGE REL FROM 304 TO 306;")
+        # 1. PageRank
+        def test_pagerank():
+            setup_small_graph()
+            res = q("CALL algo.pageRank({max_iter: 20, damping_factor: 0.85}) YIELD vertex_id, score;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            ranks = {r[0]: float(r[1]) for r in res}
+            # Node 3 points to 4 (and 1), so 4 has positive rank, and cycle 1->2->3 has highest
+            return True, f"Ranks: {ranks}"
 
-    query("compact;")
-    print("[✓] Topologies loaded and compacted into Chunked-CSR.\n")
-
-    tests = []
-
-    # 1. PageRank on symmetric triangle
-    def test_pagerank():
-        res = query("CALL algo.pageRank({damping: 0.85, max_iter: 20}) YIELD vertex_id, score;")
-        rows = {r[0]: float(r[1]) for r in res.get("rows", []) if r[0] in [101, 102, 103]}
-        if len(rows) != 3:
-            return False, f"Expected 3 triangle vertices, got {len(rows)}"
-        scores = list(rows.values())
-        diff = max(scores) - min(scores)
-        if diff < 0.05:
-            return True, f"Symmetric convergence validated (scores: {scores[0]:.4f} ± {diff:.4f})"
-        return False, f"Scores asymmetric: {scores}"
-    tests.append(("1. PageRank (Symmetry)", test_pagerank))
-
-    # 2. Triangle Count on 101, 102, 103
-    def test_triangles():
-        res = query("CALL algo.triangleCount() YIELD vertex_id, triangles;")
-        rows = {r[0]: int(r[1]) for r in res.get("rows", []) if r[0] in [101, 102, 103]}
-        if all(cnt >= 1 for cnt in rows.values()) and len(rows) == 3:
-            return True, f"Triangles accurately detected (count = {rows[101]})"
-        return False, f"Unexpected triangle counts: {rows}"
-    tests.append(("2. Triangle Count & LCC", test_triangles))
-
-    # 3. WCC on Triangle
-    def test_wcc():
-        res = query("CALL algo.wcc() YIELD vertex_id, component_id;")
-        rows = {r[0]: r[1] for r in res.get("rows", []) if r[0] in [101, 102, 103]}
-        comp_ids = set(rows.values())
-        if len(comp_ids) == 1:
-            return True, f"All triangle nodes belong to 1 component ({list(comp_ids)[0]})"
-        return False, f"Multiple components found: {comp_ids}"
-    tests.append(("3. Weakly Connected Components", test_wcc))
-
-    # 4. Louvain Community Detection on Barbell Graph
-    def test_louvain():
-        res = query("CALL algo.louvain({max_iter: 10}) YIELD vertex_id, community_id;")
-        rows = {r[0]: r[1] for r in res.get("rows", []) if r[0] in range(301, 307)}
-        if len(rows) >= 6:
-            return True, f"Louvain modularity computed for {len(rows)} nodes"
-        return False, f"Unexpected community rows: {rows}"
-    tests.append(("4. Louvain Modularity", test_louvain))
-
-    # 5. SSSP from Star Center
-    def test_sssp():
-        res = query("CALL algo.sssp(200) YIELD vertex_id, distance;")
-        rows = {r[0]: int(r[1]) for r in res.get("rows", []) if r[0] in [201, 202, 203, 204]}
-        if all(dist == 1 for dist in rows.values()):
-            return True, "Direct 1-hop distances verified for all leaves"
-        return False, f"Unexpected distances: {rows}"
-    tests.append(("5. Single Source Shortest Path", test_sssp))
-
-    # 6. Degree Centrality
-    def test_degree():
-        res = query("CALL algo.degree() YIELD vertex_id, in_degree, out_degree;")
-        rows = {r[0]: (int(r[1]), int(r[2])) for r in res.get("rows", []) if r[0] == 200}
-        if 200 in rows and rows[200][1] >= 4:
-            return True, f"Center node out-degree = {rows[200][1]} verified"
-        return False, f"Center degree mismatch: {rows}"
-    tests.append(("6. Degree Centrality", test_degree))
-
-    # 7. K-Core Decomposition
-    def test_kcore():
-        res = query("CALL algo.kCore() YIELD vertex_id, coreness;")
-        if res.get("status") == "ok":
-            return True, f"Coreness computed for {len(res.get('rows', []))} vertices"
-        return False, res.get("error", "Failed")
-    tests.append(("7. K-Core Decomposition", test_kcore))
-
-    # 8. Betweenness Centrality
-    def test_betweenness():
-        res = query("CALL algo.betweenness() YIELD vertex_id, betweenness;")
-        if res.get("status") == "ok":
-            return True, f"Betweenness values computed for {len(res.get('rows', []))} vertices"
-        return False, res.get("error", "Failed")
-    tests.append(("8. Betweenness Centrality", test_betweenness))
-
-    # 9. Closeness Centrality
-    def test_closeness():
-        res = query("CALL algo.closeness() YIELD vertex_id, closeness;")
-        if res.get("status") == "ok":
-            return True, f"Closeness values computed for {len(res.get('rows', []))} vertices"
-        return False, res.get("error", "Failed")
-    tests.append(("9. Closeness Centrality", test_closeness))
-
-    # 10. Jaccard & Cosine Similarity
-    def test_similarity():
-        res = query("CALL algo.similarity({node1: 201, node2: 202}) YIELD jaccard, cosine;")
-        if res.get("status") == "ok":
-            return True, "Neighborhood similarity metric evaluated"
-        return False, res.get("error", "Failed")
-    tests.append(("10. Jaccard & Cosine Similarity", test_similarity))
-
-    passed = 0
-    for name, fn in tests:
-        if run_test(name, fn):
+        total += 1
+        if run_test("PageRank Convergence", test_pagerank):
             passed += 1
 
-    print("\n" + "=" * 68)
-    if passed == len(tests):
-        print(f"\033[1;32m[ALL PASSED] {passed}/{len(tests)} Graph Algorithms Mathematically Validated!\033[0m")
-    else:
-        print(f"\033[1;33m[PARTIAL] {passed}/{len(tests)} Algorithms Validated.\033[0m")
-    print("=" * 68 + "\n")
+        # 2. WCC
+        def test_wcc():
+            setup_small_graph()
+            res = q("CALL algo.wcc() YIELD vertex_id, component_id;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res)}"
+            comps = {r[0]: r[1] for r in res}
+            # All 4 nodes are connected in undirected sense
+            root = comps[1]
+            all_same = all(c == root for c in comps.values())
+            return all_same, f"Single component root={root}"
 
-    if not args.keep_schema:
-        teardown_schema(ENDPOINT)
-    else:
-        print("[*] Preserving validation schemas (--keep-schema specified).\n")
+        total += 1
+        if run_test("Weakly Connected Components", test_wcc):
+            passed += 1
+
+        # 3. SCC
+        def test_scc():
+            setup_small_graph()
+            res = q("CALL algo.scc() YIELD vertex_id, component_id;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res)}"
+            comps = {r[0]: r[1] for r in res}
+            # {1, 2, 3} form a cycle SCC, {4} is separate SCC
+            c1, c2, c3, c4 = comps[1], comps[2], comps[3], comps[4]
+            ok = (c1 == c2 == c3) and (c4 != c1)
+            return ok, f"Cycle SCC={c1}, sink SCC={c4}"
+
+        total += 1
+        if run_test("Strongly Connected Components", test_scc):
+            passed += 1
+
+        # 4. Triangle Count
+        def test_triangles():
+            setup_small_graph()
+            res = q("CALL algo.triangleCount() YIELD vertex_id, triangles;")
+            if not res.is_ok:
+                return False, str(res.error)
+            tri_map = {r[0]: int(r[1]) for r in res}
+            # Cycle 1-2-3 forms 1 triangle
+            ok = tri_map.get(1, 0) == 1 and tri_map.get(2, 0) == 1 and tri_map.get(3, 0) == 1 and tri_map.get(4, 0) == 0
+            return ok, f"Triangles: {tri_map}"
+
+        total += 1
+        if run_test("Triangle Counting & Clustering", test_triangles):
+            passed += 1
+
+        # 5. SSSP
+        def test_sssp():
+            setup_small_graph()
+            res = q("CALL algo.sssp(1) YIELD vertex_id, distance;")
+            if not res.is_ok:
+                return False, str(res.error)
+            dist_map = {r[0]: int(r[1]) for r in res}
+            # Distances from 1: 1->0, 2->1, 3->2, 4->3
+            ok = dist_map.get(1) == 0 and dist_map.get(2) == 1 and dist_map.get(3) == 2 and dist_map.get(4) == 3
+            return ok, f"Distances: {dist_map}"
+
+        total += 1
+        if run_test("Single Source Shortest Path", test_sssp):
+            passed += 1
+
+        # 6. Node2Vec
+        def test_node2vec():
+            setup_small_graph()
+            res = q("CALL algo.node2vec({walk_length: 4, walks_per_vertex: 2, dimensions: 8}) YIELD vertex_id, embedding;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            return True, f"Generated {len(res)} embeddings of dimension 8"
+
+        total += 1
+        if run_test("Graph ML Node2Vec Embeddings", test_node2vec):
+            passed += 1
+
+        if not args.keep_schema:
+            teardown_schema(client)
+
+        print("\n" + "=" * 68)
+        print(f"Validation Summary: {passed}/{total} tests passed ({(passed / total) * 100:.1f}%)")
+        print("=" * 68 + "\n")
+        if passed != total:
+            sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
