@@ -53,7 +53,8 @@ def main():
     parser.add_argument("--edge-type", default="TRUSTS", help="Relationship edge type (default: TRUSTS)")
     parser.add_argument("--mode", choices=["flight", "rest"], default="flight" if pl is not None else "rest",
                         help="Ingest mode: flight (Arrow Flight streaming) or rest (HTTP batches)")
-    parser.add_argument("--client-flight-port", type=int, default=8860, help="Arrow Flight client port (default: 8860)")
+    parser.add_argument("--client-flight-port", type=int, default=None,
+                        help="Override Arrow Flight port (default: auto-discovered from /cluster API)")
     parser.add_argument("--batch-size", type=int, default=1000, help="Batch size for REST mode (default: 1000)")
     parser.add_argument("--no-compact", action="store_true", help="Skip automatic CSR compaction after ingest")
     parser.add_argument("--recreate-schema", action="store_true", help="Drop and recreate schema before ingesting")
@@ -63,21 +64,29 @@ def main():
         print(f"[-] Error: File not found: {args.file}")
         sys.exit(1)
 
+    port_info = str(args.client_flight_port) if args.client_flight_port else "Auto-discovered via /cluster"
+
     print("=" * 65)
     print("      GDB SNAP Dataset Ingestion Tool (gdb-client)            ")
     print("=" * 65)
     print(f"[*] Dataset:       {args.file}")
     print(f"[*] Target GDB:    {args.endpoint}")
-    print(f"[*] Flight Port:   {args.client_flight_port}")
+    print(f"[*] Flight Port:   {port_info}")
     print(f"[*] Ingest Mode:   {args.mode.upper()}")
     print(f"[*] Schema:        ({args.vertex_label})-[:{args.edge_type}]->({args.vertex_label})")
     print("-" * 65)
 
-    with GdbClient(endpoint=args.endpoint, client_flight_port=args.client_flight_port) as client:
+    client_kwargs = {"endpoint": args.endpoint}
+    if args.client_flight_port is not None:
+        client_kwargs["client_flight_port"] = args.client_flight_port
+
+    with GdbClient(**client_kwargs) as client:
         # 1. Verify connection
         try:
             health = client.health()
+            ports_discovered = [n.client_flight_port for n in client.topology.nodes]
             print(f"[✓] Connected to GDB: {health.get('status')} (version: {health.get('version', '0.5.2')})")
+            print(f"[✓] Cluster Nodes:    {len(client.topology.nodes)} active node(s) (Flight ports: {ports_discovered})")
         except Exception as e:
             print(f"[-] Failed to connect to GDB at {args.endpoint}: {e}")
             sys.exit(1)
