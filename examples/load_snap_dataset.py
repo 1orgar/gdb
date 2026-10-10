@@ -53,8 +53,10 @@ def main():
     parser.add_argument("--edge-type", default="TRUSTS", help="Relationship edge type (default: TRUSTS)")
     parser.add_argument("--mode", choices=["flight", "rest"], default="flight" if pl is not None else "rest",
                         help="Ingest mode: flight (Arrow Flight streaming) or rest (HTTP batches)")
+    parser.add_argument("--client-flight-port", type=int, default=8860, help="Arrow Flight client port (default: 8860)")
     parser.add_argument("--batch-size", type=int, default=1000, help="Batch size for REST mode (default: 1000)")
     parser.add_argument("--no-compact", action="store_true", help="Skip automatic CSR compaction after ingest")
+    parser.add_argument("--recreate-schema", action="store_true", help="Drop and recreate schema before ingesting")
     args = parser.parse_args()
 
     if not os.path.exists(args.file):
@@ -66,11 +68,12 @@ def main():
     print("=" * 65)
     print(f"[*] Dataset:       {args.file}")
     print(f"[*] Target GDB:    {args.endpoint}")
+    print(f"[*] Flight Port:   {args.client_flight_port}")
     print(f"[*] Ingest Mode:   {args.mode.upper()}")
     print(f"[*] Schema:        ({args.vertex_label})-[:{args.edge_type}]->({args.vertex_label})")
     print("-" * 65)
 
-    with GdbClient(endpoint=args.endpoint) as client:
+    with GdbClient(endpoint=args.endpoint, client_flight_port=args.client_flight_port) as client:
         # 1. Verify connection
         try:
             health = client.health()
@@ -80,11 +83,22 @@ def main():
             sys.exit(1)
 
         # 2. Register Schema
+        if args.recreate_schema:
+            print(f"[*] Dropping old schema '{args.vertex_label}', '{args.edge_type}'...")
+            try: client.execute(f"DROP VERTEX {args.vertex_label};")
+            except Exception: pass
+            try: client.execute(f"DROP EDGE {args.edge_type};")
+            except Exception: pass
+
         print(f"[*] Registering vertex '{args.vertex_label}' and edge '{args.edge_type}'...")
-        client.execute_script(f"""
-            CREATE VERTEX {args.vertex_label} ();
-            CREATE EDGE {args.edge_type} ();
-        """)
+        try:
+            client.execute(f"CREATE VERTEX {args.vertex_label} ();")
+        except Exception:
+            pass
+        try:
+            client.execute(f"CREATE EDGE {args.edge_type} ();")
+        except Exception:
+            pass
 
         # 3. Read and Ingest Data
         start_time = time.perf_counter()
