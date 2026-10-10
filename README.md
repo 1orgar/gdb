@@ -48,7 +48,7 @@ A next-generation, high-performance distributed HTAP graph database engine built
    - **Force-Directed Physics & DAG Viewer:** 60 FPS Canvas & Unity 3D WebGL, execution plan DAG viewer, real-time sparkline telemetry.
 
 6. **Dedicated Python SDK & Arrow Flight Transport (`gdb-client`):**
-   - **Official Python Package:** Standalone `gdb-client` package with Polars DataFrame and NetworkX Graph export.
+   - **Official Python Package:** Standalone [**`gdb-client`**](https://github.com/1orgar/gdb-py-client) on [PyPI](https://pypi.org/project/gdb-client/) (`pip install gdb-client`) with zero-copy Polars, PyArrow, NetworkX export, and parallel Arrow Flight scatter-ingest.
    - **Automated Benchmark Suite:** `scripts/py_client_benchmark.py` testing QPS, batch inserts, and graph traversals.
    - **Port Isolation:** Internal MPP shuffle (`--port 8848+`) separated from client ingestion (`--client-flight-port 8860+`).
 

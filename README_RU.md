@@ -48,7 +48,7 @@
    - **Физическая визуализация & Execution Plan DAG:** 60 FPS Canvas & 3D Unity WebGL, визуализатор плана выполнения запроса, спарклайны телеметрии.
 
 6. **Официальный Python SDK & Arrow Flight (`gdb-client`):**
-   - **Автономный пакет `gdb-client`:** Экспорт результатов в Polars DataFrame и NetworkX Graph.
+   - **Автономный пакет `gdb-client`:** Официальный клиент [**`gdb-client`**](https://github.com/1orgar/gdb-py-client) на [PyPI](https://pypi.org/project/gdb-client/) (`pip install gdb-client`) с экспортом в Polars DataFrame, PyArrow, NetworkX и параллельной загрузкой через Arrow Flight.
    - **Автоматизированный бенчмарк:** `scripts/py_client_benchmark.py` с автоматическим созданием и очисткой схемы (`--keep-schema`).
    - **Разделение портов:** Межсервисный MPP shuffle (`--port 8848+`) изолирован от клиентского порта (`--client-flight-port 8860+`).
 

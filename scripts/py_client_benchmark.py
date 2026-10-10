@@ -16,17 +16,21 @@ import sys
 import time
 from typing import List, Tuple
 
-# Enable local import of gdb_client without mandatory pip install
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sdk_dir = os.path.join(os.path.dirname(current_dir), "clients", "python", "gdb-client")
-if sdk_dir not in sys.path:
-    sys.path.insert(0, sdk_dir)
-
+# Import official gdb_client, with fallback to sibling repo for local dev
 try:
     from gdb_client import GdbClient
 except ImportError:
-    print(f"[-] Could not load gdb_client from {sdk_dir}. Please check your Python environment.")
-    sys.exit(1)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sibling_sdk = os.path.abspath(os.path.join(os.path.dirname(current_dir), "..", "gdb-py-client", "src"))
+    if os.path.exists(sibling_sdk):
+        sys.path.insert(0, sibling_sdk)
+    try:
+        from gdb_client import GdbClient
+    except ImportError:
+        print("[-] Could not load official `gdb_client` package.")
+        print("    Please install it via: pip install gdb-client")
+        print("    Or install locally: pip install ../gdb-py-client")
+        sys.exit(1)
 
 try:
     import polars as pl

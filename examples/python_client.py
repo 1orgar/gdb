@@ -1,120 +1,139 @@
 #!/usr/bin/env python3
 """
-GDB Python Client Example
-=========================
-Demonstrates how to interact with a GDB cluster using standard Python 3.
-Zero external dependencies required (uses urllib and json from stdlib).
+Official GDB Python Client Example
+==================================
+Demonstrates how to interact with a GDB cluster using the official `gdb-client` SDK:
+- Cluster topology discovery and GPU status inspection
+- Multi-statement DDL/DML schema setup
+- Batch inserting vertices and edges
+- Executing openCypher queries with Polars, Pandas, and NetworkX exports
+- Running built-in Graph Analytics algorithms (PageRank, Triangle Counting)
+- Cost-Based Optimizer (CBO) graph analysis
 """
 
-import json
-import urllib.request
-import urllib.error
 import sys
+import os
 
-GDB_ENDPOINT = "http://localhost:8847"
-
-def execute_query(endpoint: str, query: str) -> dict:
-    url = f"{endpoint}/query"
-    payload = json.dumps({"query": query}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-def fetch_json(endpoint: str, path: str) -> dict:
-    url = f"{endpoint}{path}"
-    with urllib.request.urlopen(url) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-def print_table(columns: list, rows: list):
-    if not columns or not rows:
-        print("  (Empty result set)")
-        return
-    col_widths = [len(str(c)) for c in columns]
-    for row in rows:
-        for i, val in enumerate(row):
-            col_widths[i] = max(col_widths[i], len(str(val)))
-    
-    header = " | ".join(f"{str(c):<{col_widths[i]}}" for i, c in enumerate(columns))
-    sep = "-+-".join("-" * col_widths[i] for i in range(len(columns)))
-    print(f"  {header}")
-    print(f"  {sep}")
-    for row in rows:
-        line = " | ".join(f"{str(v):<{col_widths[i]}}" for i, v in enumerate(row))
-        print(f"  {line}")
-
-def main():
-    print("=" * 60)
-    print("       GDB Python Client Example (Stdlib HTTP REST)         ")
-    print("=" * 60)
-
-    # 1. Check Health & Cluster Status
+try:
+    from gdb_client import GdbClient
+except ImportError:
+    sibling_sdk = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "gdb-py-client", "src"))
+    if os.path.exists(sibling_sdk):
+        sys.path.insert(0, sibling_sdk)
     try:
-        health = fetch_json(GDB_ENDPOINT, "/health")
-        print(f"[+] Cluster Health: {health.get('status')} (version: {health.get('version')})")
-    except Exception as e:
-        print(f"[-] Failed to connect to GDB at {GDB_ENDPOINT}: {e}")
-        print("    Make sure the cluster is running: ./scripts/start_cluster.sh")
+        from gdb_client import GdbClient
+    except ImportError:
+        print("[-] Could not import official `gdb_client` package.")
+        print("    Install it via: pip install gdb-client")
         sys.exit(1)
 
-    cluster_info = fetch_json(GDB_ENDPOINT, "/cluster")
-    print(f"[+] Active Nodes:   {cluster_info.get('active_nodes', 1)} | Role: {cluster_info.get('role')}")
+try:
+    import polars as pl
+except ImportError:
+    pl = None
 
-    gpu_info = fetch_json(GDB_ENDPOINT, "/gpu")
-    print(f"[+] GPU Hardware:   {gpu_info.get('backend', 'N/A')} (Available: {gpu_info.get('available')})")
+try:
+    import networkx as nx
+except ImportError:
+    nx = None
 
-    # 2. DDL - Create Schema
-    print("\n[+] Creating schema...")
-    execute_query(GDB_ENDPOINT, "CREATE VERTEX Product (name STRING, price FLOAT64);")
-    execute_query(GDB_ENDPOINT, "CREATE EDGE BOUGHT_WITH ();")
 
-    # 3. DML - Insert Data
-    print("[+] Inserting product vertices & co-purchase edges...")
-    products = [
-        (1001, "MacBook Pro", 2499.0),
-        (1002, "Studio Display", 1599.0),
-        (1003, "Magic Keyboard", 199.0),
-        (1004, "Magic Trackpad", 149.0),
-    ]
-    for pid, name, price in products:
-        execute_query(GDB_ENDPOINT, f"INSERT VERTEX Product (id, name, price) VALUES ({pid}, '{name}', {price});")
+def main():
+    endpoint = os.environ.get("GDB_ENDPOINT", "http://localhost:8847")
+    print("=" * 65)
+    print("        GDB Official Python Client SDK Example                   ")
+    print("=" * 65)
 
-    edges = [
-        (1001, 1002),
-        (1001, 1003),
-        (1001, 1004),
-        (1003, 1004),
-    ]
-    for u, v in edges:
-        execute_query(GDB_ENDPOINT, f"INSERT EDGE BOUGHT_WITH FROM {u} TO {v};")
+    with GdbClient(endpoint=endpoint) as client:
+        # 1. Health & Cluster Topology
+        try:
+            health = client.health()
+            print(f"[+] Cluster Health: {health.get('status')} (version: {health.get('version', '0.5.1')})")
+        except Exception as e:
+            print(f"[-] Failed to connect to GDB at {endpoint}: {e}")
+            print("    Please start the server first: ./bin/gdb-server")
+            sys.exit(1)
 
-    # 4. Compact into Chunked-CSR
-    execute_query(GDB_ENDPOINT, "compact;")
-    print("[✓] Data compacted into high-performance Chunked-CSR.")
+        cluster_info = client.cluster()
+        print(f"[+] Active Ring Nodes: {cluster_info.get('active_nodes', len(client.topology.nodes))}")
 
-    # 5. openCypher Query
-    print("\n[+] Query: Co-purchased items (1-Hop Traversal):")
-    res = execute_query(GDB_ENDPOINT, "MATCH (p:Product)-[:BOUGHT_WITH]->(related:Product) RETURN p.name, related.name;")
-    print_table(res.get("columns", []), res.get("rows", []))
+        gpu_info = client.gpu()
+        print(f"[+] GPU Hardware:      {gpu_info.get('backend', 'N/A')} (Available: {gpu_info.get('available')})")
 
-    # 6. Graph Analytics: PageRank
-    print("\n[+] Algorithm: PageRank influence scores:")
-    pr_res = execute_query(GDB_ENDPOINT, "CALL algo.pageRank({damping: 0.85, max_iter: 10}) YIELD vertex_id, score;")
-    print_table(pr_res.get("columns", []), pr_res.get("rows", []))
+        # 2. Schema Setup via Multi-Statement Script
+        print("\n[+] Registering schema via multi-statement Cypher script...")
+        client.execute_script("""
+            CREATE VERTEX Product (name STRING, price FLOAT64);
+            CREATE EDGE BOUGHT_WITH ();
+        """)
 
-    # 7. Graph Analytics: Triangle Count
-    print("\n[+] Algorithm: Triangle counting (dense product clusters):")
-    tri_res = execute_query(GDB_ENDPOINT, "CALL algo.triangleCount() YIELD vertex_id, triangles;")
-    print_table(tri_res.get("columns", []), tri_res.get("rows", []))
+        # 3. Batch Ingest Vertices
+        print("[+] Batch inserting product vertices...")
+        products = [
+            {"id": 1001, "name": "MacBook Pro", "price": 2499.0},
+            {"id": 1002, "name": "Studio Display", "price": 1599.0},
+            {"id": 1003, "name": "Magic Keyboard", "price": 199.0},
+            {"id": 1004, "name": "Magic Trackpad", "price": 149.0},
+            {"id": 1005, "name": "AirPods Max", "price": 549.0},
+        ]
+        num_v = client.insert_vertices("Product", products, batch_size=50)
+        print(f"    Inserted {num_v} vertices.")
 
-    # 8. Resources
-    resources = fetch_json(GDB_ENDPOINT, "/resources")
-    print(f"\n[+] Cluster Memory RSS: {resources.get('memory_resident_mb', 0):.2f} MB")
-    print(f"[+] Total Edges:        {resources.get('total_edges', 0)}")
-    print("\n[✓] GDB Python Client Example completed successfully!")
+        # 4. Batch Ingest Edges
+        print("[+] Batch inserting co-purchase relationship edges...")
+        edges = [
+            (1001, 1002),
+            (1001, 1003),
+            (1001, 1004),
+            (1003, 1004),
+            (1001, 1005),
+        ]
+        num_e = client.insert_edges("BOUGHT_WITH", edges, batch_size=50)
+        print(f"    Inserted {num_e} edges.")
+
+        # 5. Trigger CSR Compaction
+        client.compact()
+        print("[✓] Compaction triggered for immutable Chunked-CSR indexing.")
+
+        # 6. Execute openCypher Query & Export to Polars
+        print("\n[+] Executing 1-Hop Traversal Query:")
+        query_str = "MATCH (p:Product)-[:BOUGHT_WITH]->(related:Product) RETURN p.name, related.name;"
+        res = client.query(query_str)
+        print(f"    Rows: {len(res)} | Latency: {res.elapsed_us / 1000.0:.2f}ms")
+        if pl is not None:
+            df = res.to_polars()
+            print("--- Polars DataFrame ---")
+            print(df)
+        else:
+            for row in res:
+                print(f"    {row[0]} -> {row[1]}")
+
+        # 7. Export Query Subgraph to NetworkX
+        if nx is not None:
+            graph_query = "MATCH (a:Product)-[:BOUGHT_WITH]->(b:Product) RETURN a.id, b.id;"
+            g_res = client.query(graph_query)
+            G = g_res.to_networkx()
+            print(f"\n[+] NetworkX DiGraph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+
+        # 8. Run In-DB Graph Analytics Algorithms
+        print("\n[+] Running Graph Analytics Algorithms:")
+        pr_res = client.query("CALL algo.pageRank({damping: 0.85, max_iter: 10}) YIELD vertex_id, score;")
+        print(f"    [✓] PageRank scored {len(pr_res)} vertices.")
+
+        tri_res = client.query("CALL algo.triangleCount() YIELD vertex_id, triangles;")
+        print(f"    [✓] Triangle counting completed for {len(tri_res)} vertices.")
+
+        # 9. Cost-Based Optimizer (CBO) Graph Analysis
+        cbo_res = client.analyze()
+        print(f"\n[+] CBO Statistics: {cbo_res.message}")
+
+        # 10. Live Resources & CSR Telemetry
+        resources = client.resources()
+        print(f"[+] Cluster Memory RSS: {resources.get('memory_resident_mb', 0):.2f} MB")
+        print(f"[+] Total Edges:        {resources.get('total_edges', 0)}")
+
+    print("\n[✓] GDB Python Client SDK Example completed successfully!")
+
 
 if __name__ == "__main__":
     main()
