@@ -69,6 +69,102 @@ pub enum Token {
     Plus,
 }
 
+impl Token {
+    pub fn is_keyword(&self) -> bool {
+        matches!(
+            self,
+            Token::Call
+                | Token::Yield
+                | Token::Create
+                | Token::Vertex
+                | Token::Edge
+                | Token::Insert
+                | Token::Delete
+                | Token::Detach
+                | Token::Set
+                | Token::Merge
+                | Token::Index
+                | Token::Drop
+                | Token::Alter
+                | Token::Show
+                | Token::Tag
+                | Token::Add
+                | Token::Schema
+                | Token::As
+                | Token::On
+                | Token::Explain
+                | Token::From
+                | Token::To
+                | Token::Rank
+                | Token::Values
+                | Token::Match
+                | Token::Where
+                | Token::With
+                | Token::Return
+                | Token::Distinct
+                | Token::Order
+                | Token::By
+                | Token::Asc
+                | Token::Desc
+                | Token::Limit
+                | Token::Skip
+                | Token::Offset
+                | Token::Count
+                | Token::And
+                | Token::Or
+        )
+    }
+
+    pub fn keyword_str(&self) -> Option<&'static str> {
+        match self {
+            Token::Call => Some("CALL"),
+            Token::Yield => Some("YIELD"),
+            Token::Create => Some("CREATE"),
+            Token::Vertex => Some("VERTEX"),
+            Token::Edge => Some("EDGE"),
+            Token::Insert => Some("INSERT"),
+            Token::Delete => Some("DELETE"),
+            Token::Detach => Some("DETACH"),
+            Token::Set => Some("SET"),
+            Token::Merge => Some("MERGE"),
+            Token::Index => Some("INDEX"),
+            Token::Drop => Some("DROP"),
+            Token::Alter => Some("ALTER"),
+            Token::Show => Some("SHOW"),
+            Token::Tag => Some("TAG"),
+            Token::Add => Some("ADD"),
+            Token::Schema => Some("SCHEMA"),
+            Token::As => Some("AS"),
+            Token::On => Some("ON"),
+            Token::Explain => Some("EXPLAIN"),
+            Token::From => Some("FROM"),
+            Token::To => Some("TO"),
+            Token::Rank => Some("RANK"),
+            Token::Values => Some("VALUES"),
+            Token::Match => Some("MATCH"),
+            Token::Where => Some("WHERE"),
+            Token::With => Some("WITH"),
+            Token::Return => Some("RETURN"),
+            Token::Distinct => Some("DISTINCT"),
+            Token::Order => Some("ORDER"),
+            Token::By => Some("BY"),
+            Token::Asc => Some("ASC"),
+            Token::Desc => Some("DESC"),
+            Token::Limit => Some("LIMIT"),
+            Token::Skip => Some("SKIP"),
+            Token::Offset => Some("OFFSET"),
+            Token::Count => Some("COUNT"),
+            Token::And => Some("AND"),
+            Token::Or => Some("OR"),
+            _ => None,
+        }
+    }
+
+    pub fn is_ident_like(&self) -> bool {
+        matches!(self, Token::Ident(_)) || self.is_keyword()
+    }
+}
+
 pub struct Lexer {
     chars: Vec<(usize, char)>,
     pos: usize,
@@ -186,6 +282,25 @@ impl Lexer {
                         self.advance();
                     }
                     tokens.push(Token::StringLit(s));
+                }
+                '`' => {
+                    self.advance();
+                    let mut s = String::new();
+                    while let Some(c) = self.peek() {
+                        if c == '`' {
+                            self.advance();
+                            if self.peek() == Some('`') {
+                                s.push('`');
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        } else {
+                            s.push(c);
+                            self.advance();
+                        }
+                    }
+                    tokens.push(Token::Ident(s));
                 }
                 '0'..='9' => {
                     let mut num_str = String::new();
@@ -318,21 +433,15 @@ impl Parser {
                 self.advance();
                 Ok(res)
             }
-            Some(Token::By) => {
+            Some(Token::StringLit(s)) => {
+                let res = s.clone();
                 self.advance();
-                Ok("BY".into())
+                Ok(res)
             }
-            Some(Token::On) => {
+            Some(tok) if tok.is_keyword() => {
+                let res = tok.keyword_str().unwrap().to_string();
                 self.advance();
-                Ok("ON".into())
-            }
-            Some(Token::Asc) => {
-                self.advance();
-                Ok("ASC".into())
-            }
-            Some(Token::Desc) => {
-                self.advance();
-                Ok("DESC".into())
+                Ok(res)
             }
             Some(other) => Err(GdbError::Parser(format!("Expected identifier, found {:?}", other))),
             None => Err(GdbError::Parser("Expected identifier, found EOF".into())),
@@ -409,7 +518,7 @@ impl Parser {
                 let mut pos_idx = 0;
                 while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
                     let is_named = match self.peek() {
-                        Some(Token::Ident(_)) => self.peek_at(1) == Some(&Token::Colon),
+                        Some(t) if t.is_ident_like() => self.peek_at(1) == Some(&Token::Colon),
                         _ => false,
                     };
                     if is_named {
@@ -1185,7 +1294,10 @@ impl Parser {
                 let mut props = Vec::new();
                 if self.peek() == Some(&Token::LBracket) {
                     self.advance();
-                    if let Some(Token::Ident(_)) = self.peek() {
+                    if self.peek() != Some(&Token::Colon)
+                        && self.peek() != Some(&Token::RBracket)
+                        && self.peek().map(|t| t.is_ident_like()).unwrap_or(false)
+                    {
                         let _var = self.expect_ident()?;
                     }
                     if self.peek() == Some(&Token::Colon) {
@@ -1230,7 +1342,10 @@ impl Parser {
                 let mut props = Vec::new();
                 if self.peek() == Some(&Token::LBracket) {
                     self.advance();
-                    if let Some(Token::Ident(_)) = self.peek() {
+                    if self.peek() != Some(&Token::Colon)
+                        && self.peek() != Some(&Token::RBracket)
+                        && self.peek().map(|t| t.is_ident_like()).unwrap_or(false)
+                    {
                         let _var = self.expect_ident()?;
                     }
                     if self.peek() == Some(&Token::Colon) {
@@ -1379,9 +1494,12 @@ impl Parser {
         let mut id_filter = None;
         let mut properties = Vec::new();
 
-        if let Some(Token::Ident(v)) = self.peek() {
-            variable = Some(v.clone());
-            self.advance();
+        if self.peek() != Some(&Token::Colon)
+            && self.peek() != Some(&Token::LBrace)
+            && self.peek() != Some(&Token::RParen)
+            && self.peek().map(|t| t.is_ident_like()).unwrap_or(false)
+        {
+            variable = Some(self.expect_ident()?);
         }
 
         if self.peek() == Some(&Token::Colon) {
@@ -1425,13 +1543,16 @@ impl Parser {
 
         if self.peek() == Some(&Token::LBracket) {
             self.advance();
-            if let Some(Token::Ident(v)) = self.peek() {
-                variable = Some(v.clone());
-                self.advance();
+            if self.peek() != Some(&Token::Colon)
+                && self.peek() != Some(&Token::Star)
+                && self.peek() != Some(&Token::RBracket)
+                && self.peek().map(|t| t.is_ident_like()).unwrap_or(false)
+            {
+                variable = Some(self.expect_ident()?);
             }
             if self.peek() == Some(&Token::Colon) {
                 self.advance();
-                if let Some(Token::Ident(_)) = self.peek() {
+                if self.peek().map(|t| t.is_ident_like()).unwrap_or(false) {
                     edge_type = Some(self.expect_ident()?);
                 }
             }
@@ -1596,46 +1717,63 @@ impl Parser {
             Some(Token::Ident(name)) => {
                 let ident_str = name.clone();
                 self.advance();
-                if self.peek() == Some(&Token::LParen) {
-                    self.advance();
-                    let mut args = Vec::new();
-                    if self.peek() == Some(&Token::Star) {
-                        self.advance();
-                        self.expect(&Token::RParen)?;
-                        if ident_str.eq_ignore_ascii_case("COUNT") {
-                            return Ok(Expr::CountStar);
-                        } else {
-                            return Ok(Expr::FunctionCall {
-                                name: ident_str,
-                                args: vec![],
-                            });
-                        }
-                    }
-                    if self.peek() != Some(&Token::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if self.peek() == Some(&Token::Comma) {
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(&Token::RParen)?;
-                    Ok(Expr::FunctionCall {
-                        name: ident_str,
-                        args,
-                    })
-                } else if self.peek() == Some(&Token::Dot) {
-                    self.advance();
-                    let prop_name = self.expect_ident()?;
-                    Ok(Expr::Property { variable: ident_str, property: prop_name })
-                } else {
-                    Ok(Expr::Variable(ident_str))
-                }
+                self.parse_ident_expr_tail(ident_str)
+            }
+            Some(tok) if tok.is_keyword() && (
+                self.peek_at(1) == Some(&Token::Dot)
+                || self.peek_at(1) == Some(&Token::LParen)
+                || !matches!(tok,
+                    Token::And | Token::Or | Token::Where | Token::With | Token::Return |
+                    Token::Order | Token::By | Token::Asc | Token::Desc | Token::Limit |
+                    Token::Skip | Token::Offset | Token::Distinct | Token::As
+                )
+            ) => {
+                let ident_str = tok.keyword_str().unwrap().to_string();
+                self.advance();
+                self.parse_ident_expr_tail(ident_str)
             }
             Some(other) => Err(GdbError::Parser(format!("Unexpected token in expression: {:?}", other))),
             None => Err(GdbError::Parser("Unexpected EOF in expression".into())),
+        }
+    }
+
+    fn parse_ident_expr_tail(&mut self, ident_str: String) -> GdbResult<Expr> {
+        if self.peek() == Some(&Token::LParen) {
+            self.advance();
+            let mut args = Vec::new();
+            if self.peek() == Some(&Token::Star) {
+                self.advance();
+                self.expect(&Token::RParen)?;
+                if ident_str.eq_ignore_ascii_case("COUNT") {
+                    return Ok(Expr::CountStar);
+                } else {
+                    return Ok(Expr::FunctionCall {
+                        name: ident_str,
+                        args: vec![],
+                    });
+                }
+            }
+            if self.peek() != Some(&Token::RParen) {
+                loop {
+                    args.push(self.parse_expr()?);
+                    if self.peek() == Some(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.expect(&Token::RParen)?;
+            Ok(Expr::FunctionCall {
+                name: ident_str,
+                args,
+            })
+        } else if self.peek() == Some(&Token::Dot) {
+            self.advance();
+            let prop_name = self.expect_ident()?;
+            Ok(Expr::Property { variable: ident_str, property: prop_name })
+        } else {
+            Ok(Expr::Variable(ident_str))
         }
     }
 }
@@ -1654,6 +1792,7 @@ pub fn split_statements(input: &str) -> Vec<String> {
     let mut current = String::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+    let mut in_backtick = false;
     let mut in_line_comment = false;
     let mut chars = input.chars().peekable();
 
@@ -1690,6 +1829,18 @@ pub fn split_statements(input: &str) -> Vec<String> {
             continue;
         }
 
+        if in_backtick {
+            current.push(ch);
+            if ch == '`' {
+                if chars.peek() == Some(&'`') {
+                    current.push(chars.next().unwrap());
+                } else {
+                    in_backtick = false;
+                }
+            }
+            continue;
+        }
+
         // Check for comment starts: --, //, #
         if ch == '#' {
             in_line_comment = true;
@@ -1714,6 +1865,12 @@ pub fn split_statements(input: &str) -> Vec<String> {
 
         if ch == '"' {
             in_double_quote = true;
+            current.push(ch);
+            continue;
+        }
+
+        if ch == '`' {
+            in_backtick = true;
             current.push(ch);
             continue;
         }

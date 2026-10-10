@@ -155,3 +155,83 @@ fn test_parser_v050_features() {
     assert!(matches!(stmt, Statement::CallAlgorithm { .. }));
 }
 
+#[test]
+fn test_keyword_identifiers_and_backticks() {
+    // 1. DROP VERTEX with keyword identifier
+    let stmt = parse("DROP VERTEX VERTEX;").unwrap();
+    if let Statement::DropVertexLabel { label } = stmt {
+        assert_eq!(label, "VERTEX");
+    } else {
+        panic!("Expected DropVertexLabel");
+    }
+
+    // 2. DROP VERTEX with backticks
+    let stmt = parse("DROP VERTEX `VERTEX`;").unwrap();
+    if let Statement::DropVertexLabel { label } = stmt {
+        assert_eq!(label, "VERTEX");
+    } else {
+        panic!("Expected DropVertexLabel");
+    }
+
+    // 3. DROP EDGE with keyword identifier
+    let stmt = parse("DROP EDGE EDGE;").unwrap();
+    if let Statement::DropEdgeType { edge_type } = stmt {
+        assert_eq!(edge_type, "EDGE");
+    } else {
+        panic!("Expected DropEdgeType");
+    }
+
+    let stmt = parse("DROP EDGE `EDGE`;").unwrap();
+    if let Statement::DropEdgeType { edge_type } = stmt {
+        assert_eq!(edge_type, "EDGE");
+    } else {
+        panic!("Expected DropEdgeType");
+    }
+
+    // 4. CREATE VERTEX / EDGE with keyword identifiers
+    let stmt = parse("CREATE VERTEX VERTEX ();").unwrap();
+    if let Statement::CreateVertexLabel { label, .. } = stmt {
+        assert_eq!(label, "VERTEX");
+    } else {
+        panic!("Expected CreateVertexLabel");
+    }
+
+    let stmt = parse("CREATE EDGE EDGE ();").unwrap();
+    if let Statement::CreateEdgeType { edge_type, .. } = stmt {
+        assert_eq!(edge_type, "EDGE");
+    } else {
+        panic!("Expected CreateEdgeType");
+    }
+
+    // 5. MATCH with keyword node label, edge type, and variables
+    let stmt = parse("MATCH (vertex:VERTEX)-[edge:EDGE]->(target:VERTEX) RETURN vertex, edge, target").unwrap();
+    if let Statement::Query(q) = stmt {
+        assert_eq!(q.pattern.start_node.variable, Some("VERTEX".into()));
+        assert_eq!(q.pattern.start_node.label, Some("VERTEX".into()));
+        assert_eq!(q.pattern.hops.len(), 1);
+        let (hop_edge, hop_target) = &q.pattern.hops[0];
+        assert_eq!(hop_edge.variable, Some("EDGE".into()));
+        assert_eq!(hop_edge.edge_type, Some("EDGE".into()));
+        assert_eq!(hop_target.label, Some("VERTEX".into()));
+    } else {
+        panic!("Expected Query");
+    }
+
+    // 6. Multi-hop edge with keyword edge type
+    let stmt = parse("MATCH (a)-[:EDGE*1..3]->(b) RETURN a, b").unwrap();
+    if let Statement::Query(q) = stmt {
+        let (hop_edge, _) = &q.pattern.hops[0];
+        assert_eq!(hop_edge.edge_type, Some("EDGE".into()));
+        assert_eq!(hop_edge.min_hops, 1);
+        assert_eq!(hop_edge.max_hops, Some(3));
+    } else {
+        panic!("Expected Query");
+    }
+
+    // 7. Backtick escaping in split_statements
+    let parts = split_statements("DROP VERTEX `VERTEX;NAME`; DROP EDGE EDGE;");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0], "DROP VERTEX `VERTEX;NAME`");
+    assert_eq!(parts[1], "DROP EDGE EDGE");
+}
+

@@ -46,6 +46,19 @@ fn test_executor_schema_introspection_and_alter() {
     // 6. Drop edge and vertex
     executor.execute(parse("DROP EDGE TRANSFERS;").unwrap()).unwrap();
     executor.execute(parse("DROP VERTEX Account;").unwrap()).unwrap();
+
+    // 7. Keyword schema entities (VERTEX and EDGE) with raw and backtick syntax
+    executor.execute(parse("CREATE VERTEX VERTEX ();").unwrap()).unwrap();
+    let res_drop = executor.execute(parse("DROP VERTEX VERTEX;").unwrap()).unwrap();
+    assert_eq!(res_drop.message, "Dropped vertex label 'VERTEX'");
+
+    executor.execute(parse("CREATE VERTEX `VERTEX` ();").unwrap()).unwrap();
+    let res_drop2 = executor.execute(parse("DROP VERTEX `VERTEX`;").unwrap()).unwrap();
+    assert_eq!(res_drop2.message, "Dropped vertex label 'VERTEX'");
+
+    executor.execute(parse("CREATE EDGE EDGE ();").unwrap()).unwrap();
+    let res_drop_edge = executor.execute(parse("DROP EDGE EDGE;").unwrap()).unwrap();
+    assert_eq!(res_drop_edge.message, "Dropped edge type 'EDGE'");
 }
 
 #[test]

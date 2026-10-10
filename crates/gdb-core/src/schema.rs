@@ -196,7 +196,9 @@ impl GraphSchema {
     }
 
     pub fn get_vertex_schema(&self, label: &str) -> Option<&VertexSchema> {
-        self.labels.get(label)
+        self.labels.get(label).or_else(|| {
+            self.labels.iter().find(|(k, _)| k.eq_ignore_ascii_case(label)).map(|(_, v)| v)
+        })
     }
 
     pub fn get_vertex_schema_by_id(&self, id: LabelId) -> Option<&VertexSchema> {
@@ -204,7 +206,9 @@ impl GraphSchema {
     }
 
     pub fn get_edge_schema(&self, edge_type_name: &str) -> Option<&EdgeSchema> {
-        self.edges.get(edge_type_name)
+        self.edges.get(edge_type_name).or_else(|| {
+            self.edges.iter().find(|(k, _)| k.eq_ignore_ascii_case(edge_type_name)).map(|(_, v)| v)
+        })
     }
 
     pub fn get_edge_schema_by_type(&self, edge_type: EdgeType) -> Option<&EdgeSchema> {
@@ -212,22 +216,36 @@ impl GraphSchema {
     }
 
     pub fn drop_vertex_label(&mut self, label: &str) -> GdbResult<LabelId> {
-        if let Some(schema) = self.labels.remove(label) {
-            self.label_ids.remove(&schema.label_id);
-            self.indexes.remove(label);
-            Ok(schema.label_id)
+        let key = if self.labels.contains_key(label) {
+            Some(label.to_string())
         } else {
-            Err(GdbError::Schema(format!("Vertex label '{}' does not exist", label)))
+            self.labels.keys().find(|k| k.eq_ignore_ascii_case(label)).cloned()
+        };
+
+        if let Some(actual_key) = key {
+            if let Some(schema) = self.labels.remove(&actual_key) {
+                self.label_ids.remove(&schema.label_id);
+                self.indexes.remove(&actual_key);
+                return Ok(schema.label_id);
+            }
         }
+        Err(GdbError::Schema(format!("Vertex label '{}' does not exist", label)))
     }
 
     pub fn drop_edge_type(&mut self, edge_type_name: &str) -> GdbResult<EdgeType> {
-        if let Some(schema) = self.edges.remove(edge_type_name) {
-            self.edge_types.remove(&schema.edge_type);
-            Ok(schema.edge_type)
+        let key = if self.edges.contains_key(edge_type_name) {
+            Some(edge_type_name.to_string())
         } else {
-            Err(GdbError::Schema(format!("Edge type '{}' does not exist", edge_type_name)))
+            self.edges.keys().find(|k| k.eq_ignore_ascii_case(edge_type_name)).cloned()
+        };
+
+        if let Some(actual_key) = key {
+            if let Some(schema) = self.edges.remove(&actual_key) {
+                self.edge_types.remove(&schema.edge_type);
+                return Ok(schema.edge_type);
+            }
         }
+        Err(GdbError::Schema(format!("Edge type '{}' does not exist", edge_type_name)))
     }
 
     pub fn alter_vertex_label(
