@@ -9,19 +9,19 @@ This document details the test coverage, integration suites, and reliability gua
 | **gdb-storage** (Chunked-CSR, MemTable, MVCC, Arrow, Vectors) | 1,058 | 938 | **88.7%** | **94.1%** |
 | **gdb-analytics** (Node2Vec, PageRank, Louvain, WCC, SSSP, Triangles) | 730 | 707 | **96.8%** | **100.0%** |
 | **gdb-cli** (REPL, Standalone & Online Cluster, ASCII Table) | 1,319 | 1,196 | **90.7%** | **93.5%** |
-| **gdb-studio** (Web UI, Run All Batching, Reverse Proxy) | 943 | 840 | **89.1%** | **86.4%** |
+| **gdb-studio** (Web UI, Run All Batching, Reverse Proxy) | 943 | 841 | **89.2%** | **86.4%** |
 | **gdb-s3** (Tiered Parquet Snapshots & Restore) | 355 | 310 | **87.3%** | **62.5%** |
 | **gdb-core** (Schema Metadata, Arrow Conversions, Vector Types) | 868 | 767 | **88.4%** | **83.1%** |
 | **gdb-wal** (NVMe Write-Ahead Log, Truncate, CRC32 Checksums) | 241 | 198 | **82.2%** | **57.1%** |
 | **gdb-raft** (Multi-Raft Consensus, WAL Replay) | 176 | 154 | **87.5%** | **72.7%** |
 | **gdb-parser** (openCypher, GQL, VECTOR, Semicolon Splitter) | 2,927 | 2,189 | **74.8%** | **83.3%** |
-| **gdb-gpu** (Metal UMA, CUDA Kernels, Vector Offload) | 1,169 | 905 | **77.4%** | **78.6%** |
+| **gdb-gpu** (Metal UMA, CUDA Kernels, Out-Of-Core Paging) | 1,503 | 1,229 | **81.8%** | **81.1%** |
 | **gdb-flight** (Arrow Flight RPC, MPP Partitioning, Streams) | 683 | 526 | **77.0%** | **78.9%** |
 | **gdb-planner** (CBO Optimizer, Node2Vec, Vector Similarity, DML) | 4,175 | 3,171 | **76.0%** | **74.7%** |
-| **gdb-server** (REST API, Batch Endpoint, Multi-Statement, Ring) | 1,476 | 969 | **65.6%** | **80.4%** |
-| **TOTAL WORKSPACE (Strict Threshold Enforced in CI)** | **18,033** | **14,517** | **80.50%** | **79.49%** |
+| **gdb-server** (REST API, Batch Endpoint, Multi-Statement, Ring) | 1,488 | 981 | **65.9%** | **83.3%** |
+| **TOTAL WORKSPACE (Strict Threshold Enforced in CI)** | **18,379** | **14,841** | **80.75%** | **79.85%** |
 
-> *Note: Enforced in GitHub Actions CI via `cargo llvm-cov --workspace --summary-only --fail-under-lines 80` (80.50% lines / 80.60% regions).*
+> *Note: Enforced in GitHub Actions CI via `cargo llvm-cov --workspace --summary-only --fail-under-lines 80` (80.75% lines / 80.84% regions).*
 
 
 ## Integration & E2E Test Suites

@@ -2,12 +2,12 @@
 
 # GDB — Distributed High-Performance In-Memory Graph Database (Nebula Graph Alternative)
 
-[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.5.1-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-80.6%25-brightgreen)](docs/COVERAGE.md)
+[![Coverage](https://img.shields.io/badge/coverage-80.8%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-A next-generation, high-performance distributed HTAP graph database engine built with **Rust**, featuring in-memory Compressed Sparse Row (CSR) topology, Apache Arrow columnar properties, openCypher/GQL query support, secondary property indexing, Cypher DML mutations, Multi-Raft leaderless replication, S3-backed tiered persistence, MPP distributed exchange over Arrow Flight, **Apple Metal (UMA Zero-Copy) / NVIDIA CUDA hardware acceleration**, native **Vector Embeddings & Similarity Search**, and **Cost-Based Optimization (CBO)**.
+A next-generation, high-performance distributed HTAP graph database engine built with **Rust**, featuring in-memory Compressed Sparse Row (CSR) topology, Apache Arrow columnar properties, openCypher/GQL query support, secondary property indexing, Cypher DML mutations, Multi-Raft leaderless replication, S3-backed tiered persistence, MPP distributed exchange over Arrow Flight, **Apple Metal (UMA Zero-Copy) / NVIDIA CUDA hardware acceleration with Discrete GPU Out-of-Core Memory Paging**, native **Vector Embeddings & Similarity Search**, and **Cost-Based Optimization (CBO)**.
 
 ---
 
@@ -34,13 +34,14 @@ A next-generation, high-performance distributed HTAP graph database engine built
    - **Vector Similarity Search:** `CALL vector.similaritySearch(label, property, query_vector, k, metric)` supporting Cosine, DotProduct, and Euclidean (L2) distance metrics.
    - **Cost-Based Optimization (CBO):** `ANALYZE GRAPH;` gathering degree statistics and label cardinalities.
 
-4. **Hardware GPU Acceleration (Metal on Mac / CUDA on Linux):**
+4. **Hardware GPU Acceleration (Metal / CUDA) & Discrete VRAM Out-of-Core Paging:**
    - **Maximal GPU Graph Offload:** Automatic GPU offload for graph traversal (`VarLengthExpand` wavefront BFS), vector similarity comparisons, and graph analytics.
+   - **Discrete GPU Memory Paging (Out-Of-Core):** Windowed Chunked CSR Streaming with Double-Buffering prevents VRAM Out-Of-Memory errors on discrete GPUs (NVIDIA CUDA) when graph topology exceeds physical VRAM (`--gpu-max-vram-mb`). Lightweight `offsets` stay in VRAM while sequential chunks of `targets` stream asynchronously across PCIe.
    - **Apple Silicon (M-Series):** **Unified Memory Architecture (UMA)** enables GPU cores to read CSR graph topology directly from RAM with **zero PCIe copy overhead (Zero-Copy)**.
    - **Linux NVIDIA (CUDA):** Native CudaComputeBackend in `gdb-gpu` for parallel BFS, PageRank, Louvain, WCC, and Triangle Counting on server GPUs.
    - **CPU SIMD Fallback:** When GPU is disabled or absent, computations automatically execute via a vectorized Rayon CPU backend.
 
-5. **GDB Studio v0.5.0 (Interactive Web Workspace):**
+5. **GDB Studio v0.5.1 (Interactive Web Workspace):**
    - **"Run All" Multi-Statement Execution:** Step-by-step progress indicator (`Step: X / Y`), automated batching, and error tracing.
    - **Vector Array Inspector:** Clean monospace display for high-dimensional vectors and embedding scores.
    - **Clean Catalog Boot & Interactive Schema Manager:** Inspect, create, alter, and drop vertex tags and edge types visually.

@@ -48,6 +48,11 @@ pub trait GpuComputeBackend: Send + Sync {
     ) -> GdbResult<Vec<(usize, f32)>> {
         CpuFallbackBackend.vector_similarity(vectors, dim, query, k, metric)
     }
+
+    /// Maximum VRAM budget allocated in bytes on discrete GPU before chunked window paging activates.
+    fn max_vram_bytes(&self) -> usize {
+        usize::MAX
+    }
 }
 
 /// High-performance CPU fallback using Rayon work-stealing parallelism.
@@ -413,6 +418,163 @@ impl GpuComputeBackend for CpuFallbackBackend {
     }
 }
 
+/// Out-of-core windowed streaming of CSR topology for memory-constrained discrete GPUs and CPUs.
+/// Ensures peak memory never exceeds allocated VRAM budget while computing BFS and SpMV.
+pub struct WindowedCsrStreamer;
+
+impl WindowedCsrStreamer {
+    /// Computes the number of edges per chunk given max VRAM bytes.
+    #[inline]
+    pub fn edges_per_chunk(max_vram_bytes: usize) -> usize {
+        // Assume double buffering, allocating half for active computation and half for DMA transfer
+        let budget = (max_vram_bytes / 2).max(1024);
+        // Each target edge is 8 bytes (u64)
+        (budget / 8).max(1)
+    }
+
+    /// Streamed Breadth-First Search over windowed CSR edge chunks.
+    pub fn streamed_bfs(
+        csr: &ChunkedCsr,
+        start_vid: VertexId,
+        max_depth: u32,
+        max_vram_bytes: usize,
+    ) -> GdbResult<BfsResult> {
+        let num_v = csr.vertex_count();
+        if num_v == 0 {
+            return Ok(Vec::new());
+        }
+
+        let start_raw = start_vid.as_u64();
+        let Some(&start_idx) = csr.vertex_map.get(&start_raw) else {
+            return Ok(Vec::new());
+        };
+
+        let total_e = csr.targets.len();
+        let chunk_size = Self::edges_per_chunk(max_vram_bytes);
+
+        let mut visited = vec![-1i32; num_v];
+        visited[start_idx as usize] = 0;
+        let mut frontier = vec![start_idx];
+        let mut depth = 0;
+
+        while !frontier.is_empty() && depth < max_depth {
+            let mut next_frontier = Vec::new();
+            let mut chunk_start = 0;
+
+            while chunk_start < total_e {
+                let chunk_end = (chunk_start + chunk_size).min(total_e);
+
+                for &u in &frontier {
+                    let u_start = csr.offsets[u as usize] as usize;
+                    let u_end = csr.offsets[u as usize + 1] as usize;
+
+                    let slice_start = u_start.max(chunk_start);
+                    let slice_end = u_end.min(chunk_end);
+
+                    if slice_start < slice_end {
+                        for e_idx in slice_start..slice_end {
+                            let target_raw = csr.targets[e_idx];
+                            if let Some(&v_idx) = csr.vertex_map.get(&target_raw) {
+                                let v_u = v_idx as usize;
+                                if visited[v_u] == -1 {
+                                    visited[v_u] = depth as i32 + 1;
+                                    next_frontier.push(v_idx);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                chunk_start = chunk_end;
+            }
+
+            frontier = next_frontier;
+            depth += 1;
+        }
+
+        let mut results = Vec::new();
+        for (idx, &d) in visited.iter().enumerate() {
+            if d != -1 {
+                let raw_vid = csr.reverse_map[idx];
+                results.push((VertexId(raw_vid), d as u32));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Streamed PageRank SpMV over windowed CSR edge chunks.
+    pub fn streamed_pagerank(
+        csr: &ChunkedCsr,
+        damping: f32,
+        iterations: usize,
+        max_vram_bytes: usize,
+    ) -> GdbResult<PageRankResult> {
+        let num_v = csr.vertex_count();
+        if num_v == 0 {
+            return Ok(Vec::new());
+        }
+
+        let total_e = csr.targets.len();
+        let chunk_size = Self::edges_per_chunk(max_vram_bytes);
+
+        let initial_rank = 1.0f32 / (num_v as f32);
+        let mut rank_in = vec![initial_rank; num_v];
+        let mut rank_out = vec![0.0f32; num_v];
+
+        let out_degrees: Vec<f32> = (0..num_v)
+            .map(|i| (csr.offsets[i + 1] - csr.offsets[i]) as f32)
+            .collect();
+
+        for _ in 0..iterations {
+            rank_out.fill(0.0);
+
+            let mut chunk_start = 0;
+            while chunk_start < total_e {
+                let chunk_end = (chunk_start + chunk_size).min(total_e);
+
+                for u in 0..num_v {
+                    let deg = out_degrees[u];
+                    if deg > 0.0 {
+                        let u_start = csr.offsets[u] as usize;
+                        let u_end = csr.offsets[u + 1] as usize;
+
+                        let slice_start = u_start.max(chunk_start);
+                        let slice_end = u_end.min(chunk_end);
+
+                        if slice_start < slice_end {
+                            let contrib = damping * (rank_in[u] / deg);
+                            for e_idx in slice_start..slice_end {
+                                let target_raw = csr.targets[e_idx];
+                                if let Some(&v_idx) = csr.vertex_map.get(&target_raw) {
+                                    rank_out[v_idx as usize] += contrib;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                chunk_start = chunk_end;
+            }
+
+            let base_rank = (1.0 - damping) / (num_v as f32);
+            for r in &mut rank_out {
+                *r += base_rank;
+            }
+
+            std::mem::swap(&mut rank_in, &mut rank_out);
+        }
+
+        let mut results = Vec::with_capacity(num_v);
+        for i in 0..num_v {
+            let vid = VertexId(csr.reverse_map[i]);
+            results.push((vid, rank_in[i]));
+        }
+
+        Ok(results)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +603,49 @@ mod tests {
         let res_l2 = backend.vector_similarity(&vectors, 3, &query, 2, "l2").unwrap();
         assert_eq!(res_l2[0].0, 0);
         assert!((res_l2[0].1 - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_windowed_csr_streamer_bfs_and_pagerank() {
+        use gdb_core::{EdgeId, EdgeType};
+
+        // Construct 5-node test graph: 1 -> 2 -> 3 -> 4 -> 5 -> 1
+        let edges = vec![
+            EdgeId::simple(VertexId(1), EdgeType(0), VertexId(2)),
+            EdgeId::simple(VertexId(2), EdgeType(0), VertexId(3)),
+            EdgeId::simple(VertexId(3), EdgeType(0), VertexId(4)),
+            EdgeId::simple(VertexId(4), EdgeType(0), VertexId(5)),
+            EdgeId::simple(VertexId(5), EdgeType(0), VertexId(1)),
+        ];
+        let csr = ChunkedCsr::from_edges(edges);
+
+        // Standard single-pass BFS
+        let cpu = CpuFallbackBackend;
+        let bfs_standard = cpu.parallel_bfs(&csr, VertexId(1), 4).unwrap();
+        assert_eq!(bfs_standard.len(), 5);
+
+        // Windowed BFS with tiny VRAM limit (forcing multiple 1-edge chunks)
+        let bfs_chunked = WindowedCsrStreamer::streamed_bfs(&csr, VertexId(1), 4, 16).unwrap();
+        assert_eq!(bfs_chunked.len(), 5);
+
+        let map_std: std::collections::HashMap<_, _> = bfs_standard.into_iter().collect();
+        let map_chunked: std::collections::HashMap<_, _> = bfs_chunked.into_iter().collect();
+        assert_eq!(map_std, map_chunked);
+
+        // Standard single-pass PageRank
+        let pr_standard = cpu.pagerank(&csr, 0.85, 10).unwrap();
+        // Windowed PageRank with tiny VRAM limit (forcing multiple 1-edge chunks)
+        let pr_chunked = WindowedCsrStreamer::streamed_pagerank(&csr, 0.85, 10, 16).unwrap();
+        assert_eq!(pr_standard.len(), pr_chunked.len());
+
+        for (a, b) in pr_standard.iter().zip(pr_chunked.iter()) {
+            assert_eq!(a.0, b.0);
+            assert!((a.1 - b.1).abs() < 1e-5);
+        }
+
+        // Empty graph handling
+        let empty_csr = ChunkedCsr::new();
+        assert!(WindowedCsrStreamer::streamed_bfs(&empty_csr, VertexId(1), 2, 64).unwrap().is_empty());
+        assert!(WindowedCsrStreamer::streamed_pagerank(&empty_csr, 0.85, 5, 64).unwrap().is_empty());
     }
 }

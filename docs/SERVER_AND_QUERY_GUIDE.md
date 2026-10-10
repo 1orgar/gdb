@@ -2,7 +2,7 @@
 
 # GDB: Server Configuration Guide & Query Reference
 
-Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.5.0** (Vermeer).
+Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.5.1** (Vermeer).
 
 ---
 
@@ -12,7 +12,7 @@ Each GDB server node (`gdb-server`) combines:
 - A two-tier in-memory engine (Chunked-CSR topology + Delta MemTable with MVCC).
 - Concurrent secondary property indexes (`DashMap`) with automated maintenance on mutations.
 - A Multi-Raft consensus engine with local append-only WAL journal.
-- Hardware compute acceleration (Apple Metal UMA Zero-Copy / NVIDIA CUDA / CPU SIMD).
+- Hardware compute acceleration (Apple Metal UMA Zero-Copy / NVIDIA CUDA with Discrete Out-of-Core Paging / CPU SIMD).
 - Transport layer: Apache Arrow Flight (gRPC) + HTTP REST API (:8847).
 - Cluster peer replication (`/raft/replicate`).
 - Schema introspection endpoint (`/schema`).
@@ -40,6 +40,7 @@ gdb-server [OPTIONS]
 | `--enable-gpu` | — | `GDB_ENABLE_GPU` | `bool` | `false` | **Enable GPU Acceleration:** Default is `false` (CPU SIMD). |
 | `--gpu-device` | — | `GDB_GPU_DEVICE` | `usize` | `0` | **Target GPU Index:** Device ID in multi-GPU environments (Tesla V100, A100, H100, RTX). |
 | `--gpu-offload-threshold` | — | `GDB_GPU_THRESHOLD` | `usize` | `10000` | **Offload Threshold:** Minimum number of graph edges before offloading computations to GPU. |
+| `--gpu-max-vram-mb` | — | `GDB_GPU_MAX_VRAM_MB` | `usize` | `2048` | **Max Discrete GPU VRAM (MB):** Maximum video memory allocation before switching to Windowed Chunked CSR Streaming out-of-core paging. Prevents GPU OOM on large graphs. |
 | `--s3-bucket` | — | `AWS_BUCKET` | `string` | *(empty)* | AWS S3 or MinIO bucket name for tiered storage snapshots. |
 | `--s3-endpoint` | — | `AWS_ENDPOINT` | `string` | *(empty)* | Custom S3 endpoint URL (e.g. `http://localhost:9000` for MinIO). |
 | `--s3-region` | — | `AWS_REGION` | `string` | `us-east-1` | S3 AWS region. |
@@ -98,8 +99,14 @@ SHOW RESOURCES;
 
 GDB auto-detects host hardware capabilities:
 - **Apple Silicon (M1/M2/M3/M4/M5 on macOS):** **Apple Metal Compute Backend** with **Unified Memory Architecture (UMA Zero-Copy)**.
-- **Linux x86_64 / NVIDIA GPU:** **NVIDIA CUDA Backend** supporting Tesla V100, A100, H100, and RTX GPUs.
+- **Linux x86_64 / NVIDIA GPU:** **NVIDIA CUDA Backend** supporting Tesla V100, A100, H100, and RTX GPUs with **Discrete GPU Out-of-Core Memory Paging**.
 - **CPU SIMD Fallback:** Automatically active when `--enable-gpu false` or when no compatible GPU is present.
+
+#### Discrete GPU Out-of-Core Memory Paging (v0.5.1)
+When computing massive graphs that exceed discrete GPU video memory (VRAM), naive CUDA page faults (`cuMemAllocManaged`) cause catastrophic PCIe page-fault thrashing for random graph traversals. GDB implements high-throughput **Windowed Chunked CSR Streaming with Double-Buffering**:
+- The compact `offsets` array ($4 \times |V|$ bytes) is permanently resident in VRAM.
+- Large `targets` adjacency arrays ($8 \times |E|$ bytes) are partitioned into fixed-size windows bounded by `--gpu-max-vram-mb` (default: 2048 MB).
+- Adjacent windows are streamed across PCIe over asynchronous DMA streams while GPU compute warps process the active window, achieving maximum PCIe saturation with zero GPU warp stalls.
 
 #### Supported Compute Kernels:
 - `parallel_bfs_step` / `cuda_bfs_frontier_kernel` — Parallel BFS wave expansion.
@@ -107,6 +114,7 @@ GDB auto-detects host hardware capabilities:
 - `louvain_step` / `cuda_louvain_kernel` — Modularity community detection.
 - `wcc_step` / `cuda_wcc_kernel` — Component label propagation.
 - `triangle_count_step` / `cuda_triangle_count_kernel` — Adjacency list intersection.
+- `WindowedCsrStreamer` — Out-of-core chunked streaming BFS and PageRank.
 
 ---
 

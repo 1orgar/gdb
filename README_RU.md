@@ -2,12 +2,12 @@
 
 # GDB — Распределенная высокопроизводительная In-Memory Графовая СУБД (Альтернатива Nebula Graph)
 
-[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.5.1-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-80.6%25-brightgreen)](docs/COVERAGE.md)
+[![Coverage](https://img.shields.io/badge/coverage-80.8%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-Высокопроизводительный распределенный HTAP графовый движок СУБД на **Rust**, включающий in-memory топологию Compressed Sparse Row (CSR), столбчатое хранение свойств Apache Arrow, поддержку языка openCypher/GQL и DML мутаций, вторичные индексы свойств, беслидерное кольцо Multi-Raft репликации, многоуровневое хранилище с персистентностью в S3 (Parquet), распределенный MPP обмен через Apache Arrow Flight, **аппаратное GPU-ускорение Apple Metal (UMA Zero-Copy) / NVIDIA CUDA**, нативные **векторные эмбеддинги & поиск сходства**, и **Cost-Based Optimizer (CBO)**.
+Высокопроизводительный распределенный HTAP графовый движок СУБД на **Rust**, включающий in-memory топологию Compressed Sparse Row (CSR), столбчатое хранение свойств Apache Arrow, поддержку языка openCypher/GQL и DML мутаций, вторичные индексы свойств, беслидерное кольцо Multi-Raft репликации, многоуровневое хранилище с персистентностью в S3 (Parquet), распределенный MPP обмен через Apache Arrow Flight, **аппаратное GPU-ускорение Apple Metal (UMA Zero-Copy) / NVIDIA CUDA с пейджингом памяти дискретных GPU**, нативные **векторные эмбеддинги & поиск сходства**, и **Cost-Based Optimizer (CBO)**.
 
 ---
 
@@ -34,13 +34,14 @@
    - **Поиск векторного сходства:** `CALL vector.similaritySearch(label, property, query_vector, k, metric)` с поддержкой метрик косинусного сходства (`cosine`), скалярного произведения (`dot`) и евклидова расстояния (`l2`).
    - **Оптимизатор на основе стоимости (CBO):** `ANALYZE GRAPH;` со сбором статистики распределения степеней и кардинальности меток.
 
-4. **Аппаратное GPU-ускорение (Metal на Mac / CUDA на Linux):**
+4. **Аппаратное GPU-ускорение (Metal / CUDA) и Out-Of-Core пейджинг памяти дискретных GPU:**
    - **Максимальный GPU Offload графовых операций:** Автоматический перенос на GPU для обходов переменной длины (`VarLengthExpand` wavefront BFS), вычисления векторного сходства и графовых алгоритмов.
+   - **Пейджинг памяти дискретных GPU (Out-Of-Core):** Оконная потоковая передача CSR (Windowed Chunked CSR Streaming) с двойной буферизацией предотвращает ошибки Out-Of-Memory (OOM) на дискретных GPU (NVIDIA CUDA), когда объем графа превышает объем видеопамяти VRAM (`--gpu-max-vram-mb`). Легковесный массив смещений `offsets` удерживается в VRAM, а порции целевых вершин `targets` асинхронно передаются по шине PCIe через DMA.
    - **Apple Silicon (M-серия):** Архитектура единой памяти **Unified Memory Architecture (UMA)** позволяет графическому процессору читать топологию графа из RAM **напрямую с нулевой стоимостью копирования (Zero-Copy)**.
    - **Linux NVIDIA (CUDA):** Нативный CudaComputeBackend в `gdb-gpu` для параллельных вычислений на серверных GPU.
    - **CPU SIMD Fallback:** При выключенном GPU или отсутствии графического процессора автоматически используется векторизованный параллельный бэкенд на Rayon.
 
-5. **GDB Studio v0.5.0 (Интерактивный Web Workspace):**
+5. **GDB Studio v0.5.1 (Интерактивный Web Workspace):**
    - **Выполнение скриптов «Run All»:** Индикатор прогресса шагов (`Step: X / Y`), пакетное исполнение и подсветка ошибок.
    - **Инспектор векторов:** Аккуратное моноширинное форматирование многомерных векторов и скоров сходства.
    - **Чистый каталог по умолчанию & Interactive Schema Manager:** Просмотр, создание, изменение и удаление сущностей визуально.

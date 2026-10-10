@@ -2,7 +2,7 @@
 
 # GDB: Руководство по запуску, конфигурированию сервера и справочник запросов
 
-Полная техническая документация по эксплуатации распределенной in-memory графовой СУБД **GDB** (высокопроизводительный аналог Nebula Graph / Nebula Enterprise) версии **v0.5.0** (Vermeer).
+Полная техническая документация по эксплуатации распределенной in-memory графовой СУБД **GDB** (высокопроизводительный аналог Nebula Graph / Nebula Enterprise) версии **v0.5.1** (Vermeer).
 
 ---
 
@@ -12,7 +12,7 @@
 - Двухуровневое in-memory хранилище (Chunked-CSR топология + Delta MemTable с MVCC).
 - Вторичные индексы свойств вершин (`DashMap`) с автоподдержанием при мутациях.
 - Движок распределенного консенсуса Multi-Raft с локальным append-only WAL журналом.
-- Аппаратный ускоритель вычислений (Apple Metal Compute UMA Zero-Copy / NVIDIA CUDA / CPU SIMD).
+- Аппаратный ускоритель вычислений (Apple Metal Compute UMA Zero-Copy / NVIDIA CUDA с Out-of-Core пейджингом памяти / CPU SIMD).
 - Транспортный уровень: Apache Arrow Flight (gRPC) + HTTP REST API (:8847).
 - Сетевую репликацию мутаций на ведомые узлы кластера (`/raft/replicate`).
 - Эндпоинт интроспекции схемы каталога (`/schema`).
@@ -40,6 +40,7 @@ gdb-server [OPTIONS]
 | `--enable-gpu` | — | `GDB_ENABLE_GPU` | `bool` | `false` | **Флаг включения GPU:** По умолчанию выключено (`false`) в пользу векторизованного CPU SIMD. |
 | `--gpu-device` | — | `GDB_GPU_DEVICE` | `usize` | `0` | **Выбор конкретного GPU:** Индекс графического процессора в мульти-GPU системах (Tesla V100, A100, H100, RTX). |
 | `--gpu-offload-threshold` | — | `GDB_GPU_THRESHOLD` | `usize` | `10000` | **Порог передачи на GPU:** Минимальное количество ребер графа для переключения вычислений на GPU. |
+| `--gpu-max-vram-mb` | — | `GDB_GPU_MAX_VRAM_MB` | `usize` | `2048` | **Лимит видеопамяти дискретного GPU (МБ):** Максимальный объем VRAM перед включением оконного потокового пейджинга Windowed Chunked CSR Streaming. Предотвращает GPU OOM на сверхбольших графах. |
 | `--s3-bucket` | — | `AWS_BUCKET` | `string` | *(пусто)* | Имя бакета AWS S3 или MinIO. При указании активирует модуль многоуровневого хранения (Tiered Storage) и команду `snapshot;`. |
 | `--s3-endpoint` | — | `AWS_ENDPOINT` | `string` | *(пусто)* | Пользовательский URL S3-совместимого сервиса (например, `http://localhost:9000` для локального MinIO или Ceph). |
 | `--s3-region` | — | `AWS_REGION` | `string` | `us-east-1` | Регион AWS S3 (например, `eu-central-1`, `us-east-1`). |
@@ -98,8 +99,14 @@ SHOW RESOURCES;
 
 Сервер автоматически определяет аппаратную платформу при запуске:
 - **Apple Silicon (M1/M2/M3/M4/M5 на macOS):** Активируется **Apple Metal Compute Backend** с архитектурой **Unified Memory (UMA Zero-Copy)**.
-- **Linux x86_64 / amd64 c NVIDIA GPU:** Активируется **NVIDIA CUDA Backend** с поддержкой Tesla V100, A100, H100, RTX.
+- **Linux x86_64 / amd64 c NVIDIA GPU:** Активируется **NVIDIA CUDA Backend** с поддержкой Tesla V100, A100, H100, RTX и **пейджингом памяти дискретных GPU**.
 - **CPU SIMD Fallback:** При `--enable-gpu false` или отсутствии GPU используется параллельный векторизованный бэкенд на Rayon.
+
+#### Пейджинг памяти дискретных GPU (v0.5.1)
+При обработке сверхбольших графов, размер которых превышает физическую память дискретных GPU (VRAM), стандартные механизмы page-faults (`cuMemAllocManaged`) вызывают катастрофический троттлинг шины PCIe из-за случайного доступа к вершинам графа. В GDB реализована высокопроизводительная оконная потоковая передача **Windowed Chunked CSR Streaming с двойной буферизацией**:
+- Компактный массив смещений `offsets` ($4 \times |V|$ байт) постоянно резидентен в памяти VRAM.
+- Массив смежных ребер `targets` ($8 \times |E|$ байт) нарезается на непрерывные порции (окна), размер которых ограничен параметром `--gpu-max-vram-mb` (по умолчанию: 2048 МБ).
+- Следующее окно асинхронно передается по шине PCIe через DMA-потоки параллельно с вычислениями GPU над текущим окном, обеспечивая 100% утилизацию пропускной способности шины без задержек варпов GPU.
 
 #### Поддерживаемые GPU-ядра и алгоритмы:
 - `parallel_bfs_step` / `cuda_bfs_frontier_kernel` — параллельное расширение фронтира волны BFS.
@@ -107,6 +114,7 @@ SHOW RESOURCES;
 - `louvain_step` / `cuda_louvain_kernel` — оптимизация модулярности сообществ.
 - `wcc_step` / `cuda_wcc_kernel` — распространение идентификаторов компонент связности.
 - `triangle_count_step` / `cuda_triangle_count_kernel` — пересечение списков смежности соседей.
+- `WindowedCsrStreamer` — потоковый пейджинг обходов BFS и PageRank для графов, превышающих VRAM.
 
 ---
 

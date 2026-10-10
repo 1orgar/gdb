@@ -122,6 +122,10 @@ pub struct Args {
     /// Minimum number of edges required to trigger GPU hardware offload (default: 10000)
     #[arg(long, env = "GDB_GPU_THRESHOLD", default_value_t = 10_000)]
     pub gpu_offload_threshold: usize,
+
+    /// Maximum VRAM allocation in Megabytes for discrete GPUs before chunked streaming paging (default: 2048 MB)
+    #[arg(long, env = "GDB_GPU_MAX_VRAM_MB", default_value_t = 2048)]
+    pub gpu_max_vram_mb: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -165,6 +169,7 @@ pub struct AppState {
     pub gpu_device: u32,
     pub gpu_backend: String,
     pub gpu_threshold: usize,
+    pub gpu_max_vram_mb: usize,
     pub s3_manager: Option<Arc<S3StorageManager>>,
     pub s3_bucket: Option<String>,
 }
@@ -218,6 +223,7 @@ async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
         "gpu_device": state.gpu_device,
         "gpu_backend": state.gpu_backend,
         "gpu_threshold": state.gpu_threshold,
+        "gpu_max_vram_mb": state.gpu_max_vram_mb,
         "status": "UP"
     }))
 }
@@ -258,7 +264,8 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
         "gpu_enabled": state.gpu_enabled,
         "gpu_device": state.gpu_device,
         "gpu_backend": state.gpu_backend,
-        "gpu_threshold": state.gpu_threshold
+        "gpu_threshold": state.gpu_threshold,
+        "gpu_max_vram_mb": state.gpu_max_vram_mb
     }))
 }
 
@@ -301,12 +308,23 @@ async fn handle_gpu(State(state): State<AppState>) -> impl IntoResponse {
         "Host RAM (CPU SIMD Fallback)"
     };
 
+    let paging_strategy = if state.gpu_enabled {
+        #[cfg(target_os = "macos")]
+        { "Unified Memory (UMA Zero-Copy)" }
+        #[cfg(not(target_os = "macos"))]
+        { "Windowed Double-Buffered CSR Streaming (Discrete Out-Of-Core Paging)" }
+    } else {
+        "None (CPU Fallback)"
+    };
+
     Json(serde_json::json!({
         "enabled": state.gpu_enabled,
         "device_id": state.gpu_device,
         "backend": state.gpu_backend,
         "threshold_edges": state.gpu_threshold,
+        "max_vram_mb": state.gpu_max_vram_mb,
         "memory_model": memory_model,
+        "paging_strategy": paging_strategy,
         "active": state.gpu_enabled,
         "status": if state.gpu_enabled { "Active" } else { "Disabled (pass --enable-gpu)" },
         "supported_kernels": [
@@ -314,7 +332,8 @@ async fn handle_gpu(State(state): State<AppState>) -> impl IntoResponse {
             "Vectorized PageRank Iteration",
             "Cosine / Jaccard Graph Kernel",
             "Parallel Vector Similarity Search (SIMD/GPU)",
-            "Multi-Hop Traversal Wavefront BFS"
+            "Multi-Hop Traversal Wavefront BFS",
+            "Windowed Out-Of-Core CSR Streaming"
         ]
     }))
 }
@@ -1080,6 +1099,7 @@ pub async fn create_test_server(
         gpu_device: 0,
         gpu_backend: "Disabled".to_string(),
         gpu_threshold: 10_000,
+        gpu_max_vram_mb: 2048,
         s3_manager: None,
         s3_bucket: None,
     };
@@ -1108,13 +1128,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!(" Distributed HTAP In-Memory Graph Database (Nebula Alternative)");
     println!("\x1b[0m");
 
-    let gpu_dispatcher = GpuDispatcher::new(args.enable_gpu, args.gpu_device, args.gpu_offload_threshold);
+    let max_vram_bytes = args.gpu_max_vram_mb * 1024 * 1024;
+    let gpu_dispatcher = GpuDispatcher::new_with_vram(
+        args.enable_gpu,
+        args.gpu_device,
+        args.gpu_offload_threshold,
+        max_vram_bytes,
+    );
     println!(
-        "\x1b[1;32m[+] Hardware Acceleration:\x1b[0m {} (Status: {}, Device: #{}, Threshold: {} edges)",
+        "\x1b[1;32m[+] Hardware Acceleration:\x1b[0m {} (Status: {}, Device: #{}, Threshold: {} edges, VRAM Limit: {} MB)",
         gpu_dispatcher.backend_name(),
         if args.enable_gpu { "Active" } else { "Disabled" },
         args.gpu_device,
-        args.gpu_offload_threshold
+        args.gpu_offload_threshold,
+        args.gpu_max_vram_mb
     );
     println!(
         "\x1b[1;32m[+] Node ID:\x1b[0m {} | \x1b[1;32mPartitions:\x1b[0m {}",
@@ -1241,6 +1268,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         gpu_device: args.gpu_device,
         gpu_backend: gpu_dispatcher.backend_name().to_string(),
         gpu_threshold: gpu_dispatcher.threshold_edges,
+        gpu_max_vram_mb: args.gpu_max_vram_mb,
         s3_manager,
         s3_bucket: args.s3_bucket.clone(),
     };

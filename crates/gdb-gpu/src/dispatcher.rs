@@ -18,6 +18,8 @@ pub struct GpuDispatcher {
     pub device_id: u32,
     /// Minimum number of edges required to trigger GPU hardware dispatch
     pub threshold_edges: usize,
+    /// Maximum VRAM allocation (in bytes) before switching to windowed CSR streaming (discrete GPU paging)
+    pub max_vram_bytes: usize,
 }
 
 impl Default for GpuDispatcher {
@@ -27,6 +29,9 @@ impl Default for GpuDispatcher {
 }
 
 impl GpuDispatcher {
+    /// Default VRAM limit for discrete GPUs (2 GB)
+    pub const DEFAULT_MAX_VRAM_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
     /// Creates a disabled dispatcher running purely on CPU SIMD fallback.
     pub fn disabled() -> Self {
         Self {
@@ -34,6 +39,7 @@ impl GpuDispatcher {
             enabled: false,
             device_id: 0,
             threshold_edges: 10_000,
+            max_vram_bytes: Self::DEFAULT_MAX_VRAM_BYTES,
         }
     }
 
@@ -44,12 +50,23 @@ impl GpuDispatcher {
 
     /// Creates a new dispatcher with explicit enabled flag, device id, and offload threshold.
     pub fn new(enabled: bool, device_id: u32, threshold_edges: usize) -> Self {
+        Self::new_with_vram(enabled, device_id, threshold_edges, Self::DEFAULT_MAX_VRAM_BYTES)
+    }
+
+    /// Creates a new dispatcher with explicit enabled flag, device id, offload threshold, and max VRAM bytes.
+    pub fn new_with_vram(
+        enabled: bool,
+        device_id: u32,
+        threshold_edges: usize,
+        max_vram_bytes: usize,
+    ) -> Self {
         if !enabled {
             return Self {
                 backend: Arc::new(CpuFallbackBackend),
                 enabled: false,
                 device_id,
                 threshold_edges,
+                max_vram_bytes,
             };
         }
 
@@ -59,7 +76,7 @@ impl GpuDispatcher {
         #[cfg(target_os = "linux")]
         let backend: Arc<dyn GpuComputeBackend> = {
             if CudaComputeBackend::is_available() {
-                Arc::new(CudaComputeBackend::with_device(device_id))
+                Arc::new(CudaComputeBackend::with_device_and_vram(device_id, max_vram_bytes))
             } else {
                 Arc::new(CpuFallbackBackend)
             }
@@ -73,6 +90,7 @@ impl GpuDispatcher {
             enabled: true,
             device_id,
             threshold_edges,
+            max_vram_bytes,
         }
     }
 
@@ -81,12 +99,24 @@ impl GpuDispatcher {
         self
     }
 
+    pub fn with_max_vram(mut self, max_vram_bytes: usize) -> Self {
+        self.max_vram_bytes = max_vram_bytes;
+        if self.enabled {
+            return Self::new_with_vram(true, self.device_id, self.threshold_edges, max_vram_bytes);
+        }
+        self
+    }
+
     pub fn with_device(mut self, device_id: u32) -> Self {
         self.device_id = device_id;
         if self.enabled {
-            return Self::new(true, device_id, self.threshold_edges);
+            return Self::new_with_vram(true, device_id, self.threshold_edges, self.max_vram_bytes);
         }
         self
+    }
+
+    pub fn max_vram_bytes(&self) -> usize {
+        self.max_vram_bytes
     }
 
     pub fn backend_name(&self) -> &'static str {

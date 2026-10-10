@@ -88,6 +88,7 @@ REP_MODE="sync"
 ENABLE_GPU=false
 GPU_DEVICE=0
 GPU_THRESHOLD=10000
+GPU_MAX_VRAM_MB=2048
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -131,6 +132,10 @@ while [[ $# -gt 0 ]]; do
             GPU_THRESHOLD="$2"
             shift 2
             ;;
+        --gpu-max-vram-mb)
+            GPU_MAX_VRAM_MB="$2"
+            shift 2
+            ;;
         *)
             shift
             ;;
@@ -144,8 +149,8 @@ fi
 GPU_FLAGS=""
 GPU_DESC="Disabled"
 if [ "$ENABLE_GPU" = true ]; then
-    GPU_FLAGS="--enable-gpu --gpu-device $GPU_DEVICE --gpu-offload-threshold $GPU_THRESHOLD"
-    GPU_DESC="Active (Device #$GPU_DEVICE, Threshold: $GPU_THRESHOLD edges)"
+    GPU_FLAGS="--enable-gpu --gpu-device $GPU_DEVICE --gpu-offload-threshold $GPU_THRESHOLD --gpu-max-vram-mb $GPU_MAX_VRAM_MB"
+    GPU_DESC="Active (Device #$GPU_DEVICE, Threshold: $GPU_THRESHOLD edges, VRAM: $GPU_MAX_VRAM_MB MB)"
 fi
 
 MODE_UPPER=$(echo "$REP_MODE" | tr '[:lower:]' '[:upper:]')

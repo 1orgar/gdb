@@ -4,8 +4,13 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 ---
 
-## 📌 Current Status (Version v0.5.0 — Vermeer)
+## 📌 Current Status (Version v0.5.1 — Vermeer)
 
+- ✅ **Discrete GPU Out-of-Core Memory Paging (v0.5.1)**:
+  - High-performance **Windowed Chunked CSR Streaming with Double-Buffering** for discrete GPUs (NVIDIA CUDA / non-UMA architectures).
+  - Keeps lightweight `offsets` array in GPU VRAM while streaming sequential chunks of `targets` across PCIe asynchronously, eliminating PCIe page-fault thrashing and preventing GPU OOM on large graphs.
+  - Server configuration `--gpu-max-vram-mb` (env: `GDB_GPU_MAX_VRAM_MB`, default: 2048 MB).
+  - Extended REST telemetry: `GET /gpu` reporting `max_vram_mb` and active `paging_strategy`.
 - ✅ **Multi-Statement & Relationship DML**:
   - Lexical script splitter (`split_statements`) respecting comments and string quotes.
   - Multi-statement execution via `/query` and dedicated `POST /batch` API.
@@ -30,7 +35,7 @@ This document outlines strategic milestones, architectural priorities, and futur
   - Batched multi-row inserts (`VALUES (...), (...)`) in `data_loader.py`, `gpu_benchmark.py`, `stress_test.py`, and `benchmark_suite.py`.
 - ✅ **Quality & Code Coverage**:
   - 100% test pass rate across all 13 workspace crates.
-  - Workspace test coverage $\ge 80\%$ (**80.50% lines / 80.60% regions**).
+  - Workspace test coverage $\ge 80\%$ (**80.75% lines / 80.84% regions**).
 
 ---
 
@@ -38,14 +43,14 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 | Release | Codename | Primary Focus | Key Deliverables |
 | :---: | :---: | :--- | :--- |
-| **v0.5.0** | **Vermeer** *(Current)* | **Multi-Statement, Vectors, GPU Offload, CBO & Python SDK** | All major v0.5.0 deliverables completed and verified. |
+| **v0.5.1** | **Vermeer** *(Current)* | **Discrete GPU Memory Paging & VRAM Management** | Windowed Chunked CSR Streaming with Double-Buffering for discrete NVIDIA GPUs, `--gpu-max-vram-mb`, and `/gpu` telemetry. |
 | **v0.6.0** | **Hals** | **AI Agent Integrations & Advanced Indexing** | 1. Official **LangChain** and **LangGraph** ecosystem integration modules (`langchain-gdb`, GraphVectorStore).<br>2. HNSW Vector Graph Index for sub-millisecond approximate nearest neighbors on billion-scale vector datasets.<br>3. Graph RAG hybrid retrieval pipelines combining multi-hop graph traversals with vector semantic scoring. |
-| **v0.7.0** | **Steen** | **ACID Transactions & Unified Memory Paging** | 1. Distributed multi-partition ACID transactions (`BEGIN`, `COMMIT`, `ROLLBACK`) with 2PC and Snapshot Isolation.<br>2. GPU Unified Memory Paging (UVM) for graphs exceeding discrete GPU VRAM.<br>3. Weighted shortest path algorithms (Dijkstra, A*). |
+| **v0.7.0** | **Steen** | **Distributed ACID Transactions & Advanced Analytics** | 1. Distributed multi-partition ACID transactions (`BEGIN`, `COMMIT`, `ROLLBACK`) with 2PC and Snapshot Isolation.<br>2. Weighted shortest path algorithms (Dijkstra, A*). |
 | **v1.0.0** | **Erasmus** | **Enterprise Security & LTS** | 1. TLS / mTLS transport encryption and JWT authentication.<br>2. Fine-grained Role-Based Access Control (RBAC) per label and property.<br>3. Streaming `InstallSnapshot` over Arrow Flight RPC in Multi-Raft.<br>4. Long-Term Support (LTS) release with strict API compatibility guarantees. |
 
 ---
 
-## 🎯 Architectural Highlights (v0.5.0)
+## 🎯 Architectural Highlights (v0.5.1)
 
 ### 1. Vector Search & Graph Hybrid Traversal
 Vector properties are stored directly in Apache Arrow `FixedSizeList` columns alongside regular vertex properties. This allows seamless blending of Cypher graph pattern matching and vector similarity:

@@ -59,14 +59,21 @@ async fn test_server_rest_endpoints_comprehensive() {
     // 3. GET /cluster
     let res = client.get(format!("{}/cluster", base_url)).send().await.unwrap();
     assert!(res.status().is_success());
+    let cluster_body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(cluster_body["gpu_max_vram_mb"], 2048);
 
     // 4. GET /resources
     let res = client.get(format!("{}/resources", base_url)).send().await.unwrap();
     assert!(res.status().is_success());
+    let res_body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(res_body["gpu_max_vram_mb"], 2048);
 
     // 5. GET /gpu
     let res = client.get(format!("{}/gpu", base_url)).send().await.unwrap();
     assert!(res.status().is_success());
+    let gpu_body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(gpu_body["max_vram_mb"], 2048);
+    assert!(gpu_body["paging_strategy"].is_string());
 
     // 6. GET /metrics
     let res = client.get(format!("{}/metrics", base_url)).send().await.unwrap();

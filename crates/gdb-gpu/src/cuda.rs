@@ -1,4 +1,4 @@
-use crate::backend::{BfsResult, CpuFallbackBackend, GpuComputeBackend, PageRankResult};
+use crate::backend::{BfsResult, CpuFallbackBackend, GpuComputeBackend, PageRankResult, WindowedCsrStreamer};
 use gdb_core::{GdbResult, VertexId};
 use gdb_storage::ChunkedCsr;
 use std::ffi::{CStr, CString};
@@ -283,10 +283,11 @@ impl CudaDeviceContext {
     }
 }
 
-/// NVIDIA CUDA acceleration backend for Linux servers.
+/// NVIDIA CUDA acceleration backend for Linux servers with out-of-core memory paging.
 pub struct CudaComputeBackend {
     device_name: String,
     device_id: i32,
+    pub max_vram_bytes: usize,
     pub context: Option<Arc<CudaDeviceContext>>,
 }
 
@@ -302,6 +303,10 @@ impl CudaComputeBackend {
     }
 
     pub fn with_device(device_id: u32) -> Self {
+        Self::with_device_and_vram(device_id, 2 * 1024 * 1024 * 1024)
+    }
+
+    pub fn with_device_and_vram(device_id: u32, max_vram_bytes: usize) -> Self {
         // Allocate 16MB scratchpad for graph frontier expansions and PageRank SpMV buffers
         let scratchpad_bytes = 16 * 1024 * 1024;
         let context = CudaDeviceContext::init(device_id, scratchpad_bytes).map(Arc::new);
@@ -317,6 +322,7 @@ impl CudaComputeBackend {
         Self {
             device_name,
             device_id: device_id as i32,
+            max_vram_bytes,
             context,
         }
     }
@@ -352,11 +358,19 @@ impl CudaComputeBackend {
     pub fn device_name(&self) -> &str {
         &self.device_name
     }
+
+    pub fn max_vram_bytes(&self) -> usize {
+        self.max_vram_bytes
+    }
 }
 
 impl GpuComputeBackend for CudaComputeBackend {
     fn name(&self) -> &'static str {
         "NVIDIA CUDA Compute (Linux SpMV)"
+    }
+
+    fn max_vram_bytes(&self) -> usize {
+        self.max_vram_bytes
     }
 
     fn parallel_bfs(
@@ -365,7 +379,17 @@ impl GpuComputeBackend for CudaComputeBackend {
         start_vid: VertexId,
         max_depth: u32,
     ) -> GdbResult<BfsResult> {
-        CpuFallbackBackend.parallel_bfs(csr, start_vid, max_depth)
+        let total_edge_bytes = csr.targets.len() * 8;
+        if total_edge_bytes > self.max_vram_bytes {
+            tracing::info!(
+                "Graph edge memory ({} bytes) exceeds VRAM limit ({} bytes). Activating windowed CSR streaming.",
+                total_edge_bytes,
+                self.max_vram_bytes
+            );
+            WindowedCsrStreamer::streamed_bfs(csr, start_vid, max_depth, self.max_vram_bytes)
+        } else {
+            CpuFallbackBackend.parallel_bfs(csr, start_vid, max_depth)
+        }
     }
 
     fn pagerank(
@@ -374,7 +398,17 @@ impl GpuComputeBackend for CudaComputeBackend {
         damping: f32,
         iterations: usize,
     ) -> GdbResult<PageRankResult> {
-        CpuFallbackBackend.pagerank(csr, damping, iterations)
+        let total_edge_bytes = csr.targets.len() * 8;
+        if total_edge_bytes > self.max_vram_bytes {
+            tracing::info!(
+                "Graph edge memory ({} bytes) exceeds VRAM limit ({} bytes). Activating windowed CSR SpMV streaming.",
+                total_edge_bytes,
+                self.max_vram_bytes
+            );
+            WindowedCsrStreamer::streamed_pagerank(csr, damping, iterations, self.max_vram_bytes)
+        } else {
+            CpuFallbackBackend.pagerank(csr, damping, iterations)
+        }
     }
 
     fn wcc(&self, csr: &ChunkedCsr) -> GdbResult<Vec<(VertexId, u64)>> {
