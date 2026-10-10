@@ -270,3 +270,38 @@ fn test_executor_v050_features() {
     ).unwrap()).unwrap();
     assert!(n2v_res.batch.is_some());
 }
+
+#[test]
+fn test_where_id_pushdown_and_explain() {
+    let (executor, storage, _) = setup_executor();
+
+    executor.execute(parse("CREATE VERTEX Device (name STRING);").unwrap()).unwrap();
+    executor.execute(parse("CREATE EDGE CONNECTED ();").unwrap()).unwrap();
+
+    executor.execute(parse("INSERT VERTEX Device (id, name) VALUES (1, 'Gateway'), (2, 'Sensor1'), (3, 'Sensor2');").unwrap()).unwrap();
+    executor.execute(parse("INSERT EDGE CONNECTED FROM 1 TO 2;").unwrap()).unwrap();
+    executor.execute(parse("INSERT EDGE CONNECTED FROM 1 TO 3;").unwrap()).unwrap();
+    storage.compact();
+
+    // 1. Verify EXPLAIN shows id_filter pushdown in ScanVertices
+    let explain_res = executor.execute(parse("EXPLAIN MATCH (d:Device) WHERE d.id = 1 RETURN d.name;").unwrap()).unwrap();
+    assert!(explain_res.message.contains("ScanVertices") && explain_res.message.contains("id: 1"), "Plan must have id_filter pushdown: {}", explain_res.message);
+    assert!(!explain_res.message.contains("Filter:"), "Redundant Filter operator should not be added when pushed down: {}", explain_res.message);
+
+    // 2. Verify query execution result
+    let res = executor.execute(parse("MATCH (d:Device) WHERE d.id = 1 RETURN d.name;").unwrap()).unwrap();
+    let batch = res.batch.unwrap();
+    assert_eq!(batch.num_rows(), 1);
+    let name_col = batch.column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(name_col.value(0), "Gateway");
+
+    // 3. Verify non-existent ID returns 0 rows
+    let res_none = executor.execute(parse("MATCH (d:Device) WHERE d.id = 9999 RETURN d.name;").unwrap()).unwrap();
+    let count_none = res_none.batch.map(|b| b.num_rows()).unwrap_or(0);
+    assert_eq!(count_none, 0);
+
+    // 4. Multi-hop traversal with WHERE a.id = 1
+    let res_hop = executor.execute(parse("MATCH (a:Device)-[:CONNECTED]->(b:Device) WHERE a.id = 1 RETURN b.name;").unwrap()).unwrap();
+    assert_eq!(res_hop.batch.unwrap().num_rows(), 2);
+}
+

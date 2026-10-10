@@ -1096,7 +1096,18 @@ impl QueryExecutor {
 
         Ok(output_rows)
     }
+}
 
+fn collect_conjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::BinaryOp { left, op: BinaryOperator::And, right } = expr {
+        collect_conjuncts(left, out);
+        collect_conjuncts(right, out);
+    } else {
+        out.push(expr);
+    }
+}
+
+impl QueryExecutor {
     fn create_physical_plan(&self, query: &CypherQuery) -> GdbResult<PhysicalOperator> {
         let schema = self.schema.read();
         let start = &query.pattern.start_node;
@@ -1110,31 +1121,64 @@ impl QueryExecutor {
             (None, LabelId(1))
         };
 
-        // Check for index match in WHERE clause
+        // Check for primary ID filter or secondary index match in WHERE clause
         let mut index_scan = None;
         let mut filter_needed = true;
+        let mut start_id_filter = start.id_filter;
 
         if let Some(ref where_expr) = query.where_clause {
-            if let Expr::BinaryOp { left, op: BinaryOperator::Eq, right } = where_expr {
-                let matched = match (&**left, &**right) {
-                    (Expr::Property { variable, property }, Expr::Literal(lit)) if variable == &start_var => {
-                        Some((property.clone(), lit.clone()))
-                    }
-                    (Expr::Literal(lit), Expr::Property { variable, property }) if variable == &start_var => {
-                        Some((property.clone(), lit.clone()))
-                    }
-                    _ => None,
-                };
+            let mut conjuncts = Vec::new();
+            collect_conjuncts(where_expr, &mut conjuncts);
 
-                if let Some((prop, val)) = matched {
-                    if start.label.is_some() && self.storage.has_vertex_index(label_id_val, &prop) {
+            let mut matched_equalities = Vec::new();
+            for c in &conjuncts {
+                if let Expr::BinaryOp { left, op: BinaryOperator::Eq, right } = c {
+                    match (&**left, &**right) {
+                        (Expr::Property { variable, property }, Expr::Literal(lit)) if variable == &start_var => {
+                            matched_equalities.push((property.clone(), lit.clone()));
+                        }
+                        (Expr::Literal(lit), Expr::Property { variable, property }) if variable == &start_var => {
+                            matched_equalities.push((property.clone(), lit.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // 1. Primary key fast-path: WHERE <start_var>.id = <val> (O(1) direct vertex scan)
+            if start_id_filter.is_none() {
+                for (prop, val) in &matched_equalities {
+                    if prop.eq_ignore_ascii_case("id") || prop.eq_ignore_ascii_case("_id") {
+                        let vid_opt = match val {
+                            DataValue::Int64(i) if *i >= 0 => Some(VertexId(*i as u64)),
+                            DataValue::String(s) => Some(VertexId::from_str_key(s)),
+                            _ => None,
+                        };
+                        if let Some(vid) = vid_opt {
+                            start_id_filter = Some(vid);
+                            if conjuncts.len() == 1 {
+                                filter_needed = false;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 2. Secondary index scan: WHERE <start_var>.<property> = <val>
+            if start_id_filter.is_none() {
+                for (prop, val) in &matched_equalities {
+                    if start.label.is_some() && self.storage.has_vertex_index(label_id_val, prop) {
                         index_scan = Some(PhysicalOperator::IndexScan {
                             var_name: start_var.clone(),
                             label_id: label_id_val,
-                            property: prop,
-                            value: val,
+                            property: prop.clone(),
+                            value: val.clone(),
                         });
-                        filter_needed = false;
+                        if conjuncts.len() == 1 {
+                            filter_needed = false;
+                        }
+                        break;
                     }
                 }
             }
@@ -1146,7 +1190,7 @@ impl QueryExecutor {
             PhysicalOperator::ScanVertices {
                 var_name: start_var.clone(),
                 label_id,
-                id_filter: start.id_filter,
+                id_filter: start_id_filter,
             }
         };
 
@@ -1239,9 +1283,11 @@ impl QueryExecutor {
                 let mut rows = Vec::new();
                 let default_lid = label_id.unwrap_or(LabelId(1));
                 if let Some(target_id) = id_filter {
-                    let mut row = PathRow::default();
-                    row.vertices.insert(var_name.clone(), (*target_id, default_lid));
-                    rows.push(row);
+                    if self.storage.has_vertex(*target_id, *label_id) {
+                        let mut row = PathRow::default();
+                        row.vertices.insert(var_name.clone(), (*target_id, default_lid));
+                        rows.push(row);
+                    }
                 } else {
                     let all_vids = self.storage.get_all_vertex_ids(*label_id);
                     for vid in all_vids {

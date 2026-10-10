@@ -145,6 +145,11 @@ impl VertexPropertyTable {
         self.row_cache.iter().map(|entry| VertexId(*entry.key())).collect()
     }
 
+    /// Checks whether a vertex ID is present in the row cache.
+    pub fn has_vertex(&self, vid: VertexId) -> bool {
+        self.row_cache.contains_key(&vid.as_u64())
+    }
+
     /// Number of vertices stored in the property table.
     pub fn len(&self) -> usize {
         self.row_cache.len()

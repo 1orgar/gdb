@@ -266,6 +266,32 @@ impl PartitionStorageEngine {
         ids.into_iter().collect()
     }
 
+    /// Checks whether a specific vertex ID exists in the graph.
+    pub fn has_vertex(&self, vid: VertexId, label_id: Option<LabelId>) -> bool {
+        let csr = self.csr.read();
+        if csr.vertex_map.contains_key(&vid.as_u64()) {
+            return true;
+        }
+        let guard = self.vertex_properties.read();
+        if let Some(lid) = label_id {
+            if let Some(table) = guard.get(&lid) {
+                if table.has_vertex(vid) {
+                    return true;
+                }
+            }
+        } else {
+            for table in guard.values() {
+                if table.has_vertex(vid) {
+                    return true;
+                }
+            }
+        }
+        if self.delta.contains_vertex(vid) {
+            return true;
+        }
+        false
+    }
+
     fn get_or_create_property_table(&self, label_id: LabelId) -> GdbResult<Arc<VertexPropertyTable>> {
         {
             let guard = self.vertex_properties.read();

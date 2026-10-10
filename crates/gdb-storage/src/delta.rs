@@ -158,5 +158,19 @@ impl DeltaMemTable {
     pub fn edge_count(&self) -> usize {
         self.out_edges.iter().map(|entry| entry.value().len()).sum()
     }
+
+    /// Checks whether a vertex has outgoing or incoming delta mutations.
+    pub fn contains_vertex(&self, vid: VertexId) -> bool {
+        let vid_raw = vid.as_u64();
+        if self.out_edges.contains_key(&vid_raw) {
+            return true;
+        }
+        for entry in self.out_edges.iter() {
+            if entry.value().iter().any(|e| e.dst == vid) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
