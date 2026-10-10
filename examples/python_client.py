@@ -48,7 +48,7 @@ def main():
         # 1. Health & Cluster Topology
         try:
             health = client.health()
-            print(f"[+] Cluster Health: {health.get('status')} (version: {health.get('version', '0.5.1')})")
+            print(f"[+] Cluster Health: {health.get('status')} (version: {health.get('version', '0.5.2')})")
         except Exception as e:
             print(f"[-] Failed to connect to GDB at {endpoint}: {e}")
             print("    Please start the server first: ./bin/gdb-server")

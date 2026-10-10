@@ -4,8 +4,15 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 ---
 
-## 📌 Current Status (Version v0.5.1 — Vermeer)
+## 📌 Current Status (Version v0.5.2 — Huygens)
 
+- ✅ **Query Planner Primary Key Pushdown (v0.5.2)**:
+  - Fast-path pushdown of `WHERE id = <val>` into `PhysicalOperator::ScanVertices { id_filter: Some(vid) }`.
+  - Added $O(1)$ point-lookup vertex existence checks (`has_vertex`) across StorageEngine, VertexPropertyTable, and DeltaMemTable.
+  - Eliminates multi-hop wavefront BFS traversal timeouts and redundant full-graph scans (>5,000x speedup).
+- ✅ **GDB Studio Web UI & Startup Script Overhaul (v0.5.2)**:
+  - Updated `scripts/start_studio.sh` with robust CLI flag parsing (`--port`, `--cluster-url`, `--host`, `--no-browser`) and legacy positional argument compatibility.
+  - Resilient health check retry loop with automatic diagnosis and log dumping on failure.
 - ✅ **Discrete GPU Out-of-Core Memory Paging (v0.5.1)**:
   - High-performance **Windowed Chunked CSR Streaming with Double-Buffering** for discrete GPUs (NVIDIA CUDA / non-UMA architectures).
   - Keeps lightweight `offsets` array in GPU VRAM while streaming sequential chunks of `targets` across PCIe asynchronously, eliminating PCIe page-fault thrashing and preventing GPU OOM on large graphs.
@@ -28,11 +35,10 @@ This document outlines strategic milestones, architectural priorities, and futur
 - ✅ **CBO Optimizer & Graph ML**:
   - Cost-Based Optimization statistics gathering via `ANALYZE GRAPH;`.
   - In-database random walk & Skip-Gram Node2Vec embedding generation (`CALL algo.node2vec(...)`).
-- ✅ **Official Python SDK & Client Benchmark**:
-  - Standalone `gdb-client` Python package with Polars and NetworkX export.
-  - Centralized dependency tracking in `scripts/requirements.txt`.
-  - High-throughput client benchmark script `scripts/py_client_benchmark.py` with automated schema setup/teardown (`--keep-schema`).
-  - Batched multi-row inserts (`VALUES (...), (...)`) in `data_loader.py`, `gpu_benchmark.py`, `stress_test.py`, and `benchmark_suite.py`.
+- ✅ **Official Python Client (`gdb-client` on PyPI)**:
+  - Unified into standalone `gdb-py-client` project published to PyPI (`gdb-client>=0.5.1`).
+  - Zero-copy Polars, Arrow, Pandas, and NetworkX exports.
+  - Parallel Arrow Flight scatter-ingest and REST batch APIs.
 - ✅ **Quality & Code Coverage**:
   - 100% test pass rate across all 13 workspace crates.
   - Workspace test coverage $\ge 80\%$ (**80.75% lines / 80.84% regions**).
@@ -43,7 +49,7 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 | Release | Codename | Primary Focus | Key Deliverables |
 | :---: | :---: | :--- | :--- |
-| **v0.5.1** | **Vermeer** *(Current)* | **Discrete GPU Memory Paging & VRAM Management** | Windowed Chunked CSR Streaming with Double-Buffering for discrete NVIDIA GPUs, `--gpu-max-vram-mb`, and `/gpu` telemetry. |
+| **v0.5.2** | **Huygens** *(Current)* | **Planner Pushdown & Studio Overhaul** | Primary ID pushdown in `ScanVertices`, robust `start_studio.sh` CLI parsing, and PyPI `gdb-client` unification. |
 | **v0.6.0** | **Hals** | **AI Agent Integrations & Advanced Indexing** | 1. Official **LangChain** and **LangGraph** ecosystem integration modules (`langchain-gdb`, GraphVectorStore).<br>2. HNSW Vector Graph Index for sub-millisecond approximate nearest neighbors on billion-scale vector datasets.<br>3. Graph RAG hybrid retrieval pipelines combining multi-hop graph traversals with vector semantic scoring. |
 | **v0.7.0** | **Steen** | **Distributed ACID Transactions & Advanced Analytics** | 1. Distributed multi-partition ACID transactions (`BEGIN`, `COMMIT`, `ROLLBACK`) with 2PC and Snapshot Isolation.<br>2. Weighted shortest path algorithms (Dijkstra, A*). |
 | **v1.0.0** | **Erasmus** | **Enterprise Security & LTS** | 1. TLS / mTLS transport encryption and JWT authentication.<br>2. Fine-grained Role-Based Access Control (RBAC) per label and property.<br>3. Streaming `InstallSnapshot` over Arrow Flight RPC in Multi-Raft.<br>4. Long-Term Support (LTS) release with strict API compatibility guarantees. |

@@ -193,9 +193,10 @@ jobs:
             v0.4.1) CODENAME="Rembrandt" ;;
             v0.4.2) CODENAME="Vermeer" ;;
             v0.5.0) CODENAME="Spinoza" ;;
-            v0.6.0) CODENAME="Huygens" ;;
-            v0.7.0) CODENAME="Erasmus" ;;
-            *)      CODENAME="Leeuwenhoek" ;;
+            v0.5.1) CODENAME="Leeuwenhoek" ;;
+            v0.5.2) CODENAME="Huygens" ;;
+            v0.6.0) CODENAME="Erasmus" ;;
+            *)      CODENAME="Grotius" ;;
           esac
           echo "CODENAME=${CODENAME}" >> $GITHUB_ENV
           echo "RELEASE_TITLE=v${TAG#v} — ${CODENAME}" >> $GITHUB_ENV
@@ -212,18 +213,25 @@ jobs:
           # Identify previous tag for comparison
           PREV_TAG=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -v "^${RELEASE_TAG}$" | head -n 1)
           if [ -z "$PREV_TAG" ]; then
-            PREV_TAG="v0.4.0"
+            PREV_TAG="v0.5.1"
           fi
 
           cat << 'EOF' > release_notes.md
           ## Release **${{ env.CODENAME }}** (${{ env.RELEASE_TAG }})
 
-          ### What's Changed
-          - **NVIDIA GPU `nvidia-smi` Registration**: Dynamic CUDA Driver context attachment (`cuDevicePrimaryCtxRetain`) and scratchpad allocation ensuring process visibility in `nvidia-smi`.
-          - **Test Suite & Coverage Overhaul**: Increased workspace test coverage to >= 80% across storage, query planner, Arrow Flight, Raft consensus, and server endpoints.
-          - **Workflow Guardrails**: Automated pre-release testing gates preventing asset builds on test failure.
-          - **openCypher Enhancements**: Extended `WITH` clause support with projections, aggregations, and physical pipelining.
-          - **Catalog & Studio**: Clean graph catalog initialization with dynamic schema management via REST and GDB Studio Web UI.
+          ### Key Highlights in v0.5.2
+          - **Query Planner Primary Key Pushdown**:
+            - Fast-path pushdown of `WHERE id = <val>` directly into `PhysicalOperator::ScanVertices { id_filter: Some(vid) }`.
+            - Added $O(1)$ point-lookup vertex existence checks (`has_vertex`) across StorageEngine, VertexPropertyTable, and DeltaMemTable.
+            - Eliminates multi-hop wavefront BFS traversal timeouts and redundant full-graph scans (>5,000x speedup).
+          - **GDB Studio Web UI & Startup Script Overhaul**:
+            - Updated `scripts/start_studio.sh` with complete CLI flag parsing (`--port`, `--cluster-url`, `--host`, `--no-browser`) and legacy positional argument compatibility.
+            - Resilient health check retry loop with automatic diagnosis and log dumping on failure.
+          - **Unified Python Client (`gdb-client` on PyPI)**:
+            - Client SDK unified into standalone `gdb-py-client` with zero-copy Polars, Arrow, Pandas, and NetworkX exports.
+            - Parallel Arrow Flight scatter-ingest and REST batch APIs.
+          - **Multi-Threaded Benchmark Pipeline**:
+            - Multi-worker ingestion, configurable timeouts, and automatic CBO `ANALYZE GRAPH;` execution in `scripts/gpu_benchmark.py`.
 
           ### Checksums & Verification
           Every binary archive is accompanied by a SHA256 checksum file (`.tar.gz.sha256`).
@@ -242,7 +250,7 @@ jobs:
           body_path: release_notes.md
           draft: false
           prerelease: false
-          generate_release_notes: false
+          generate_release_notes: true
           files: all_assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

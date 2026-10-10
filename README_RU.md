@@ -2,7 +2,7 @@
 
 # GDB — Распределенная высокопроизводительная In-Memory Графовая СУБД (Альтернатива Nebula Graph)
 
-[![Version](https://img.shields.io/badge/version-v0.5.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.5.2-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-80.8%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
@@ -41,7 +41,7 @@
    - **Linux NVIDIA (CUDA):** Нативный CudaComputeBackend в `gdb-gpu` для параллельных вычислений на серверных GPU.
    - **CPU SIMD Fallback:** При выключенном GPU или отсутствии графического процессора автоматически используется векторизованный параллельный бэкенд на Rayon.
 
-5. **GDB Studio v0.5.1 (Интерактивный Web Workspace):**
+5. **GDB Studio v0.5.2 (Интерактивный Web Workspace):**
    - **Выполнение скриптов «Run All»:** Индикатор прогресса шагов (`Step: X / Y`), пакетное исполнение и подсветка ошибок.
    - **Инспектор векторов:** Аккуратное моноширинное форматирование многомерных векторов и скоров сходства.
    - **Чистый каталог по умолчанию & Interactive Schema Manager:** Просмотр, создание, изменение и удаление сущностей визуально.
