@@ -2,7 +2,7 @@ pub mod ast;
 pub mod parser;
 
 pub use ast::*;
-pub use parser::{parse, Lexer, Parser};
+pub use parser::{parse, parse_script, split_statements, Lexer, Parser};
 
 #[cfg(test)]
 mod tests {

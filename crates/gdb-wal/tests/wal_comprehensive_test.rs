@@ -63,3 +63,26 @@ fn test_wal_corruption_handling() {
     let res = wal.replay();
     assert!(res.is_err(), "Replaying corrupted WAL should return error");
 }
+
+#[test]
+fn test_wal_truncate_and_bad_magic() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("trunc.wal");
+
+    let wal = WriteAheadLog::open(&wal_path).unwrap();
+    wal.append(1, b"ENTRY 1").unwrap();
+    wal.append(2, b"ENTRY 2").unwrap();
+    assert_eq!(wal.replay().unwrap().len(), 2);
+
+    wal.truncate_to_empty().unwrap();
+    assert_eq!(wal.replay().unwrap().len(), 0);
+
+    wal.append(3, b"NEW ENTRY").unwrap();
+    assert_eq!(wal.replay().unwrap().len(), 1);
+
+    // Bad magic bytes
+    let bad_path = dir.path().join("bad_magic.wal");
+    std::fs::write(&bad_path, b"NOPE_BAD_MAGIC_HEADER_TEST").unwrap();
+    let bad_wal = WriteAheadLog::open(&bad_path).unwrap();
+    assert!(bad_wal.replay().is_err());
+}

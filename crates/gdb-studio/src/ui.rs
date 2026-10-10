@@ -830,6 +830,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
           <div class="editor-actions">
             <button class="btn btn-secondary btn-sm" onclick="clearQuery()">Clear</button>
             <button class="btn btn-secondary btn-sm" id="explain-btn" onclick="explainQuery()">🔍 Explain Plan</button>
+            <button class="btn btn-secondary btn-sm" id="batch-btn" onclick="executeBatchScript()" title="Execute multi-statement script with step progress">⚡ Run All</button>
             <button class="btn btn-primary btn-sm" id="run-btn" onclick="executeQuery()">
               <span id="run-spinner" style="display:none;" class="spinner"></span>
               <span>▶ Run (Cmd+↵)</span>
@@ -855,6 +856,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
             <div class="nav-tab" id="tab-btn-json" onclick="switchView('json', this)">📜 Raw JSON</div>
           </div>
           <div class="nav-stats" id="query-stats">
+            <div id="step-indicator" style="display:none; color:var(--purple); font-weight:600;">Step: <span id="stat-step">1/1</span></div>
             <div>Status: <span class="highlight" id="stat-status">Ready</span></div>
             <div>Time: <span class="highlight" id="stat-time">0.0 ms</span></div>
             <div>Rows: <span class="highlight" id="stat-rows">0</span></div>
@@ -1240,7 +1242,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span id="footer-version">GDB Studio v0.4.2</span>
+      <span id="footer-version">GDB Studio v0.5.0</span>
       <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
       <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>
@@ -1651,11 +1653,150 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
       selectedEntity = null;
     }
 
+    // Script Lexer & Multi-Statement Execution
+    function splitStatements(text) {
+      const stmts = [];
+      let current = '';
+      let inSingleQuote = false;
+      let inDoubleQuote = false;
+      let inLineComment = false;
+
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        const next = i + 1 < text.length ? text[i + 1] : '';
+
+        if (inLineComment) {
+          if (c === '\n' || c === '\r') inLineComment = false;
+          current += c;
+          continue;
+        }
+
+        if (c === '/' && next === '/') {
+          inLineComment = true;
+          current += c;
+          continue;
+        }
+
+        if (c === '\'' && !inDoubleQuote) {
+          inSingleQuote = !inSingleQuote;
+          current += c;
+          continue;
+        }
+        if (c === '"' && !inSingleQuote) {
+          inDoubleQuote = !inDoubleQuote;
+          current += c;
+          continue;
+        }
+
+        if (c === ';' && !inSingleQuote && !inDoubleQuote) {
+          const trimmed = current.trim();
+          if (trimmed.length > 0) {
+            stmts.push(trimmed);
+          }
+          current = '';
+          continue;
+        }
+        current += c;
+      }
+      const trimmed = current.trim();
+      if (trimmed.length > 0) {
+        stmts.push(trimmed);
+      }
+      return stmts;
+    }
+
+    async function executeBatchScript() {
+      const script = document.getElementById('query-input').value.trim();
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      if (!script) return;
+
+      const runBtn = document.getElementById('run-btn');
+      const batchBtn = document.getElementById('batch-btn');
+      const spinner = document.getElementById('run-spinner');
+      const stepIndicator = document.getElementById('step-indicator');
+      const statStep = document.getElementById('stat-step');
+
+      runBtn.disabled = true;
+      if (batchBtn) batchBtn.disabled = true;
+      spinner.style.display = 'inline-block';
+      stepIndicator.style.display = 'inline-block';
+
+      const stmts = splitStatements(script);
+      if (stmts.length === 0) {
+        runBtn.disabled = false;
+        if (batchBtn) batchBtn.disabled = false;
+        spinner.style.display = 'none';
+        stepIndicator.style.display = 'none';
+        return;
+      }
+
+      const startTime = performance.now();
+      let lastData = null;
+      let okCount = 0;
+
+      for (let i = 0; i < stmts.length; i++) {
+        statStep.textContent = `${i + 1}/${stmts.length}`;
+        document.getElementById('stat-status').textContent = `Running step ${i + 1}/${stmts.length}...`;
+        const q = stmts[i];
+
+        try {
+          const resp = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: q, endpoint: endpoint })
+          });
+          const data = await resp.json();
+          lastData = data;
+
+          if (data.status !== 'ok') {
+            document.getElementById('stat-status').textContent = `Error (Step ${i + 1}/${stmts.length})`;
+            document.getElementById('stat-status').style.color = 'var(--danger)';
+            document.getElementById('json-output').textContent = JSON.stringify(data, null, 2);
+            renderTable(data);
+            alert(`Execution failed at statement ${i + 1} of ${stmts.length}:\n\n${q}\n\nError: ${data.error || data.message || 'Unknown error'}`);
+            break;
+          }
+          okCount++;
+        } catch (err) {
+          document.getElementById('stat-status').textContent = `Network error (Step ${i + 1})`;
+          alert(`Network error at statement ${i + 1}: ${err.message}`);
+          break;
+        }
+      }
+
+      const totalDuration = (performance.now() - startTime).toFixed(1);
+      document.getElementById('stat-time').textContent = `${totalDuration} ms`;
+      if (lastData && okCount === stmts.length) {
+        document.getElementById('stat-status').textContent = `OK (${stmts.length} steps)`;
+        document.getElementById('stat-status').style.color = 'var(--success)';
+        document.getElementById('stat-rows').textContent = lastData.num_rows || (lastData.rows ? lastData.rows.length : 0);
+        document.getElementById('json-output').textContent = JSON.stringify(lastData, null, 2);
+        renderTable(lastData);
+        if (lastData.graph && (lastData.graph.nodes.length > 0 || lastData.graph.edges.length > 0)) {
+          buildGraph(lastData.graph.nodes, lastData.graph.edges);
+        } else {
+          extractGraphFromRows(lastData);
+        }
+        sync3DGraph();
+        fetchSchema();
+        addHistory(`[Batch ${stmts.length} stmts] ` + stmts[0], true);
+      }
+
+      runBtn.disabled = false;
+      if (batchBtn) batchBtn.disabled = false;
+      spinner.style.display = 'none';
+    }
+
     // Query Execution
     async function executeQuery() {
       const query = document.getElementById('query-input').value.trim();
       const endpoint = document.getElementById('cluster-url').value.trim();
       if (!query) return;
+
+      const stmts = splitStatements(query);
+      if (stmts.length > 1) {
+        return executeBatchScript();
+      }
 
       const runBtn = document.getElementById('run-btn');
       const spinner = document.getElementById('run-spinner');
@@ -1860,7 +2001,17 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
           const tr = document.createElement('tr');
           for (const cell of row) {
             const td = document.createElement('td');
-            td.textContent = (typeof cell === 'object') ? JSON.stringify(cell) : cell;
+            if (Array.isArray(cell)) {
+              if (cell.length <= 8) {
+                td.textContent = `[${cell.map(v => typeof v === 'number' ? Number(v.toFixed(4)) : v).join(', ')}]`;
+              } else {
+                td.textContent = `[${cell.slice(0, 4).map(v => typeof v === 'number' ? Number(v.toFixed(3)) : v).join(', ')}, ... (${cell.length} dims)]`;
+              }
+              td.style.fontFamily = 'monospace';
+              td.style.color = 'var(--cyan)';
+            } else {
+              td.textContent = (typeof cell === 'object' && cell !== null) ? JSON.stringify(cell) : cell;
+            }
             tr.appendChild(td);
           }
           tbody.appendChild(tr);

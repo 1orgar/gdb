@@ -13,6 +13,7 @@ pub enum DataType {
     String,
     Date,
     Timestamp,
+    Vector(usize),
 }
 
 impl DataType {
@@ -24,6 +25,10 @@ impl DataType {
             DataType::String => ArrowDataType::Utf8,
             DataType::Date => ArrowDataType::Date32,
             DataType::Timestamp => ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
+            DataType::Vector(dim) => ArrowDataType::FixedSizeList(
+                Arc::new(Field::new("item", ArrowDataType::Float32, false)),
+                *dim as i32,
+            ),
         }
     }
 }

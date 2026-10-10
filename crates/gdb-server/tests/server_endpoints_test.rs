@@ -346,3 +346,120 @@ async fn test_server_replication_multinode_and_async() {
     assert!(res_async.status().is_success());
 }
 
+#[tokio::test]
+async fn test_server_multi_statement_and_batch_endpoints() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (addr, _handle, _state) = create_test_server(tmp.path().to_path_buf()).await.unwrap();
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{}", addr);
+
+    // 1. Multi-statement script via /query
+    let script = r#"
+        CREATE VERTEX Item (sku STRING, emb VECTOR(3));
+        INSERT VERTEX Item (id, sku, emb) VALUES (1, 'item-A', [1.0, 0.0, 0.0]);
+        INSERT VERTEX Item (id, sku, emb) VALUES (2, 'item-B', [0.0, 1.0, 0.0]);
+        MATCH (i:Item) RETURN i.sku;
+    "#;
+    let res = client
+        .post(format!("{}/query", base_url))
+        .json(&serde_json::json!({ "query": script }))
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["statements_executed"], 4);
+    assert_eq!(body["rows_affected"], 4);
+    assert_eq!(body["num_rows"], 2);
+
+    // 2. Multi-statement error handling
+    let bad_script = r#"
+        INSERT VERTEX Item (id, sku) VALUES (3, 'item-C');
+        THIS IS INVALID SYNTAX;
+        INSERT VERTEX Item (id, sku) VALUES (4, 'item-D');
+    "#;
+    let res = client
+        .post(format!("{}/query", base_url))
+        .json(&serde_json::json!({ "query": bad_script }))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["statement_index"], 1);
+
+    // 3. Batch API with queries array
+    let batch_req = serde_json::json!({
+        "queries": [
+            "CREATE VERTEX User (name STRING);",
+            "INSERT VERTEX User (id, name) VALUES (10, 'Alice');",
+            "INSERT VERTEX User (id, name) VALUES (20, 'Bob');",
+            "MATCH (u:User) RETURN u.name;"
+        ]
+    });
+    let res = client
+        .post(format!("{}/batch", base_url))
+        .json(&batch_req)
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["total"], 4);
+    assert_eq!(body["succeeded"], 4);
+    assert_eq!(body["failed"], 0);
+
+    // 4. Batch API with script field
+    let batch_script = serde_json::json!({
+        "script": "INSERT VERTEX User (id, name) VALUES (30, 'Charlie'); INSERT VERTEX User (id, name) VALUES (40, 'Dave');"
+    });
+    let res = client
+        .post(format!("{}/batch", base_url))
+        .json(&batch_script)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["succeeded"], 2);
+
+    // 5. Batch API with raw text
+    let res = client
+        .post(format!("{}/batch", base_url))
+        .body("INSERT VERTEX User (id, name) VALUES (50, 'Eve'); MATCH (u:User) RETURN count(u.name);")
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["total"], 2);
+
+    // 6. Vector DDL, Insert, and Similarity Search via /query JSON serialization
+    let vec_script = r#"
+        CREATE VERTEX Doc (title STRING, emb VECTOR(2));
+        INSERT VERTEX Doc (id, title, emb) VALUES (1, 'Doc1', [1.0, 0.0]), (2, 'Doc2', [0.0, 1.0]);
+        ANALYZE GRAPH;
+        CALL vector.similaritySearch('Doc', 'emb', [1.0, 0.0], 1, 'cosine') YIELD vertex_id, score;
+    "#;
+    let res = client
+        .post(format!("{}/query", base_url))
+        .json(&serde_json::json!({ "query": vec_script }))
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["statements_executed"], 4);
+
+    // Verify /resources endpoint returns valid JSON with metrics
+    let res = client.get(format!("{}/resources", base_url)).send().await.unwrap();
+    assert!(res.status().is_success());
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert!(body["total_vertices"].as_u64().unwrap() > 0);
+}
+
+

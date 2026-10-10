@@ -4,7 +4,7 @@ use arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray,
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use gdb_analytics::AnalyticsEngine;
 use gdb_core::schema::GraphSchema;
-use gdb_core::{DataValue, EdgeId, GdbError, GdbResult, LabelId, VertexId};
+use gdb_core::{DataValue, EdgeId, EdgeType, GdbError, GdbResult, LabelId, VertexId};
 use gdb_parser::ast::{
     BinaryOperator, CypherQuery, Expr, PathPattern, ReturnItem, Statement, UpdateClause, WithClause,
 };
@@ -22,11 +22,31 @@ pub struct QueryResult {
 pub struct QueryExecutor {
     pub schema: Arc<RwLock<GraphSchema>>,
     pub storage: Arc<PartitionStorageEngine>,
+    pub gpu: Option<Arc<gdb_gpu::GpuDispatcher>>,
+    pub stats: Arc<RwLock<Option<gdb_storage::GraphStatistics>>>,
 }
 
 impl QueryExecutor {
     pub fn new(schema: Arc<RwLock<GraphSchema>>, storage: Arc<PartitionStorageEngine>) -> Self {
-        Self { schema, storage }
+        Self {
+            schema,
+            storage,
+            gpu: None,
+            stats: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn with_gpu(
+        schema: Arc<RwLock<GraphSchema>>,
+        storage: Arc<PartitionStorageEngine>,
+        gpu: Arc<gdb_gpu::GpuDispatcher>,
+    ) -> Self {
+        Self {
+            schema,
+            storage,
+            gpu: Some(gpu),
+            stats: Arc::new(RwLock::new(None)),
+        }
     }
 
     pub fn execute(&self, stmt: Statement) -> GdbResult<QueryResult> {
@@ -419,6 +439,23 @@ impl QueryExecutor {
                 self.execute_call(&algorithm, args, yield_items)
             }
             Statement::Explain(inner) => self.execute_explain(*inner),
+            Statement::AnalyzeGraph => {
+                let stats = self.storage.analyze_graph();
+                let msg = format!(
+                    "Analyzed graph: {} vertices across {} labels, {} edges across {} types (avg degree: {:.2})",
+                    stats.total_vertices,
+                    stats.vertices_per_label.len(),
+                    stats.total_edges,
+                    stats.edges_per_type.len(),
+                    stats.avg_degree
+                );
+                *self.stats.write() = Some(stats);
+                Ok(QueryResult {
+                    message: msg,
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
         }
     }
 
@@ -464,6 +501,42 @@ impl QueryExecutor {
                     message: ascii_tree,
                     batch: Some(batch),
                     rows_affected: 1,
+                })
+            }
+            Statement::AnalyzeGraph => {
+                let stats = self.storage.analyze_graph();
+                *self.stats.write() = Some(stats.clone());
+                let msg = format!(
+                    "Graph analysis completed: {} vertices, {} edges, avg_degree={:.2}, max_degree={}",
+                    stats.total_vertices, stats.total_edges, stats.avg_degree, stats.max_degree
+                );
+                let schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("metric", ArrowDataType::Utf8, false),
+                    Field::new("value", ArrowDataType::Utf8, false),
+                ]));
+                let metrics = vec![
+                    "total_vertices".to_string(),
+                    "total_edges".to_string(),
+                    "avg_degree".to_string(),
+                    "max_degree".to_string(),
+                ];
+                let values = vec![
+                    stats.total_vertices.to_string(),
+                    stats.total_edges.to_string(),
+                    format!("{:.2}", stats.avg_degree),
+                    stats.max_degree.to_string(),
+                ];
+                let batch = RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(StringArray::from(metrics)),
+                        Arc::new(StringArray::from(values)),
+                    ],
+                )?;
+                Ok(QueryResult {
+                    message: msg,
+                    batch: Some(batch),
+                    rows_affected: 4,
                 })
             }
             other => {
@@ -602,6 +675,28 @@ impl QueryExecutor {
                         UpdateClause::Delete { variable, detach } => {
                             if let Some(&(vid, label_id)) = row.vertices.get(variable) {
                                 self.storage.delete_vertex(vid, label_id, *detach)?;
+                            }
+                        }
+                        UpdateClause::CreateEdge { src_var, dst_var, edge_type, .. } => {
+                            if let (Some(&(src_vid, _)), Some(&(dst_vid, _))) = (row.vertices.get(src_var), row.vertices.get(dst_var)) {
+                                let et = {
+                                    let schema = self.schema.read();
+                                    schema.get_edge_schema(edge_type).map(|s| s.edge_type).unwrap_or(EdgeType(1))
+                                };
+                                let ver = self.storage.next_commit_version();
+                                let edge = EdgeId::new(src_vid, et, 0, dst_vid);
+                                self.storage.insert_edge(edge, ver);
+                            }
+                        }
+                        UpdateClause::MergeEdge { src_var, dst_var, edge_type, .. } => {
+                            if let (Some(&(src_vid, _)), Some(&(dst_vid, _))) = (row.vertices.get(src_var), row.vertices.get(dst_var)) {
+                                let et = {
+                                    let schema = self.schema.read();
+                                    schema.get_edge_schema(edge_type).map(|s| s.edge_type).unwrap_or(EdgeType(1))
+                                };
+                                let ver = self.storage.next_commit_version();
+                                let edge = EdgeId::new(src_vid, et, 0, dst_vid);
+                                self.storage.insert_edge(edge, ver);
                             }
                         }
                         _ => {}
@@ -1200,9 +1295,31 @@ impl QueryExecutor {
                 let input_rows = self.execute_plan(input, snapshot)?;
                 let mut output_rows = Vec::new();
                 let max_depth = max_hops.unwrap_or(15);
+                let csr = self.storage.current_csr();
+                let use_gpu = if let Some(ref gpu) = self.gpu {
+                    gpu.enabled && csr.edge_count() >= gpu.threshold_edges
+                } else {
+                    false
+                };
 
                 for row in input_rows {
                     if let Some(&(start_vid, _)) = row.vertices.get(src_var) {
+                        if use_gpu && max_depth > 1 {
+                            if let Some(ref gpu) = self.gpu {
+                                if let Ok(bfs_results) = gpu.bfs(&csr, start_vid, max_depth as u32) {
+                                    for (reached_vid, depth) in bfs_results {
+                                        let d = depth as usize;
+                                        if d >= *min_hops && d <= max_depth && reached_vid != start_vid {
+                                            let mut new_row = row.clone();
+                                            new_row.vertices.insert(dst_var.clone(), (reached_vid, LabelId(1)));
+                                            output_rows.push(new_row);
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+
                         let mut queue = std::collections::VecDeque::new();
                         queue.push_back((start_vid, 0usize, std::collections::HashSet::new(), None));
 
@@ -1274,6 +1391,28 @@ impl QueryExecutor {
                                 for (prop_name, expr) in properties {
                                     let val = eval_expr(expr, row, &self.storage)?;
                                     self.storage.update_vertex_property(target_vid, label_id, prop_name, val)?;
+                                }
+                            }
+                            UpdateClause::CreateEdge { src_var, dst_var, edge_type, .. } => {
+                                if let (Some(&(src_vid, _)), Some(&(dst_vid, _))) = (row.vertices.get(src_var), row.vertices.get(dst_var)) {
+                                    let et = {
+                                        let schema = self.schema.read();
+                                        schema.get_edge_schema(edge_type).map(|s| s.edge_type).unwrap_or(EdgeType(1))
+                                    };
+                                    let ver = self.storage.next_commit_version();
+                                    let edge = EdgeId::new(src_vid, et, 0, dst_vid);
+                                    self.storage.insert_edge(edge, ver);
+                                }
+                            }
+                            UpdateClause::MergeEdge { src_var, dst_var, edge_type, .. } => {
+                                if let (Some(&(src_vid, _)), Some(&(dst_vid, _))) = (row.vertices.get(src_var), row.vertices.get(dst_var)) {
+                                    let et = {
+                                        let schema = self.schema.read();
+                                        schema.get_edge_schema(edge_type).map(|s| s.edge_type).unwrap_or(EdgeType(1))
+                                    };
+                                    let ver = self.storage.next_commit_version();
+                                    let edge = EdgeId::new(src_vid, et, 0, dst_vid);
+                                    self.storage.insert_edge(edge, ver);
                                 }
                             }
                         }
@@ -1400,6 +1539,81 @@ impl QueryExecutor {
                     _ => VertexId(2),
                 };
                 AnalyticsEngine::run_similarity(&csr, node1, node2)?
+            }
+            "algo.node2vec" => {
+                let dim = match args.get("dimensions").or_else(|| args.get("dim")) {
+                    Some(DataValue::Int64(i)) => *i as usize,
+                    _ => 64,
+                };
+                let walk_len = match args.get("walk_length") {
+                    Some(DataValue::Int64(i)) => *i as usize,
+                    _ => 10,
+                };
+                let num_walks = match args.get("num_walks") {
+                    Some(DataValue::Int64(i)) => *i as usize,
+                    _ => 10,
+                };
+                let p = match args.get("p") {
+                    Some(DataValue::Float64(f)) => *f,
+                    Some(DataValue::Int64(i)) => *i as f64,
+                    _ => 1.0,
+                };
+                let q = match args.get("q") {
+                    Some(DataValue::Float64(f)) => *f,
+                    Some(DataValue::Int64(i)) => *i as f64,
+                    _ => 1.0,
+                };
+                AnalyticsEngine::run_node2vec(&csr, dim, walk_len, num_walks, p, q)?
+            }
+            "vector.similaritysearch" | "vector.search" => {
+                let label = match args.get("label") {
+                    Some(DataValue::String(s)) => s.clone(),
+                    _ => "Document".to_string(),
+                };
+                let property = match args.get("property") {
+                    Some(DataValue::String(s)) => s.clone(),
+                    _ => "embedding".to_string(),
+                };
+                let k = match args.get("k").or_else(|| args.get("top_k")) {
+                    Some(DataValue::Int64(i)) => *i as usize,
+                    _ => 10,
+                };
+                let metric = match args.get("metric") {
+                    Some(DataValue::String(s)) => s.clone(),
+                    _ => "cosine".to_string(),
+                };
+                let query_vec: Vec<f32> = match args.get("query").or_else(|| args.get("embedding")) {
+                    Some(DataValue::Vector(v)) => v.clone(),
+                    Some(DataValue::List(l)) => l.iter().filter_map(|x| match x {
+                        DataValue::Float64(f) => Some(*f as f32),
+                        DataValue::Int64(i) => Some(*i as f32),
+                        _ => None,
+                    }).collect(),
+                    _ => Vec::new(),
+                };
+
+                let label_id = {
+                    let schema = self.schema.read();
+                    schema.get_vertex_schema(&label).map(|s| s.label_id).unwrap_or(LabelId(1))
+                };
+
+                let results = self.storage.vector_similarity_search(label_id, &property, &query_vec, k, &metric);
+                let mut vids = Vec::with_capacity(results.len());
+                let mut sims = Vec::with_capacity(results.len());
+                for (vid, sim) in results {
+                    vids.push(vid.as_u64());
+                    sims.push(sim as f64);
+                }
+
+                let arrow_schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("node", ArrowDataType::UInt64, false),
+                    Field::new("similarity", ArrowDataType::Float64, false),
+                ]));
+                let cols: Vec<ArrayRef> = vec![
+                    Arc::new(arrow::array::UInt64Array::from(vids)),
+                    Arc::new(arrow::array::Float64Array::from(sims)),
+                ];
+                RecordBatch::try_new(arrow_schema, cols)?
             }
             other => return Err(GdbError::Execution(format!("Unknown graph algorithm: {}", other))),
         };

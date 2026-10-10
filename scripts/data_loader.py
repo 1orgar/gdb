@@ -48,6 +48,7 @@ def main():
     parser.add_argument("--vertices", type=int, default=10000, help="Number of vertices to generate (default: 10000)")
     parser.add_argument("--edges", type=int, default=100000, help="Number of edges to generate (default: 100000)")
     parser.add_argument("--file", type=str, default=None, help="Save to a .gdb batch file instead of sending over HTTP")
+    parser.add_argument("--batch-size", type=int, default=500, help="Batch size for multi-value inserts (default: 500)")
     parser.add_argument("--compact", action="store_true", default=True, help="Trigger CSR compaction after ingestion")
     parser.add_argument("--no-recreate", action="store_true", help="Do not drop and recreate schema before ingesting")
     parser.add_argument("--teardown", action="store_true", help="Drop User and FOLLOWS schema and exit")
@@ -68,6 +69,7 @@ def main():
     print(f"[*] Target:      {args.file if args.file else args.url}")
     print(f"[*] Vertices:    {args.vertices:,}")
     print(f"[*] Edges:       {args.edges:,}")
+    print(f"[*] Batch Size:  {args.batch_size:,}")
     print("------------------------------------------------------------\n")
 
     out_file = open(args.file, "w") if args.file else None
@@ -92,28 +94,34 @@ def main():
     emit("CREATE VERTEX User (name STRING, age INT64);")
     emit("CREATE EDGE FOLLOWS ();")
 
-    # 2. Ingest Vertices
-    print(f"\x1b[1;33m[2/3] Generating & Ingesting {args.vertices:,} Vertices...\x1b[0m")
+    # 2. Ingest Vertices in Multi-Row Batches
+    print(f"\x1b[1;33m[2/3] Generating & Ingesting {args.vertices:,} Vertices (batch_size={args.batch_size})...\x1b[0m")
     start_v = time.time()
+    v_buffer = []
+
     for vid in range(1, args.vertices + 1):
         name = generate_random_name()
         age = random.randint(18, 75)
-        emit(f"INSERT VERTEX User (id, name, age) VALUES ({vid}, '{name}', {age});")
+        v_buffer.append(f"({vid}, '{name}', {age})")
 
-        if vid % 2000 == 0 or vid == args.vertices:
-            pct = (vid / args.vertices) * 100
-            print(f"  -> Vertices: {vid:,} / {args.vertices:,} ({pct:.1f}%)")
+        if len(v_buffer) >= args.batch_size or vid == args.vertices:
+            batch_query = f"INSERT VERTEX User (id, name, age) VALUES {', '.join(v_buffer)};"
+            emit(batch_query)
+            v_buffer.clear()
+
+            if vid % 10000 == 0 or vid == args.vertices:
+                pct = (vid / args.vertices) * 100
+                print(f"  -> Vertices: {vid:,} / {args.vertices:,} ({pct:.1f}%)")
 
     elapsed_v = time.time() - start_v
     print(f"\x1b[1;32m[✓] Vertices created in {elapsed_v:.2f}s ({args.vertices / elapsed_v:,.0f} vertices/sec)\x1b[0m\n")
 
-    # 3. Ingest Edges (Scale-Free / Small-World distribution)
-    print(f"\x1b[1;33m[3/3] Generating & Ingesting {args.edges:,} Edges...\x1b[0m")
+    # 3. Ingest Edges in Script Batches
+    print(f"\x1b[1;33m[3/3] Generating & Ingesting {args.edges:,} Edges (batch_size={args.batch_size})...\x1b[0m")
     start_e = time.time()
     
-    # Power-law / preferential attachment simulator for realistic social graph
-    # First 10% of vertices receive 50% of connections (influencer nodes)
     influencer_bound = max(1, args.vertices // 10)
+    e_buffer = []
 
     for i in range(args.edges):
         src = random.randint(1, args.vertices)
@@ -125,11 +133,16 @@ def main():
         while dst == src:
             dst = random.randint(1, args.vertices)
 
-        emit(f"INSERT EDGE FOLLOWS FROM {src} TO {dst};")
+        e_buffer.append(f"INSERT EDGE FOLLOWS FROM {src} TO {dst};")
 
-        if (i + 1) % 10000 == 0 or (i + 1) == args.edges:
-            pct = ((i + 1) / args.edges) * 100
-            print(f"  -> Edges: {i + 1:,} / {args.edges:,} ({pct:.1f}%)")
+        if len(e_buffer) >= args.batch_size or (i + 1) == args.edges:
+            batch_script = " ".join(e_buffer)
+            emit(batch_script)
+            e_buffer.clear()
+
+            if (i + 1) % 20000 == 0 or (i + 1) == args.edges:
+                pct = ((i + 1) / args.edges) * 100
+                print(f"  -> Edges: {i + 1:,} / {args.edges:,} ({pct:.1f}%)")
 
     elapsed_e = time.time() - start_e
     print(f"\x1b[1;32m[✓] Edges created in {elapsed_e:.2f}s ({args.edges / elapsed_e:,.0f} edges/sec)\x1b[0m\n")

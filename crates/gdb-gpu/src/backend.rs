@@ -1,5 +1,6 @@
 use gdb_core::{GdbResult, VertexId};
 use gdb_storage::ChunkedCsr;
+use rayon::prelude::*;
 
 /// Result of a GPU-accelerated Breadth-First Search traversal: (VertexId, distance/depth)
 pub type BfsResult = Vec<(VertexId, u32)>;
@@ -35,6 +36,18 @@ pub trait GpuComputeBackend: Send + Sync {
 
     /// Parallel triangle counting.
     fn triangle_count(&self, csr: &ChunkedCsr) -> GdbResult<Vec<(VertexId, u64)>>;
+
+    /// Parallel Vector Similarity Search (Cosine, Dot Product, or Euclidean L2).
+    fn vector_similarity(
+        &self,
+        vectors: &[f32],
+        dim: usize,
+        query: &[f32],
+        k: usize,
+        metric: &str,
+    ) -> GdbResult<Vec<(usize, f32)>> {
+        CpuFallbackBackend.vector_similarity(vectors, dim, query, k, metric)
+    }
 }
 
 /// High-performance CPU fallback using Rayon work-stealing parallelism.
@@ -337,5 +350,96 @@ impl GpuComputeBackend for CpuFallbackBackend {
             res.push((VertexId(csr.reverse_map[i]), counts[i]));
         }
         Ok(res)
+    }
+
+    fn vector_similarity(
+        &self,
+        vectors: &[f32],
+        dim: usize,
+        query: &[f32],
+        k: usize,
+        metric: &str,
+    ) -> GdbResult<Vec<(usize, f32)>> {
+        if dim == 0 || query.len() != dim || vectors.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let num_vectors = vectors.len() / dim;
+        let query_norm = if metric.eq_ignore_ascii_case("cosine") {
+            let sum_sq: f32 = query.iter().map(|x| x * x).sum();
+            sum_sq.sqrt()
+        } else {
+            1.0
+        };
+
+        let mut scores: Vec<(usize, f32)> = (0..num_vectors)
+            .into_par_iter()
+            .map(|i| {
+                let v = &vectors[i * dim..(i + 1) * dim];
+                let score = match metric.to_lowercase().as_str() {
+                    "cosine" => {
+                        let dot: f32 = v.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                        let v_norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if v_norm == 0.0 || query_norm == 0.0 {
+                            0.0
+                        } else {
+                            dot / (v_norm * query_norm)
+                        }
+                    }
+                    "dot" | "dot_product" => {
+                        v.iter().zip(query.iter()).map(|(a, b)| a * b).sum()
+                    }
+                    "l2" | "euclidean" => {
+                        let dist_sq: f32 = v.iter().zip(query.iter()).map(|(a, b)| (a - b) * (a - b)).sum();
+                        1.0 / (1.0 + dist_sq.sqrt())
+                    }
+                    _ => {
+                        let dot: f32 = v.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                        let v_norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if v_norm == 0.0 || query_norm == 0.0 {
+                            0.0
+                        } else {
+                            dot / (v_norm * query_norm)
+                        }
+                    }
+                };
+                (i, score)
+            })
+            .collect();
+
+        scores.par_sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.truncate(k);
+        Ok(scores)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_similarity_computation() {
+        let backend = CpuFallbackBackend;
+        let vectors = vec![
+            1.0f32, 0.0f32, 0.0f32, // idx 0
+            0.0f32, 1.0f32, 0.0f32, // idx 1
+            0.7071f32, 0.7071f32, 0.0f32, // idx 2
+        ];
+        let query = vec![1.0f32, 0.0f32, 0.0f32];
+
+        // Cosine
+        let res_cos = backend.vector_similarity(&vectors, 3, &query, 2, "cosine").unwrap();
+        assert_eq!(res_cos.len(), 2);
+        assert_eq!(res_cos[0].0, 0); // v0 matches perfectly
+        assert!((res_cos[0].1 - 1.0).abs() < 1e-4);
+
+        // Dot product
+        let res_dot = backend.vector_similarity(&vectors, 3, &query, 2, "dot").unwrap();
+        assert_eq!(res_dot[0].0, 0);
+
+        // Euclidean
+        let res_l2 = backend.vector_similarity(&vectors, 3, &query, 2, "l2").unwrap();
+        assert_eq!(res_l2[0].0, 0);
+        assert!((res_l2[0].1 - 1.0).abs() < 1e-4);
     }
 }

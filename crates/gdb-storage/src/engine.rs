@@ -305,9 +305,84 @@ impl PartitionStorageEngine {
         self.delta.edge_count()
     }
 
-    /// Total distinct vertices in CSR.
+    /// Total distinct vertices in CSR or property tables.
     pub fn total_vertices(&self) -> usize {
-        self.current_csr().vertex_count()
+        let csr_cnt = self.current_csr().vertex_count();
+        let prop_cnt: usize = self.vertex_properties.read().values().map(|t| t.len()).sum();
+        csr_cnt.max(prop_cnt)
     }
+
+    /// Performs vector similarity search over property tables for a given vertex label.
+    pub fn vector_similarity_search(
+        &self,
+        label_id: LabelId,
+        property_name: &str,
+        query: &[f32],
+        k: usize,
+        metric: &str,
+    ) -> Vec<(VertexId, f32)> {
+        if let Some(table) = self.vertex_properties.read().get(&label_id) {
+            table.vector_similarity_search(property_name, query, k, metric)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Computes full graph statistics (vertex counts, degree distribution, edges) for CBO optimization.
+    pub fn analyze_graph(&self) -> GraphStatistics {
+        let total_v = self.total_vertices();
+        let total_e = self.total_edges();
+        let mut v_per_label = HashMap::new();
+        let mut e_per_type = HashMap::new();
+
+        {
+            let schema = self.schema.read();
+            for s in schema.list_vertex_schemas().into_iter() {
+                let cnt = self.vertex_properties.read().get(&s.label_id).map(|t| t.len()).unwrap_or(0);
+                v_per_label.insert(s.label.clone(), cnt);
+            }
+            for s in schema.list_edge_schemas().into_iter() {
+                e_per_type.insert(s.edge_type_name.clone(), total_e);
+            }
+        }
+
+        let csr = self.csr.read();
+        let mut max_deg = 0;
+        let csr_v = csr.vertex_count();
+        if csr_v > 0 {
+            for i in 0..csr_v {
+                let deg = (csr.offsets[i + 1] - csr.offsets[i]) as usize;
+                if deg > max_deg {
+                    max_deg = deg;
+                }
+            }
+        }
+
+        let avg_deg = if total_v > 0 {
+            total_e as f64 / total_v as f64
+        } else {
+            0.0
+        };
+
+        GraphStatistics {
+            total_vertices: total_v,
+            total_edges: total_e,
+            vertices_per_label: v_per_label,
+            edges_per_type: e_per_type,
+            avg_degree: avg_deg,
+            max_degree: max_deg,
+        }
+    }
+}
+
+/// Graph cardinality and distribution statistics for Cost-Based Optimization (CBO).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GraphStatistics {
+    pub total_vertices: usize,
+    pub total_edges: usize,
+    pub vertices_per_label: HashMap<String, usize>,
+    pub edges_per_type: HashMap<String, usize>,
+    pub avg_degree: f64,
+    pub max_degree: usize,
 }
 

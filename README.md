@@ -2,12 +2,12 @@
 
 # GDB — Distributed High-Performance In-Memory Graph Database (Nebula Graph Alternative)
 
-[![Version](https://img.shields.io/badge/version-v0.4.2-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-81.6%25-brightgreen)](docs/COVERAGE.md)
+[![Coverage](https://img.shields.io/badge/coverage-80.6%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-A next-generation, high-performance distributed HTAP graph database engine built with **Rust**, featuring in-memory Compressed Sparse Row (CSR) topology, Apache Arrow columnar properties, openCypher/GQL query support, secondary property indexing, Cypher DML mutations, Multi-Raft leaderless replication, S3-backed tiered persistence, MPP distributed exchange over Arrow Flight, and **Apple Metal (UMA Zero-Copy) / NVIDIA CUDA hardware acceleration**.
+A next-generation, high-performance distributed HTAP graph database engine built with **Rust**, featuring in-memory Compressed Sparse Row (CSR) topology, Apache Arrow columnar properties, openCypher/GQL query support, secondary property indexing, Cypher DML mutations, Multi-Raft leaderless replication, S3-backed tiered persistence, MPP distributed exchange over Arrow Flight, **Apple Metal (UMA Zero-Copy) / NVIDIA CUDA hardware acceleration**, native **Vector Embeddings & Similarity Search**, and **Cost-Based Optimization (CBO)**.
 
 ---
 
@@ -20,41 +20,40 @@ A next-generation, high-performance distributed HTAP graph database engine built
    - **Secondary Property Indexes:** Ultra-fast $O(1)$ point lookups (`CREATE INDEX ON :Label(prop)` / `DROP INDEX`), automatically maintained across inserts, updates, and deletes.
    - **Background Micro-Compactor:** Merges Delta MemTable into compact Chunked-CSR without blocking reads.
 
-2. **Query Language, DML & Analytics (openCypher / GQL / CALL algo):**
-   - **Patterns & Multi-Hop Traversal:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name`.
-   - **`WITH` Operator Pipeline:** Inter-clause pipeline transformations, intermediate projections, and aggregations: `MATCH (u:User) WITH u.department AS dept, count(u) AS cnt WHERE cnt > 1 RETURN dept, cnt ORDER BY dept ASC`.
-   - **Cypher DML (Mutations & Merges):** `MATCH (u:User {name: 'Alice'}) SET u.age = 31`, `MATCH (u:User) DELETE u`, `MATCH (u:User) DETACH DELETE u`, `MERGE (u:User {name: 'Charlie', age: 35})`.
-   - **Aggregations & Pagination:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `DISTINCT`, `ORDER BY prop [ASC|DESC]`, `SKIP N` / `OFFSET N`, `LIMIT N`.
-   - **Physical Execution Plan (EXPLAIN):** `EXPLAIN <query>` produces an optimized physical execution plan DAG with operator metrics (`IndexScan`, `Filter`, `Projection`, `Sort`, `Aggregate`, `Mutate`).
-   - **Nebula Enterprise Analytics Suite:** `CALL algo.pageRank(...)`, `CALL algo.louvain(...)`, `CALL algo.wcc(...)`, `CALL algo.triangleCount(...)`, `CALL algo.kCore(...)`, `CALL algo.betweenness(...)`, `CALL algo.sssp(...)`, `CALL algo.similarity(...)`.
+2. **Query Language, Multi-Statement DML & Analytics (openCypher / GQL / CALL algo):**
+   - **Multi-Statement Script Execution & Batch API:** Semicolon-delimited queries (`split_statements`), `/query` multi-statement execution, `/batch` endpoint, and Studio UI "Run All" with step progress tracking.
+   - **Cypher Relationship DML:** `MATCH (a:User), (b:User) CREATE (a)-[r:FOLLOWS]->(b)`, `MERGE (a)-[r:KNOWS]->(b)`.
+   - **Patterns & Multi-Hop Traversal:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name` with GPU-accelerated BFS expansion.
+   - **`WITH` Operator Pipeline:** Inter-clause pipeline transformations, intermediate projections, and aggregations.
+   - **Cypher Mutations & Merges:** `MATCH (u:User {name: 'Alice'}) SET u.age = 31`, `DELETE`, `DETACH DELETE`, `MERGE`.
+   - **Physical Execution Plan (EXPLAIN):** `EXPLAIN <query>` produces an optimized physical execution plan DAG.
+   - **Nebula Enterprise Analytics & Graph ML Suite:** `CALL algo.node2vec(...)`, `CALL algo.pageRank(...)`, `CALL algo.louvain(...)`, `CALL algo.wcc(...)`, `CALL algo.triangleCount(...)`, `CALL algo.kCore(...)`, `CALL algo.betweenness(...)`, `CALL algo.sssp(...)`, `CALL algo.similarity(...)`.
 
-3. **Horizontal Scaling & Leaderless Hash Ring:**
-   - Symmetric peer nodes (Amazon Dynamo / Cassandra style) with zero Single Point of Failure (SPOF).
-   - Configurable replication factor (`--replication-factor 1..N`) and replication mode (`--sync` / `--async`).
-   - At $\text{RF} = 1$, the cluster operates as a pure MPP engine with 1D Edge Cut partitioning and zero redundant memory overhead.
-   - Independent Multi-Raft partitions backed by local append-only WAL (`gdb-wal`, CRC32).
+3. **Native Vector Embeddings & Similarity Search:**
+   - **`VECTOR(dim)` Type:** Apache Arrow `FixedSizeList` columnar representation with vector literal parser `[1.0, 2.0, 3.0]`.
+   - **Vector Similarity Search:** `CALL vector.similaritySearch(label, property, query_vector, k, metric)` supporting Cosine, DotProduct, and Euclidean (L2) distance metrics.
+   - **Cost-Based Optimization (CBO):** `ANALYZE GRAPH;` gathering degree statistics and label cardinalities.
 
 4. **Hardware GPU Acceleration (Metal on Mac / CUDA on Linux):**
+   - **Maximal GPU Graph Offload:** Automatic GPU offload for graph traversal (`VarLengthExpand` wavefront BFS), vector similarity comparisons, and graph analytics.
    - **Apple Silicon (M-Series):** **Unified Memory Architecture (UMA)** enables GPU cores to read CSR graph topology directly from RAM with **zero PCIe copy overhead (Zero-Copy)**.
-   - **Linux NVIDIA (CUDA):** Native CudaComputeBackend in `gdb-gpu` for parallel BFS, PageRank, Louvain Community Detection, WCC, and Triangle Counting on server GPUs (Tesla V100, A100, H100, RTX).
-   - **Flexible Configuration:** `--enable-gpu` flag (default `false`), `--gpu-device <ID>` device selector, and `--gpu-offload-threshold <N>` edge threshold.
+   - **Linux NVIDIA (CUDA):** Native CudaComputeBackend in `gdb-gpu` for parallel BFS, PageRank, Louvain, WCC, and Triangle Counting on server GPUs.
    - **CPU SIMD Fallback:** When GPU is disabled or absent, computations automatically execute via a vectorized Rayon CPU backend.
 
-5. **GDB Studio v0.4.1 (Interactive Web Workspace):**
-   - **Clean Catalog Boot:** Database boots with zero default vertex tags or edge types (clean slate).
-   - **Interactive Schema Manager:** Inspect, create, alter, and drop vertex tags and edge types visually or via Cypher DDL.
-   - Force-directed physics visualization (60 FPS 2D Canvas & Unity 3D WebGL).
-   - **🔍 Execution Plan DAG Viewer:** Visual operator hierarchy with step-by-step badges and ASCII tree.
-   - **📈 Real-Time Engine Telemetry:** Live sparkline telemetry for QPS, execution latency, and RAM trend.
-   - **Export Tools:** Direct graph and tabular exports to PNG, SVG, CSV, and JSON.
+5. **GDB Studio v0.5.0 (Interactive Web Workspace):**
+   - **"Run All" Multi-Statement Execution:** Step-by-step progress indicator (`Step: X / Y`), automated batching, and error tracing.
+   - **Vector Array Inspector:** Clean monospace display for high-dimensional vectors and embedding scores.
+   - **Clean Catalog Boot & Interactive Schema Manager:** Inspect, create, alter, and drop vertex tags and edge types visually.
+   - **Force-Directed Physics & DAG Viewer:** 60 FPS Canvas & Unity 3D WebGL, execution plan DAG viewer, real-time sparkline telemetry.
 
-6. **Dedicated Arrow Flight Transport & Python Client (`gdb-py-client`):**
-   - **Port Isolation:** Internal MPP shuffle (`--port 8848+`) is separated from high-speed client ingestion (`--client-flight-port 8860+`).
-   - **Python Client:** High-speed parallel scatter-ingest powered by **Polars** and PyArrow Flight streaming `do_put`.
+6. **Dedicated Python SDK & Arrow Flight Transport (`gdb-client`):**
+   - **Official Python Package:** Standalone `gdb-client` package with Polars DataFrame and NetworkX Graph export.
+   - **Automated Benchmark Suite:** `scripts/py_client_benchmark.py` testing QPS, batch inserts, and graph traversals.
+   - **Port Isolation:** Internal MPP shuffle (`--port 8848+`) separated from client ingestion (`--client-flight-port 8860+`).
 
-7. **Tiered Storage Persistence (S3 / MinIO):**
+7. **Horizontal Scaling & Tiered S3 Persistence:**
+   - Leaderless Hash Ring with configurable replication factor (`--replication-factor 1..N`) and mode (`--sync` / `--async`).
    - Asynchronous partition snapshot export to **S3 / MinIO** in compressed **Apache Parquet (ZSTD)** format.
-   - Sub-second disaster recovery: Parquet snapshot download + Raft WAL replay.
 
 ---
 

@@ -2,7 +2,7 @@
 
 # GDB: Server Configuration Guide & Query Reference
 
-Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.4.2**.
+Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.5.0** (Vermeer).
 
 ---
 
@@ -291,9 +291,78 @@ CALL algo.sssp(1) YIELD vertex_id, distance;
 CALL algo.similarity({node1: 1, node2: 2}) YIELD jaccard, cosine;
 ```
 
+#### 12. Node2Vec (In-Database Random Walk & Skip-Gram Graph ML):
+```sql
+CALL algo.node2vec({walk_length: 10, walks_per_vertex: 5, dimensions: 64, window_size: 5})
+YIELD vertex_id, embedding;
+```
+
 ---
 
-### 2.5. Interactive CLI Commands
+### 2.5. Native Vectors, Embeddings & Similarity Search
+
+```sql
+-- 1. DDL with VECTOR(dimension) column:
+CREATE VERTEX Document (title STRING, embedding VECTOR(3));
+
+-- 2. Insert with vector literals:
+INSERT VERTEX Document (id, title, embedding) VALUES
+  (1, 'Graph Databases Overview', [0.95, 0.12, 0.05]),
+  (2, 'Machine Learning on Graphs', [0.88, 0.25, 0.10]),
+  (3, 'Vector Search Engines', [0.15, 0.90, 0.85]);
+
+-- 3. Vector Similarity Search (cosine, dot, or l2):
+CALL vector.similaritySearch('Document', 'embedding', [1.0, 0.0, 0.0], 5, 'cosine')
+YIELD vertex_id, score;
+```
+
+---
+
+### 2.6. Cost-Based Optimization (CBO)
+
+```sql
+-- Gather full graph statistics (vertex counts, label cardinality, degree distributions):
+ANALYZE GRAPH;
+```
+
+---
+
+### 2.7. Relationship DML (MATCH ... CREATE / MERGE)
+
+```sql
+-- Create directed edges between matched vertices with properties:
+MATCH (a:User), (b:User)
+WHERE a.name = 'Alice' AND b.name = 'Bob'
+CREATE (a)-[r:FOLLOWS {since: 2024}]->(b);
+
+-- Idempotent edge creation via MERGE:
+MATCH (a:User), (b:User)
+WHERE a.id = 1 AND b.id = 2
+MERGE (a)-[r:KNOWS]->(b);
+```
+
+---
+
+### 2.8. Multi-Statement Script Execution & Batch REST API
+
+Queries separated by semicolons (`;`) can be executed as a multi-statement script via `POST /query`, the CLI, or the GDB Studio "Run All" button.
+
+Additionally, a dedicated `POST /batch` API is available:
+
+```bash
+curl -X POST http://localhost:8847/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "queries": [
+      "CREATE VERTEX Tag (name STRING);",
+      "INSERT VERTEX Tag (id, name) VALUES (1, '\''Rust'\''), (2, '\''GraphDB'\'');",
+      "MATCH (t:Tag) RETURN t.name;"
+    ]
+  }'
+```
+
+
+### 2.9. Interactive CLI Commands
 
 ```text
 SHOW CLUSTER              - Display cluster topology, roles, ports, and ping latency.

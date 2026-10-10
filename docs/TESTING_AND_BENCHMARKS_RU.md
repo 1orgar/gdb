@@ -60,6 +60,7 @@ graph TD
 | **[`scripts/data_loader.py`](file:///Users/kirill/Documents/projects/gdb/scripts/data_loader.py)** | Загрузка масштабируемого графа | Массовый OLTP-инжест и .gdb батчи | `User`, `FOLLOWS` | `http://127.0.0.1:8847` |
 | **[`scripts/graph_analytics_validation.py`](file:///Users/kirill/Documents/projects/gdb/scripts/graph_analytics_validation.py)** | Математическая валидация алгоритмов | 12 эталонных топологий графа | `Node`, `REL` | `http://127.0.0.1:8847` |
 | **[`scripts/test_replication.py`](file:///Users/kirill/Documents/projects/gdb/scripts/test_replication.py)** | Тест P2P-репликации в кольце Raft | Симметричная запись через разные ноды | `Device`, `LINKED` | `:8847`, `:8846`, `:8845` |
+| **[`scripts/py_client_benchmark.py`](file:///Users/kirill/Documents/projects/gdb/scripts/py_client_benchmark.py)** | Бенчмарк Python SDK & Клиента | Высокоскоростной инжест через Polars | `BenchUser`, `BENCH_KNOWS` | `http://127.0.0.1:8847` |
 
 ---
 
@@ -164,3 +165,33 @@ python3 scripts/graph_analytics_validation.py --endpoint http://127.0.0.1:8847
 ./scripts/start_cluster.sh
 python3 scripts/test_replication.py
 ```
+
+---
+
+## 🐍 Бенчмарк Python SDK (`py_client_benchmark.py`)
+
+Высокопроизводительный бенчмарк клиентского уровня на базе официального пакета `gdb-client`:
+1. **Автоматический жизненный цикл схемы**: Создание `BenchUser` и `BENCH_KNOWS` с автоматическим удалением по завершении (или сохранением при `--keep-schema`).
+2. **Пачечная загрузка вершин и ребер**: Замер пропускной способности при групповых вставках через Cypher.
+3. **Графовая аналитика и обходы**: Оценка 1-hop и 2-hop обходов, алгоритмов PageRank и Louvain из Python.
+4. **Экспорт в NetworkX / Polars**: Проверка прямой конвертации результатов запросов в датафреймы Polars и графы NetworkX.
+
+### Установка зависимостей
+Файл зависимостей расположен в папке со скриптами `scripts/requirements.txt`:
+```bash
+pip install -r scripts/requirements.txt
+```
+
+### Запуск
+```bash
+python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --batch-size 500
+```
+
+### Параметры запуска
+* `--endpoint`: HTTP REST эндпоинт GDB (по умолчанию: `http://127.0.0.1:8847`).
+* `--vertices`: Количество синтетических вершин для генерации (по умолчанию: `5000`).
+* `--edges`: Количество синтетических ребер для генерации (по умолчанию: `15000`).
+* `--batch-size`: Размер пачки сущностей в одном Cypher-запросе (по умолчанию: `500`).
+* `--concurrency`: Число параллельных рабочих потоков (по умолчанию: `4`).
+* `--keep-schema`: Сохранить тестовую схему и данные в базе после завершения бенчмарка.
+

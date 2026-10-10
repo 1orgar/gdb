@@ -200,6 +200,63 @@ impl VertexPropertyTable {
     pub fn get_batches(&self) -> Vec<RecordBatch> {
         self.batches.read().clone()
     }
+
+    /// Performs vector similarity search (cosine, dot, or euclidean L2) against stored Vector properties.
+    pub fn vector_similarity_search(
+        &self,
+        property_name: &str,
+        query: &[f32],
+        k: usize,
+        metric: &str,
+    ) -> Vec<(VertexId, f32)> {
+        let mut candidates = Vec::new();
+        let query_norm = if metric.eq_ignore_ascii_case("cosine") {
+            let sum_sq: f32 = query.iter().map(|x| x * x).sum();
+            sum_sq.sqrt()
+        } else {
+            1.0
+        };
+
+        for entry in self.row_cache.iter() {
+            let vid = VertexId(*entry.key());
+            if let Some(DataValue::Vector(v)) = entry.value().get(property_name) {
+                if v.len() == query.len() {
+                    let score = match metric.to_lowercase().as_str() {
+                        "cosine" => {
+                            let dot: f32 = v.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                            let v_norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            if v_norm == 0.0 || query_norm == 0.0 {
+                                0.0
+                            } else {
+                                dot / (v_norm * query_norm)
+                            }
+                        }
+                        "dot" | "dot_product" => {
+                            v.iter().zip(query.iter()).map(|(a, b)| a * b).sum()
+                        }
+                        "l2" | "euclidean" => {
+                            let dist_sq: f32 = v.iter().zip(query.iter()).map(|(a, b)| (a - b) * (a - b)).sum();
+                            1.0 / (1.0 + dist_sq.sqrt())
+                        }
+                        _ => {
+                            let dot: f32 = v.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                            let v_norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            if v_norm == 0.0 || query_norm == 0.0 {
+                                0.0
+                            } else {
+                                dot / (v_norm * query_norm)
+                            }
+                        }
+                    };
+                    candidates.push((vid, score));
+                }
+            }
+        }
+
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(k);
+        candidates
+    }
 }
 
 /// Helper trait to append DataValues to Arrow array builders dynamically.

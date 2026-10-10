@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-analytics"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "arrow",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-cli"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1145,6 +1145,7 @@ dependencies = [
  "gdb-gpu",
  "gdb-parser",
  "gdb-planner",
+ "gdb-server",
  "gdb-storage",
  "parking_lot",
  "reedline",
@@ -1158,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1176,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-flight"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -1199,12 +1200,13 @@ dependencies = [
 
 [[package]]
 name = "gdb-gpu"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "gdb-core",
  "gdb-storage",
  "libc",
+ "rayon",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -1212,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-parser"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "gdb-core",
  "serde",
@@ -1222,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-planner"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -1231,6 +1233,7 @@ dependencies = [
  "futures",
  "gdb-analytics",
  "gdb-core",
+ "gdb-gpu",
  "gdb-parser",
  "gdb-storage",
  "parking_lot",
@@ -1242,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-raft"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -1261,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-s3"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "bytes",
@@ -1277,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-server"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1311,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-storage"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "arrow",
@@ -1335,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-studio"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1354,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-wal"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "bincode",
  "bytes",

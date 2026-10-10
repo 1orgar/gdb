@@ -212,3 +212,61 @@ fn test_explain_and_mutations() {
     assert!(res.batch.is_some());
     assert_eq!(res.batch.unwrap().num_rows(), 1);
 }
+
+#[test]
+fn test_executor_v050_features() {
+    let schema = Arc::new(RwLock::new(GraphSchema::new("test_v050")));
+    let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+    let gpu = Arc::new(gdb_gpu::GpuDispatcher::disabled());
+    let executor = QueryExecutor::with_gpu(schema.clone(), storage.clone(), gpu);
+
+    // 1. DDL with Vector type
+    executor.execute(parse("CREATE VERTEX Item (name STRING, vec VECTOR(3));").unwrap()).unwrap();
+    executor.execute(parse("CREATE EDGE SIMILAR ();").unwrap()).unwrap();
+
+    // 2. Insert items with Vector values
+    executor.execute(parse("INSERT VERTEX Item (id, name, vec) VALUES (1, 'ItemA', [1.0, 0.0, 0.0]);").unwrap()).unwrap();
+    executor.execute(parse("INSERT VERTEX Item (id, name, vec) VALUES (2, 'ItemB', [0.0, 1.0, 0.0]);").unwrap()).unwrap();
+    executor.execute(parse("INSERT VERTEX Item (id, name, vec) VALUES (3, 'ItemC', [0.9, 0.1, 0.0]);").unwrap()).unwrap();
+
+    // 3. ANALYZE GRAPH
+    let stats_res = executor.execute(parse("ANALYZE GRAPH;").unwrap()).unwrap();
+    assert!(stats_res.message.contains("Analyzed graph"));
+
+    // 4. Vector similarity search (cosine, dot, l2)
+    let search_res = executor.execute(parse(
+        "CALL vector.similaritySearch('Item', 'vec', [1.0, 0.0, 0.0], 2, 'cosine') YIELD vertex_id, score;"
+    ).unwrap()).unwrap();
+    assert!(search_res.batch.is_some());
+    let b = search_res.batch.unwrap();
+    assert_eq!(b.num_rows(), 2);
+
+    let dot_res = executor.execute(parse(
+        "CALL vector.similaritySearch('Item', 'vec', [1.0, 0.0, 0.0], 2, 'dot') YIELD vertex_id, score;"
+    ).unwrap()).unwrap();
+    assert!(dot_res.batch.is_some());
+
+    let l2_res = executor.execute(parse(
+        "CALL vector.similaritySearch('Item', 'vec', [1.0, 0.0, 0.0], 2, 'l2') YIELD vertex_id, score;"
+    ).unwrap()).unwrap();
+    assert!(l2_res.batch.is_some());
+
+    // 5. Cypher Relationship DML (CREATE / MERGE)
+    let create_edge_res = executor.execute(parse(
+        "MATCH (a:Item), (b:Item) CREATE (a)-[r:SIMILAR]->(b);"
+    ).unwrap()).unwrap();
+    assert!(create_edge_res.rows_affected > 0);
+
+    let merge_edge_res = executor.execute(parse(
+        "MATCH (a:Item), (b:Item) MERGE (a)-[r:SIMILAR]->(b);"
+    ).unwrap()).unwrap();
+    assert!(merge_edge_res.message.contains("Query completed"));
+
+    storage.compact();
+
+    // 6. Node2Vec Graph ML
+    let n2v_res = executor.execute(parse(
+        "CALL algo.node2vec({walk_length: 4, walks_per_vertex: 2, dimensions: 8}) YIELD vertex_id, embedding;"
+    ).unwrap()).unwrap();
+    assert!(n2v_res.batch.is_some());
+}

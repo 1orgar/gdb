@@ -60,6 +60,7 @@ graph TD
 | **[`scripts/data_loader.py`](file:///Users/kirill/Documents/projects/gdb/scripts/data_loader.py)** | Synthetic Scale-Free Graph Ingest | Bulk OLTP Ingestion & Batch Files | `User`, `FOLLOWS` | `http://127.0.0.1:8847` |
 | **[`scripts/graph_analytics_validation.py`](file:///Users/kirill/Documents/projects/gdb/scripts/graph_analytics_validation.py)** | Ground-Truth Math Algorithm Validator | 12 Ground-Truth Graph Topologies | `Node`, `REL` | `http://127.0.0.1:8847` |
 | **[`scripts/test_replication.py`](file:///Users/kirill/Documents/projects/gdb/scripts/test_replication.py)** | Symmetric Multi-Peer Ring Replication | Multi-Node Raft Ring Writes | `Device`, `LINKED` | `:8847`, `:8846`, `:8845` |
+| **[`scripts/py_client_benchmark.py`](file:///Users/kirill/Documents/projects/gdb/scripts/py_client_benchmark.py)** | Python SDK & Client Ingest Benchmark | High-Speed Polars & Batch Ingest | `BenchUser`, `BENCH_KNOWS` | `http://127.0.0.1:8847` |
 
 ---
 
@@ -212,6 +213,35 @@ Validates symmetric peer-to-peer data ingestion across a 3-node cluster ring:
 ./scripts/start_cluster.sh
 python3 scripts/test_replication.py
 ```
+
+---
+
+## 🐍 Python SDK Benchmark (`py_client_benchmark.py`)
+
+High-throughput client-side benchmark utilizing the official `gdb-client` package:
+1. **Automated Schema Lifecycle**: Recreates `BenchUser` and `BENCH_KNOWS` with clean schema drop upon completion (retained with `--keep-schema`).
+2. **Batch Vertex & Edge Ingestion**: Measures ingestion throughput utilizing batched multi-value Cypher statements.
+3. **Graph Analytics & Traversals**: Evaluates 1-hop and 2-hop traversals, PageRank, and Louvain algorithms from Python.
+4. **NetworkX / Polars Export**: Verifies zero-copy conversion of query results into Polars DataFrames and NetworkX graphs.
+
+### Dependencies
+Dependencies are maintained in `scripts/requirements.txt`:
+```bash
+pip install -r scripts/requirements.txt
+```
+
+### Execution
+```bash
+python3 scripts/py_client_benchmark.py --endpoint http://127.0.0.1:8847 --vertices 5000 --edges 15000 --batch-size 500
+```
+
+### CLI Parameters
+* `--endpoint`: Target GDB HTTP REST endpoint (default: `http://127.0.0.1:8847`).
+* `--vertices`: Number of synthetic vertices to ingest (default: `5000`).
+* `--edges`: Number of synthetic edges to ingest (default: `15000`).
+* `--batch-size`: Number of entities per Cypher batch statement (default: `500`).
+* `--concurrency`: Number of concurrent worker threads (default: `4`).
+* `--keep-schema`: Retain the test schema and data after the test concludes.
 
 ---
 

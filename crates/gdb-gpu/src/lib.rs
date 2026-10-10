@@ -59,11 +59,25 @@ mod tests {
         let cuda = CudaComputeBackend::new();
 
         assert_eq!(cuda.device_id(), 0);
+        assert!(!cuda.name().is_empty());
+        assert!(!cuda.device_name().is_empty());
+        let _ = cuda.has_active_cuda_context();
+        let _ = CudaComputeBackend::is_available();
+
         let bfs = cuda.parallel_bfs(&csr, VertexId(10), 2).unwrap();
         assert_eq!(bfs.len(), 3);
 
         let pr = cuda.pagerank(&csr, 0.85, 10).unwrap();
         assert_eq!(pr.len(), 3);
+
+        let wcc = cuda.wcc(&csr).unwrap();
+        assert_eq!(wcc.len(), 3);
+
+        let louvain = cuda.louvain(&csr, 5).unwrap();
+        assert_eq!(louvain.len(), 3);
+
+        let tri = cuda.triangle_count(&csr).unwrap();
+        assert_eq!(tri.len(), 3);
     }
 
     #[test]

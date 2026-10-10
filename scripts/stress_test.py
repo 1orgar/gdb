@@ -68,10 +68,11 @@ def setup_schema(endpoint):
     ]
     for s in stmts:
         send_query(endpoint, s)
-    # Seed initial vertices so MATCH traversals find real entities
-    for i in range(1, 51):
-        send_query(endpoint, f"INSERT VERTEX User (id, name, age) VALUES ({i}, 'User_{i}', {20 + i % 40});")
-        send_query(endpoint, f"INSERT VERTEX Device (id, model) VALUES ({i}, 'Model_{i}');")
+    # Seed initial vertices so MATCH traversals find real entities using multi-row batch insert
+    user_vals = ", ".join([f"({i}, 'User_{i}', {20 + i % 40})" for i in range(1, 101)])
+    send_query(endpoint, f"INSERT VERTEX User (id, name, age) VALUES {user_vals};")
+    device_vals = ", ".join([f"({i}, 'Model_{i}')" for i in range(1, 101)])
+    send_query(endpoint, f"INSERT VERTEX Device (id, model) VALUES {device_vals};")
 
 def teardown_schema(endpoint, silent=False):
     """Cleans up and drops test schemas created for the benchmark."""

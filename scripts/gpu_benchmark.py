@@ -67,7 +67,7 @@ def teardown_gpu_schema(endpoint, silent=False):
 def setup_gpu_schema(endpoint):
     print("[*] Recreating fresh GPU benchmark schema (GpuNode, GPU_EDGE)...")
     teardown_gpu_schema(endpoint, silent=True)
-    res_v, _ = send_query(endpoint, "CREATE VERTEX GpuNode (score FLOAT64);")
+    res_v, _ = send_query(endpoint, "CREATE VERTEX GpuNode (score FLOAT64, emb VECTOR(4));")
     res_e, _ = send_query(endpoint, "CREATE EDGE GPU_EDGE ();")
     if res_v.get("status") != "ok" or res_e.get("status") != "ok":
         print(f"\033[1;31m[!] Schema setup error: V={res_v.get('error')} | E={res_e.get('error')}\033[0m")
@@ -81,8 +81,8 @@ def ingest_gpu_graph(endpoint, num_vertices, num_edges):
     batch_size = 500
     for start_id in range(1, num_vertices + 1, batch_size):
         end_id = min(start_id + batch_size, num_vertices + 1)
-        vals = ", ".join([f"({vid}, {random.random():.4f})" for vid in range(start_id, end_id)])
-        q = f"INSERT VERTEX GpuNode (id, score) VALUES {vals};"
+        vals = ", ".join([f"({vid}, {random.random():.4f}, [{random.random():.3f}, {random.random():.3f}, 0.5, 0.1])" for vid in range(start_id, end_id)])
+        q = f"INSERT VERTEX GpuNode (id, score, emb) VALUES {vals};"
         send_query(endpoint, q)
 
     # Ingest edges (scale-free power law attachment)
@@ -162,6 +162,9 @@ def main():
         ("Triangle Counting & Clustering", "CALL algo.triangleCount() YIELD vertex_id, triangles;"),
         ("Single Source Shortest Path (SSSP)", "CALL algo.sssp({source: 1}) YIELD vertex_id, distance;"),
         ("Louvain Community Detection", "CALL algo.louvain({max_iter: 10}) YIELD vertex_id, community_id;"),
+        ("Multi-Hop Wavefront BFS (1..3)", "MATCH (a:GpuNode)-[:GPU_EDGE*1..3]->(b:GpuNode) WHERE a.id = 1 RETURN b.score LIMIT 20;"),
+        ("Parallel Vector Similarity Search", "CALL vector.similaritySearch('GpuNode', 'emb', [0.5, 0.5, 0.5, 0.1], 5, 'cosine') YIELD vertex_id, score;"),
+        ("Graph ML Node2Vec Embeddings", "CALL algo.node2vec({walk_length: 5, walks_per_vertex: 2, dimensions: 16}) YIELD vertex_id, embedding;"),
     ]
 
     print("\033[1;33m[*] Executing GPU-Accelerated Analytics Kernels...\033[0m\n")

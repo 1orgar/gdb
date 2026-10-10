@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 /// Adaptive Hybrid Dispatcher: routes graph analytics between CPU and GPU
 /// based on work-size thresholds and hardware availability.
+#[derive(Clone)]
 pub struct GpuDispatcher {
     backend: Arc<dyn GpuComputeBackend>,
     /// Whether GPU hardware acceleration is enabled
@@ -184,5 +185,17 @@ impl GpuDispatcher {
         } else {
             CpuFallbackBackend.triangle_count(csr)
         }
+    }
+
+    /// Dispatches parallel Vector Similarity Search to GPU accelerator or CPU.
+    pub fn vector_similarity(
+        &self,
+        vectors: &[f32],
+        dim: usize,
+        query: &[f32],
+        k: usize,
+        metric: &str,
+    ) -> GdbResult<Vec<(usize, f32)>> {
+        self.backend.vector_similarity(vectors, dim, query, k, metric)
     }
 }

@@ -1,5 +1,5 @@
 use gdb_parser::ast::*;
-use gdb_parser::parse;
+use gdb_parser::{parse, parse_script, split_statements};
 
 #[test]
 fn test_parser_ddl_and_indexes() {
@@ -119,3 +119,39 @@ fn test_parser_errors() {
     assert!(parse("CREATE VERTEX").is_err());
     assert!(parse("MATCH (a) WHERE").is_err());
 }
+
+#[test]
+fn test_parser_v050_features() {
+    // 1. split_statements and parse_script
+    let script = "CREATE VERTEX V (vec VECTOR(3)); INSERT VERTEX V (id, vec) VALUES (1, [0.1, 0.2, 0.3]); ANALYZE GRAPH;";
+    let parts = split_statements(script);
+    assert_eq!(parts.len(), 3);
+    let parsed_stmts = parse_script(script).unwrap();
+    assert_eq!(parsed_stmts.len(), 3);
+
+    // 2. Vector property and literals
+    let stmt = parse("CREATE VERTEX Doc (title STRING, emb VECTOR(64));").unwrap();
+    assert!(matches!(stmt, Statement::CreateVertexLabel { .. }));
+
+    let stmt = parse("INSERT VERTEX Doc (id, title, emb) VALUES (1, 'Paper', [1.0, 2.0, 3.0]);").unwrap();
+    assert!(matches!(stmt, Statement::InsertVertex { .. }));
+
+    // 3. ANALYZE GRAPH
+    let stmt = parse("ANALYZE GRAPH;").unwrap();
+    assert!(matches!(stmt, Statement::AnalyzeGraph));
+
+    // 4. Edge mutation in Cypher
+    let stmt = parse("MATCH (a:User), (b:User) CREATE (a)-[r:FOLLOWS]->(b);").unwrap();
+    assert!(matches!(stmt, Statement::Query(_)));
+
+    let stmt = parse("MATCH (a:User), (b:User) MERGE (a)-[r:FOLLOWS]->(b);").unwrap();
+    assert!(matches!(stmt, Statement::Query(_)));
+
+    // 5. Node2Vec and Vector search
+    let stmt = parse("CALL algo.node2vec({walk_length: 10, dimensions: 32}) YIELD vertex_id, embedding;").unwrap();
+    assert!(matches!(stmt, Statement::CallAlgorithm { .. }));
+
+    let stmt = parse("CALL vector.similaritySearch('Doc', 'emb', [1.0, 0.0], 5, 'cosine') YIELD vertex_id, score;").unwrap();
+    assert!(matches!(stmt, Statement::CallAlgorithm { .. }));
+}
+

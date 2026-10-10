@@ -2,12 +2,12 @@
 
 # GDB — Распределенная высокопроизводительная In-Memory Графовая СУБД (Альтернатива Nebula Graph)
 
-[![Version](https://img.shields.io/badge/version-v0.4.2-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-81.6%25-brightgreen)](docs/COVERAGE.md)
+[![Coverage](https://img.shields.io/badge/coverage-80.6%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-Высокопроизводительный распределенный HTAP графовый движок СУБД на **Rust**, включающий in-memory топологию Compressed Sparse Row (CSR), столбчатое хранение свойств Apache Arrow, поддержку языка openCypher/GQL и DML мутаций, вторичные индексы свойств, беслидерное кольцо Multi-Raft репликации, многоуровневое хранилище с персистентностью в S3 (Parquet), распределенный MPP обмен через Apache Arrow Flight и **аппаратное GPU-ускорение Apple Metal (UMA Zero-Copy) / NVIDIA CUDA**.
+Высокопроизводительный распределенный HTAP графовый движок СУБД на **Rust**, включающий in-memory топологию Compressed Sparse Row (CSR), столбчатое хранение свойств Apache Arrow, поддержку языка openCypher/GQL и DML мутаций, вторичные индексы свойств, беслидерное кольцо Multi-Raft репликации, многоуровневое хранилище с персистентностью в S3 (Parquet), распределенный MPP обмен через Apache Arrow Flight, **аппаратное GPU-ускорение Apple Metal (UMA Zero-Copy) / NVIDIA CUDA**, нативные **векторные эмбеддинги & поиск сходства**, и **Cost-Based Optimizer (CBO)**.
 
 ---
 
@@ -20,41 +20,40 @@
    - **Вторичные индексы свойств (Secondary Indexes):** Быстрый $O(1)$ точечный поиск по свойствам сущностей (`CREATE INDEX ON :Label(prop)` / `DROP INDEX`), автоматическое обновление индекса при вставках, мутациях и удалениях.
    - **Фоновый микро-компактор:** Слияние Delta MemTable в плотный CSR без блокировки чтения.
 
-2. **Язык запросов, DML & Аналитика (openCypher / GQL / CALL algo):**
-   - **Шаблоны и Multi-Hop обходы:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name`.
-   - **Конвейер оператора `WITH`:** Промежуточные проекции, группировки и фильтрации: `MATCH (u:User) WITH u.department AS dept, count(u) AS cnt WHERE cnt > 1 RETURN dept, cnt ORDER BY dept ASC`.
-   - **Cypher DML (Мутации & Слияния):** `MATCH (u:User {name: 'Alice'}) SET u.age = 31`, `MATCH (u:User) DELETE u`, `MATCH (u:User) DETACH DELETE u`, `MERGE (u:User {name: 'Charlie', age: 35})`.
-   - **Агрегации & Пагинация:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `DISTINCT`, `ORDER BY prop [ASC|DESC]`, `SKIP N` / `OFFSET N`, `LIMIT N`.
-   - **Инспекция плана выполнения (EXPLAIN):** `EXPLAIN <query>` генерирует оптимизированный физический план выполнения запроса с оценкой операторов (`IndexScan`, `Filter`, `Projection`, `Sort`, `Aggregate`, `Mutate`).
-   - **Пакет Nebula Enterprise Analytics:** `CALL algo.pageRank(...)`, `CALL algo.louvain(...)`, `CALL algo.wcc(...)`, `CALL algo.triangleCount(...)`, `CALL algo.kCore(...)`, `CALL algo.betweenness(...)`, `CALL algo.sssp(...)`, `CALL algo.similarity(...)`.
+2. **Язык запросов, Multi-Statement DML & Аналитика (openCypher / GQL / CALL algo):**
+   - **Исполнение скриптов с несколькими выражениями & Batch API:** Запросы, разделенные точкой с запятой (`split_statements`), мультизапросный эндпоинт `/query`, эндпоинт `/batch`, и кнопка «Run All» в Studio UI с отслеживанием прогресса каждого шага.
+   - **Cypher Relationship DML:** `MATCH (a:User), (b:User) CREATE (a)-[r:FOLLOWS]->(b)`, `MERGE (a)-[r:KNOWS]->(b)`.
+   - **Шаблоны и Multi-Hop обходы:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name` с GPU-ускорением BFS.
+   - **Конвейер оператора `WITH`:** Промежуточные проекции, группировки и фильтрации.
+   - **Cypher DML (Мутации & Слияния):** `MATCH (u:User {name: 'Alice'}) SET u.age = 31`, `DELETE`, `DETACH DELETE`, `MERGE`.
+   - **Инспекция плана выполнения (EXPLAIN):** `EXPLAIN <query>` генерирует оптимизированный физический план выполнения запроса.
+   - **Пакет Nebula Enterprise Analytics & Graph ML:** `CALL algo.node2vec(...)`, `CALL algo.pageRank(...)`, `CALL algo.louvain(...)`, `CALL algo.wcc(...)`, `CALL algo.triangleCount(...)`, `CALL algo.kCore(...)`, `CALL algo.betweenness(...)`, `CALL algo.sssp(...)`, `CALL algo.similarity(...)`.
 
-3. **Горизонтальное масштабирование и Беслидерное кольцо (Leaderless Hash Ring):**
-   - Равноправные узлы (Symmetric Peers) в стиле Dynamo/Cassandra без единой точки отказа (SPOF).
-   - Настраиваемый фактор репликации (`--replication-factor 1..N`) и режим (`--sync` / `--async`).
-   - При RF=1 кластер работает как чистый MPP с распределенным шардированием (1D Edge Cut) без избыточности.
-   - Независимые Raft-партиции с локальным журналом `gdb-wal` (CRC32).
+3. **Нативные векторные эмбеддинги и поиск сходства:**
+   - **Тип `VECTOR(dim)`:** Столбчатое представление в Apache Arrow `FixedSizeList` и парсер векторных литералов `[1.0, 2.0, 3.0]`.
+   - **Поиск векторного сходства:** `CALL vector.similaritySearch(label, property, query_vector, k, metric)` с поддержкой метрик косинусного сходства (`cosine`), скалярного произведения (`dot`) и евклидова расстояния (`l2`).
+   - **Оптимизатор на основе стоимости (CBO):** `ANALYZE GRAPH;` со сбором статистики распределения степеней и кардинальности меток.
 
 4. **Аппаратное GPU-ускорение (Metal на Mac / CUDA на Linux):**
+   - **Максимальный GPU Offload графовых операций:** Автоматический перенос на GPU для обходов переменной длины (`VarLengthExpand` wavefront BFS), вычисления векторного сходства и графовых алгоритмов.
    - **Apple Silicon (M-серия):** Архитектура единой памяти **Unified Memory Architecture (UMA)** позволяет графическому процессору читать топологию графа из RAM **напрямую с нулевой стоимостью копирования (Zero-Copy)**.
-   - **Linux NVIDIA (CUDA):** Нативный CudaComputeBackend в `gdb-gpu` для параллельных вычислений BFS, PageRank, Louvain Community Detection, WCC и Triangle Counting на серверных GPU (Tesla V100, A100, H100, RTX).
-   - **Гибкая конфигурация:** Флаг включения `--enable-gpu` (по умолчанию выключено), выбор устройства `--gpu-device <ID>`, порог переключения `--gpu-offload-threshold <N>`.
+   - **Linux NVIDIA (CUDA):** Нативный CudaComputeBackend в `gdb-gpu` для параллельных вычислений на серверных GPU.
    - **CPU SIMD Fallback:** При выключенном GPU или отсутствии графического процессора автоматически используется векторизованный параллельный бэкенд на Rayon.
 
-5. **GDB Studio v0.4.1 (Интерактивный Web Workspace):**
-   - **Чистый каталог по умолчанию:** База запускается с чистым каталогом без тестовых сущностей.
-   - **Интерактивный Schema Manager:** Просмотр, создание, изменение и удаление тегов вершин и типов ребер визуально или запросом Cypher DDL.
-   - Физическая визуализация графа (60 FPS 2D Canvas & 3D Unity WebGL).
-   - **🔍 Визуализатор Execution Plan DAG:** Наглядное отображение этапов выполнения запроса и ASCII-дерево.
-   - **📈 Real-Time Engine Telemetry:** Графики-спарклайны в реальном времени для QPS, задержки исполнения запросов и динамики RAM.
-   - **Экспорт данных:** Выгрузка топологии и результатов в форматы PNG, SVG, CSV и JSON.
+5. **GDB Studio v0.5.0 (Интерактивный Web Workspace):**
+   - **Выполнение скриптов «Run All»:** Индикатор прогресса шагов (`Step: X / Y`), пакетное исполнение и подсветка ошибок.
+   - **Инспектор векторов:** Аккуратное моноширинное форматирование многомерных векторов и скоров сходства.
+   - **Чистый каталог по умолчанию & Interactive Schema Manager:** Просмотр, создание, изменение и удаление сущностей визуально.
+   - **Физическая визуализация & Execution Plan DAG:** 60 FPS Canvas & 3D Unity WebGL, визуализатор плана выполнения запроса, спарклайны телеметрии.
 
-6. **Выделенный транспорт Arrow Flight & Клиентская библиотека Python:**
-   - **Разделение портов:** Межсервисный MPP shuffle (`--port 8848+`) изолирован от внешнего высокоскоростного порта загрузки и запросов (`--client-flight-port 8860+`).
-   - **Python Клиент (`gdb-py-client`):** Параллельный scatter-ingest на основе **Polars** и Arrow Flight Streaming `do_put` напрямую в партиции целевых нод.
+6. **Официальный Python SDK & Arrow Flight (`gdb-client`):**
+   - **Автономный пакет `gdb-client`:** Экспорт результатов в Polars DataFrame и NetworkX Graph.
+   - **Автоматизированный бенчмарк:** `scripts/py_client_benchmark.py` с автоматическим созданием и очисткой схемы (`--keep-schema`).
+   - **Разделение портов:** Межсервисный MPP shuffle (`--port 8848+`) изолирован от клиентского порта (`--client-flight-port 8860+`).
 
-7. **Персистентность в S3 (Tiered Storage):**
-   - Асинхронный сброс снапшотов партиций в **S3 / MinIO** в сжатом формате **Apache Parquet (ZSTD)**.
-   - Быстрое восстановление при сбое: загрузка Parquet из S3 + replay последних записей Raft WAL.
+7. **Горизонтальное масштабирование & Персистентность в S3:**
+   - Беслидерное кольцо с настраиваемым фактором репликации (`--replication-factor 1..N`) и режимом (`--sync` / `--async`).
+   - Асинхронный сброс снапшотов партиций в **S3 / MinIO** в формате **Apache Parquet (ZSTD)**.
 
 ---
 

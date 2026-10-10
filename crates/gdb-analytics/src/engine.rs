@@ -7,6 +7,7 @@ use crate::lpa::label_propagation;
 use crate::pagerank::pagerank;
 use crate::scc::strongly_connected_components;
 use crate::similarity::{common_neighbors, cosine_similarity, jaccard_similarity};
+use crate::node2vec::node2vec;
 use crate::sssp::single_source_shortest_path;
 use crate::triangles::triangle_count;
 use crate::wcc::weakly_connected_components;
@@ -332,6 +333,39 @@ impl AnalyticsEngine {
             Arc::new(Float64Array::from(vec![jaccard])),
             Arc::new(Float64Array::from(vec![cosine])),
             Arc::new(UInt64Array::from(vec![common])),
+        ];
+
+        Ok(RecordBatch::try_new(schema, columns)?)
+    }
+
+    /// Executes Node2Vec representation learning on CSR and returns (vertex_id, embedding).
+    pub fn run_node2vec(
+        csr: &ChunkedCsr,
+        dimensions: usize,
+        walk_length: usize,
+        num_walks: usize,
+        p: f64,
+        q: f64,
+    ) -> GdbResult<RecordBatch> {
+        let results = node2vec(csr, dimensions, walk_length, num_walks, p, q);
+
+        let mut vids = Vec::with_capacity(results.len());
+        let mut string_embeddings = Vec::with_capacity(results.len());
+
+        for (vid, emb) in results {
+            vids.push(vid.as_u64());
+            let s = format!("[{}]", emb.iter().map(|x| format!("{:.4}", x)).collect::<Vec<_>>().join(", "));
+            string_embeddings.push(s);
+        }
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("vertex_id", DataType::UInt64, false),
+            Field::new("embedding", DataType::Utf8, false),
+        ]));
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(UInt64Array::from(vids)),
+            Arc::new(arrow::array::StringArray::from(string_embeddings)),
         ];
 
         Ok(RecordBatch::try_new(schema, columns)?)

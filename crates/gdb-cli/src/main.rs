@@ -114,7 +114,21 @@ fn format_cell(val: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.clone(),
-        Value::Array(arr) => format!("[{} items]", arr.len()),
+        Value::Array(arr) => {
+            if arr.len() <= 6 {
+                let items: Vec<String> = arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Number(n) => n.to_string(),
+                        Value::String(s) => format!("'{}'", s),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                format!("[{}]", items.join(", "))
+            } else {
+                format!("[{} items: {}, {}, ...]", arr.len(), arr[0], arr[1])
+            }
+        }
         Value::Object(_) => format!("{}", val),
     }
 }
@@ -432,14 +446,15 @@ fn execute_query(
             }
 
             let start = std::time::Instant::now();
-            let stmt = gdb_parser::parse(input)?;
-            let res = executor.execute(stmt)?;
-            let elapsed = start.elapsed();
-
-            if let Some(batch) = res.batch {
-                arrow::util::pretty::print_batches(&[batch])?;
+            let stmts = gdb_parser::split_statements(input);
+            for stmt_str in stmts {
+                let stmt = gdb_parser::parse(&stmt_str)?;
+                let res = executor.execute(stmt)?;
+                if let Some(batch) = res.batch {
+                    arrow::util::pretty::print_batches(&[batch])?;
+                }
+                println!("\x1b[1;32m{} (took {:?})\x1b[0m", res.message, start.elapsed());
             }
-            println!("\x1b[1;32m{} (took {:?})\x1b[0m", res.message, elapsed);
         }
     }
 
@@ -632,7 +647,8 @@ mod tests {
         assert_eq!(format_cell(&Value::Bool(true)), "true");
         assert_eq!(format_cell(&serde_json::json!(42)), "42");
         assert_eq!(format_cell(&Value::String("test".into())), "test");
-        assert_eq!(format_cell(&serde_json::json!([1, 2, 3])), "[3 items]");
+        assert_eq!(format_cell(&serde_json::json!([1, 2, 3])), "[1, 2, 3]");
+        assert_eq!(format_cell(&serde_json::json!([1, 2, 3, 4, 5, 6, 7])), "[7 items: 1, 2, ...]");
         assert!(format_cell(&serde_json::json!({"a": 1})).contains("1"));
 
         let cols = vec!["Col1".to_string(), "Col2".to_string()];
@@ -732,6 +748,48 @@ mod tests {
         let _ = execute_query(&mut mode, "compact");
         let _ = execute_query(&mut mode, "MATCH (n) RETURN n;");
     }
+
+    #[test]
+    fn test_online_cluster_mode() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _server_thread = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let wal_dir = tempfile::tempdir().unwrap();
+                let (addr, _handle, _state) = gdb_server::create_test_server(wal_dir.path().to_path_buf()).await.unwrap();
+                tx.send(addr).unwrap();
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            });
+        });
+
+        let addr = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let endpoint = format!("http://{}", addr);
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        show_cluster(&client, &endpoint);
+        show_resources(&client, &endpoint);
+        show_gpu(&client, &endpoint);
+
+        let mut mode = ClientMode::Cluster {
+            endpoint: endpoint.clone(),
+            client,
+        };
+
+        // Query execution against real server
+        assert!(execute_query(&mut mode, "SHOW SCHEMA;").is_ok());
+        assert!(execute_query(&mut mode, "compact").is_ok());
+        assert!(execute_query(&mut mode, ":CLUSTER").is_ok());
+        assert!(execute_query(&mut mode, ":RESOURCES").is_ok());
+        assert!(execute_query(&mut mode, ":GPU").is_ok());
+    }
+
 
     #[test]
     fn test_cli_args_parsing() {

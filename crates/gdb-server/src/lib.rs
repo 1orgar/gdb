@@ -130,6 +130,12 @@ pub struct QueryRequest {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BatchRequest {
+    pub queries: Option<Vec<String>>,
+    pub script: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReplicationPayload {
     pub query: String,
 }
@@ -306,7 +312,9 @@ async fn handle_gpu(State(state): State<AppState>) -> impl IntoResponse {
         "supported_kernels": [
             "Parallel BFS Frontier Expansion",
             "Vectorized PageRank Iteration",
-            "Cosine / Jaccard Graph Kernel"
+            "Cosine / Jaccard Graph Kernel",
+            "Parallel Vector Similarity Search (SIMD/GPU)",
+            "Multi-Hop Traversal Wavefront BFS"
         ]
     }))
 }
@@ -585,18 +593,8 @@ async fn replicate_to_targets(
     }
 }
 
-async fn handle_query(
-    State(state): State<AppState>,
-    body: String,
-) -> impl IntoResponse {
+async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Value {
     let start = Instant::now();
-    let query_str = if let Ok(parsed) = serde_json::from_str::<QueryRequest>(&body) {
-        parsed.query
-    } else {
-        body
-    };
-
-    let trimmed = query_str.trim();
 
     // Check for compact command
     if trimmed.eq_ignore_ascii_case("compact") || trimmed.eq_ignore_ascii_case("compact;") {
@@ -609,14 +607,14 @@ async fn handle_query(
         let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
         replicate_to_targets(&state.http_client, &other_nodes, "compact;", state.replication_mode, &state.replications_count).await;
 
-        return Json(serde_json::json!({
+        return serde_json::json!({
             "status": "ok",
             "message": "Compaction completed",
             "elapsed_us": elapsed_us,
             "num_rows": 0,
             "columns": [],
             "rows": []
-        }));
+        });
     }
 
     // Check for snapshot command
@@ -635,29 +633,29 @@ async fn handle_query(
             let ver = state.storage.next_commit_version();
             match s3.upload_csr_snapshot(state.node_id as u32, ver, &state.storage).await {
                 Ok(key) => {
-                    return Json(serde_json::json!({
+                    return serde_json::json!({
                         "status": "ok",
                         "message": format!("Parquet snapshot uploaded to S3: {}", key),
                         "elapsed_us": elapsed_us,
                         "num_rows": 1,
                         "columns": ["snapshot_key", "version", "bucket"],
                         "rows": [[key, ver, state.s3_bucket.clone().unwrap_or_default()]]
-                    }));
+                    });
                 }
                 Err(e) => {
-                    return Json(serde_json::json!({
+                    return serde_json::json!({
                         "status": "error",
                         "error": format!("S3 upload failed: {}", e),
                         "elapsed_us": elapsed_us
-                    }));
+                    });
                 }
             }
         } else {
-            return Json(serde_json::json!({
+            return serde_json::json!({
                 "status": "error",
                 "error": "S3 tiered storage is not configured. Start server with --s3-bucket <bucket> or export AWS_BUCKET",
                 "elapsed_us": elapsed_us
-            }));
+            });
         }
     }
 
@@ -665,11 +663,11 @@ async fn handle_query(
         Ok(s) => s,
         Err(e) => {
             state.queries_err.fetch_add(1, Ordering::Relaxed);
-            return Json(serde_json::json!({
+            return serde_json::json!({
                 "status": "error",
                 "error": format!("Syntax error: {}", e),
                 "elapsed_us": start.elapsed().as_micros()
-            }));
+            });
         }
     };
 
@@ -679,6 +677,10 @@ async fn handle_query(
             | gdb_parser::ast::Statement::CreateEdgeType { .. }
             | gdb_parser::ast::Statement::CreateIndex { .. }
             | gdb_parser::ast::Statement::DropIndex { .. }
+            | gdb_parser::ast::Statement::DropVertexLabel { .. }
+            | gdb_parser::ast::Statement::DropEdgeType { .. }
+            | gdb_parser::ast::Statement::AlterVertexLabel { .. }
+            | gdb_parser::ast::Statement::AlterEdgeType { .. }
     );
 
     if is_ddl {
@@ -692,22 +694,22 @@ async fn handle_query(
                 let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
                 replicate_to_targets(&state.http_client, &other_nodes, trimmed, state.replication_mode, &state.replications_count).await;
 
-                return Json(serde_json::json!({
+                return serde_json::json!({
                     "status": "ok",
                     "message": res.message,
                     "elapsed_us": elapsed_us,
                     "num_rows": 0,
                     "columns": [],
                     "rows": []
-                }));
+                });
             }
             Err(e) => {
                 state.queries_err.fetch_add(1, Ordering::Relaxed);
-                return Json(serde_json::json!({
+                return serde_json::json!({
                     "status": "error",
                     "error": format!("DDL execution error: {}", e),
                     "elapsed_us": start.elapsed().as_micros()
-                }));
+                });
             }
         }
     }
@@ -731,7 +733,7 @@ async fn handle_query(
 
                     replicate_to_targets(&state.http_client, &targets, trimmed, state.replication_mode, &state.replications_count).await;
 
-                    return Json(serde_json::json!({
+                    return serde_json::json!({
                         "status": "ok",
                         "message": res.message,
                         "elapsed_us": elapsed_us,
@@ -739,15 +741,15 @@ async fn handle_query(
                         "rows_affected": res.rows_affected,
                         "columns": [],
                         "rows": []
-                    }));
+                    });
                 }
                 Err(e) => {
                     state.queries_err.fetch_add(1, Ordering::Relaxed);
-                    return Json(serde_json::json!({
+                    return serde_json::json!({
                         "status": "error",
                         "error": format!("Execution error: {}", e),
                         "elapsed_us": start.elapsed().as_micros()
-                    }));
+                    });
                 }
             }
         }
@@ -772,7 +774,7 @@ async fn handle_query(
 
                     replicate_to_targets(&state.http_client, &targets, trimmed, state.replication_mode, &state.replications_count).await;
 
-                    return Json(serde_json::json!({
+                    return serde_json::json!({
                         "status": "ok",
                         "message": res.message,
                         "elapsed_us": elapsed_us,
@@ -780,15 +782,15 @@ async fn handle_query(
                         "rows_affected": res.rows_affected,
                         "columns": [],
                         "rows": []
-                    }));
+                    });
                 }
                 Err(e) => {
                     state.queries_err.fetch_add(1, Ordering::Relaxed);
-                    return Json(serde_json::json!({
+                    return serde_json::json!({
                         "status": "error",
                         "error": format!("Execution error: {}", e),
                         "elapsed_us": start.elapsed().as_micros()
-                    }));
+                    });
                 }
             }
         }
@@ -814,7 +816,7 @@ async fn handle_query(
             let payload = serde_json::json!({ "query": trimmed });
             if let Ok(resp) = state.http_client.post(&primary_url).json(&payload).send().await {
                 if let Ok(json_resp) = resp.json::<serde_json::Value>().await {
-                    return Json(json_resp);
+                    return json_resp;
                 }
             }
         }
@@ -829,7 +831,7 @@ async fn handle_query(
                 let remote_replicas: Vec<RingNode> = replica_set.into_iter().filter(|n| n.node_id != state.node_id).collect();
                 replicate_to_targets(&state.http_client, &remote_replicas, trimmed, state.replication_mode, &state.replications_count).await;
 
-                return Json(serde_json::json!({
+                return serde_json::json!({
                     "status": "ok",
                     "message": res.message,
                     "elapsed_us": elapsed_us,
@@ -837,15 +839,15 @@ async fn handle_query(
                     "rows_affected": res.rows_affected,
                     "columns": [],
                     "rows": []
-                }));
+                });
             }
             Err(e) => {
                 state.queries_err.fetch_add(1, Ordering::Relaxed);
-                return Json(serde_json::json!({
+                return serde_json::json!({
                     "status": "error",
                     "error": format!("Execution error: {}", e),
                     "elapsed_us": start.elapsed().as_micros()
-                }));
+                });
             }
         }
     }
@@ -873,6 +875,7 @@ async fn handle_query(
                             Ok(DataValue::Float64(f)) => serde_json::json!(f),
                             Ok(DataValue::String(s)) => serde_json::json!(s),
                             Ok(DataValue::Boolean(b)) => serde_json::json!(b),
+                            Ok(DataValue::Vector(v)) => serde_json::json!(v),
                             Ok(DataValue::Null) => serde_json::Value::Null,
                             _ => serde_json::json!(format!("{:?}", col)),
                         };
@@ -882,7 +885,7 @@ async fn handle_query(
                 }
             }
 
-            Json(serde_json::json!({
+            serde_json::json!({
                 "status": "ok",
                 "message": res.message,
                 "elapsed_us": elapsed_us,
@@ -890,17 +893,132 @@ async fn handle_query(
                 "rows_affected": res.rows_affected,
                 "columns": columns,
                 "rows": rows,
-            }))
+            })
         }
         Err(e) => {
             state.queries_err.fetch_add(1, Ordering::Relaxed);
-            Json(serde_json::json!({
+            serde_json::json!({
                 "status": "error",
                 "error": format!("Execution error: {}", e),
                 "elapsed_us": start.elapsed().as_micros()
-            }))
+            })
         }
     }
+}
+
+async fn handle_query(
+    State(state): State<AppState>,
+    body: String,
+) -> impl IntoResponse {
+    let start = Instant::now();
+    let query_str = if let Ok(parsed) = serde_json::from_str::<QueryRequest>(&body) {
+        parsed.query
+    } else {
+        body
+    };
+
+    let trimmed = query_str.trim();
+    let stmts = gdb_parser::split_statements(trimmed);
+
+    if stmts.is_empty() {
+        state.queries_err.fetch_add(1, Ordering::Relaxed);
+        return Json(serde_json::json!({
+            "status": "error",
+            "error": "Syntax error: Empty query string",
+            "elapsed_us": start.elapsed().as_micros()
+        }));
+    }
+
+    if stmts.len() == 1 {
+        let res = execute_single_query(&state, &stmts[0]).await;
+        return Json(res);
+    }
+
+    // Multi-statement script execution
+    let mut total_rows_affected = 0;
+    let mut last_res = serde_json::Value::Null;
+
+    for (idx, stmt_str) in stmts.iter().enumerate() {
+        let res = execute_single_query(&state, stmt_str).await;
+        if res.get("status").and_then(|s| s.as_str()) == Some("error") {
+            let err_msg = res.get("error").and_then(|e| e.as_str()).unwrap_or("Unknown error");
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": format!("Statement {} error: {}", idx + 1, err_msg),
+                "statement_index": idx,
+                "failed_statement": stmt_str,
+                "statements_executed": idx,
+                "elapsed_us": start.elapsed().as_micros()
+            }));
+        }
+
+        if let Some(ra) = res.get("rows_affected").and_then(|r| r.as_u64()) {
+            total_rows_affected += ra as usize;
+        }
+        last_res = res;
+    }
+
+    let mut final_obj = match last_res {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    final_obj.insert("status".to_string(), serde_json::json!("ok"));
+    final_obj.insert(
+        "message".to_string(),
+        serde_json::json!(format!("Executed {} statements successfully", stmts.len())),
+    );
+    final_obj.insert("rows_affected".to_string(), serde_json::json!(total_rows_affected));
+    final_obj.insert("elapsed_us".to_string(), serde_json::json!(start.elapsed().as_micros()));
+    final_obj.insert("statements_executed".to_string(), serde_json::json!(stmts.len()));
+
+    Json(serde_json::Value::Object(final_obj))
+}
+
+async fn handle_batch(
+    State(state): State<AppState>,
+    body: String,
+) -> impl IntoResponse {
+    let start = Instant::now();
+    let queries: Vec<String> = if let Ok(parsed) = serde_json::from_str::<BatchRequest>(&body) {
+        if let Some(list) = parsed.queries {
+            list
+        } else if let Some(script) = parsed.script {
+            gdb_parser::split_statements(&script)
+        } else {
+            vec![]
+        }
+    } else if let Ok(parsed_list) = serde_json::from_str::<Vec<String>>(&body) {
+        parsed_list
+    } else {
+        gdb_parser::split_statements(&body)
+    };
+
+    let mut results = Vec::with_capacity(queries.len());
+    let mut ok_count = 0;
+    let mut err_count = 0;
+
+    for q in &queries {
+        let trimmed = q.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let res = execute_single_query(&state, trimmed).await;
+        if res.get("status").and_then(|s| s.as_str()) == Some("ok") {
+            ok_count += 1;
+        } else {
+            err_count += 1;
+        }
+        results.push(res);
+    }
+
+    Json(serde_json::json!({
+        "status": if err_count == 0 { "ok" } else { "partial_error" },
+        "total": results.len(),
+        "succeeded": ok_count,
+        "failed": err_count,
+        "elapsed_us": start.elapsed().as_micros(),
+        "results": results
+    }))
 }
 
 pub fn create_router(app_state: AppState) -> Router {
@@ -914,6 +1032,7 @@ pub fn create_router(app_state: AppState) -> Router {
         .route("/compact", post(handle_compact))
         .route("/snapshot", post(handle_snapshot))
         .route("/query", post(handle_query))
+        .route("/batch", post(handle_batch))
         .route("/replicate", post(handle_replicate))
         .route("/raft/replicate", post(handle_replicate))
         .with_state(app_state)
@@ -1034,7 +1153,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("\x1b[1;32m[+] Multi-Raft:\x1b[0m Initialized {} partition groups", args.partitions);
 
     let storage_p0 = raft_manager.get_group(0).unwrap().storage.clone();
-    let executor = Arc::new(QueryExecutor::new(schema.clone(), storage_p0.clone()));
+    let executor = Arc::new(QueryExecutor::with_gpu(
+        schema.clone(),
+        storage_p0.clone(),
+        Arc::new(gpu_dispatcher.clone()),
+    ));
 
     // Clean graph catalog boot (no default entities created on startup)
     println!("\x1b[1;32m[+] Graph Catalog:\x1b[0m Clean graph catalog initialized (no default entities)");

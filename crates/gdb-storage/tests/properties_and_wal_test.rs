@@ -76,3 +76,61 @@ fn test_vertex_property_table_lifecycle() {
     assert_eq!(table.len(), 1);
     assert!(!table.delete_vertex(VertexId(100))); // second delete returns false
 }
+
+#[test]
+fn test_vector_similarity_and_graph_statistics() {
+    use gdb_core::schema::GraphSchema;
+    use gdb_storage::PartitionStorageEngine;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    let schema_def = VertexSchema::new(
+        "Document",
+        LabelId(2),
+        vec![
+            PropertySpec::new("title", DataType::String, false),
+            PropertySpec::new("emb", DataType::Vector(3), false),
+        ],
+    );
+
+    let table = VertexPropertyTable::new(&schema_def);
+
+    let mut p1 = HashMap::new();
+    p1.insert("title".to_string(), DataValue::String("Doc1".into()));
+    p1.insert("emb".to_string(), DataValue::Vector(vec![1.0, 0.0, 0.0]));
+    table.set_properties(VertexId(1), p1);
+
+    let mut p2 = HashMap::new();
+    p2.insert("title".to_string(), DataValue::String("Doc2".into()));
+    p2.insert("emb".to_string(), DataValue::Vector(vec![0.0, 1.0, 0.0]));
+    table.set_properties(VertexId(2), p2);
+
+    let mut p3 = HashMap::new();
+    p3.insert("title".to_string(), DataValue::String("Doc3".into()));
+    p3.insert("emb".to_string(), DataValue::Vector(vec![0.8, 0.2, 0.0]));
+    table.set_properties(VertexId(3), p3);
+
+    // Vector similarity search
+    let matches = table.vector_similarity_search("emb", &[1.0, 0.0, 0.0], 2, "cosine");
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].0, VertexId(1));
+    assert_eq!(matches[1].0, VertexId(3));
+
+    // Analyze graph statistics
+    let mut schema = GraphSchema::new("test_stats");
+    let label_id = schema.register_vertex_label("Document", vec![
+        PropertySpec::new("title", DataType::String, false),
+    ]).unwrap();
+    let edge_type = schema.register_edge_type("REF", vec![]).unwrap();
+
+    let storage = PartitionStorageEngine::new(0, Arc::new(RwLock::new(schema)));
+    storage.set_vertex_properties(VertexId(10), label_id, HashMap::new()).unwrap();
+    storage.set_vertex_properties(VertexId(20), label_id, HashMap::new()).unwrap();
+    storage.insert_edge(gdb_core::EdgeId::new(VertexId(10), edge_type, 1, VertexId(20)), 1);
+
+    let stats = storage.analyze_graph();
+    assert_eq!(stats.total_vertices, 2);
+    assert_eq!(stats.total_edges, 1);
+    assert_eq!(stats.vertices_per_label.get("Document"), Some(&2));
+    assert_eq!(stats.edges_per_type.get("REF"), Some(&1));
+}

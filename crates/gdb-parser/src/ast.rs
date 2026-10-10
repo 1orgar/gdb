@@ -75,6 +75,7 @@ pub enum Statement {
         args: std::collections::HashMap<String, DataValue>,
         yield_items: Vec<String>,
     },
+    AnalyzeGraph,
     Explain(Box<Statement>),
 }
 
@@ -122,6 +123,18 @@ pub enum UpdateClause {
         variable: Option<String>,
         label: String,
         id: Option<VertexId>,
+        properties: Vec<(String, Expr)>,
+    },
+    CreateEdge {
+        src_var: String,
+        dst_var: String,
+        edge_type: String,
+        properties: Vec<(String, Expr)>,
+    },
+    MergeEdge {
+        src_var: String,
+        dst_var: String,
+        edge_type: String,
         properties: Vec<(String, Expr)>,
     },
 }

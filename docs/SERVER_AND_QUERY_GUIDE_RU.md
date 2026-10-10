@@ -2,7 +2,7 @@
 
 # GDB: Руководство по запуску, конфигурированию сервера и справочник запросов
 
-Полная техническая документация по эксплуатации распределенной in-memory графовой СУБД **GDB** (высокопроизводительный аналог Nebula Graph / Nebula Enterprise) версии **v0.4.2**.
+Полная техническая документация по эксплуатации распределенной in-memory графовой СУБД **GDB** (высокопроизводительный аналог Nebula Graph / Nebula Enterprise) версии **v0.5.0** (Vermeer).
 
 ---
 
@@ -291,9 +291,79 @@ CALL algo.sssp(1) YIELD vertex_id, distance;
 CALL algo.similarity({node1: 1, node2: 2}) YIELD jaccard, cosine;
 ```
 
+#### 12. Node2Vec (Случайные блуждания и Skip-Gram внутри СУБД):
+```sql
+CALL algo.node2vec({walk_length: 10, walks_per_vertex: 5, dimensions: 64, window_size: 5})
+YIELD vertex_id, embedding;
+```
+
 ---
 
-### 2.5. Системные команды CLI
+### 2.5. Нативные векторы, эмбеддинги и поиск сходства
+
+```sql
+-- 1. DDL с колонкой типа VECTOR(dimension):
+CREATE VERTEX Document (title STRING, embedding VECTOR(3));
+
+-- 2. Вставка с векторными литералами:
+INSERT VERTEX Document (id, title, embedding) VALUES
+  (1, 'Обзор графовых баз данных', [0.95, 0.12, 0.05]),
+  (2, 'Машинное обучение на графах', [0.88, 0.25, 0.10]),
+  (3, 'Векторные поисковые движки', [0.15, 0.90, 0.85]);
+
+-- 3. Поиск векторного сходства (cosine, dot или l2):
+CALL vector.similaritySearch('Document', 'embedding', [1.0, 0.0, 0.0], 5, 'cosine')
+YIELD vertex_id, score;
+```
+
+---
+
+### 2.6. Оптимизация на основе стоимости (CBO)
+
+```sql
+-- Сбор детальной статистики по графу (количество вершин, кардинальность меток, распределение степеней):
+ANALYZE GRAPH;
+```
+
+---
+
+### 2.7. Relationship DML (MATCH ... CREATE / MERGE)
+
+```sql
+-- Создание направленных связей между найденными вершинами со свойствами:
+MATCH (a:User), (b:User)
+WHERE a.name = 'Alice' AND b.name = 'Bob'
+CREATE (a)-[r:FOLLOWS {since: 2024}]->(b);
+
+-- Идемпотентное создание связей через MERGE:
+MATCH (a:User), (b:User)
+WHERE a.id = 1 AND b.id = 2
+MERGE (a)-[r:KNOWS]->(b);
+```
+
+---
+
+### 2.8. Исполнение скриптов из нескольких выражений и Batch REST API
+
+Запросы, разделенные точкой с запятой (`;`), могут выполняться как единый скрипт через `POST /query`, CLI или кнопку «Run All» в веб-интерфейсе GDB Studio.
+
+Кроме того, доступен специализированный эндпоинт `POST /batch`:
+
+```bash
+curl -X POST http://localhost:8847/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "queries": [
+      "CREATE VERTEX Tag (name STRING);",
+      "INSERT VERTEX Tag (id, name) VALUES (1, '\''Rust'\''), (2, '\''GraphDB'\'');",
+      "MATCH (t:Tag) RETURN t.name;"
+    ]
+  }'
+```
+
+---
+
+### 2.9. Системные команды CLI
 
 В консоли `./bin/gdb-cli` доступны интерактивные команды:
 

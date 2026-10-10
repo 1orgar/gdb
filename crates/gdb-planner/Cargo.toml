@@ -9,6 +9,7 @@ gdb-core.workspace = true
 gdb-storage.workspace = true
 gdb-parser.workspace = true
 gdb-analytics = { path = "../gdb-analytics" }
+gdb-gpu = { path = "../gdb-gpu" }
 arrow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true

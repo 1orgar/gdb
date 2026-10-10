@@ -288,6 +288,10 @@ impl Parser {
         self.tokens.get(self.pos)
     }
 
+    fn peek_at(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + offset)
+    }
+
     fn advance(&mut self) -> Option<&Token> {
         let tok = self.tokens.get(self.pos);
         if tok.is_some() {
@@ -350,6 +354,15 @@ impl Parser {
             Some(Token::Delete) => self.parse_delete(),
             Some(Token::Merge) => self.parse_merge_statement(),
             Some(Token::Match) => self.parse_query(),
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("ANALYZE") => {
+                self.advance();
+                if let Some(Token::Ident(target)) = self.peek() {
+                    if target.eq_ignore_ascii_case("GRAPH") {
+                        self.advance();
+                    }
+                }
+                Ok(Statement::AnalyzeGraph)
+            }
             Some(other) => Err(GdbError::Parser(format!("Unexpected leading token: {:?}", other))),
             None => Err(GdbError::Parser("Empty query".into())),
         }?;
@@ -393,11 +406,33 @@ impl Parser {
                 }
                 self.expect(&Token::RBrace)?;
             } else {
-                while self.peek() != Some(&Token::RParen) {
-                    let key = self.expect_ident()?;
-                    self.expect(&Token::Colon)?;
-                    let val = self.parse_literal()?;
-                    args.insert(key, val);
+                let mut pos_idx = 0;
+                while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                    let is_named = match self.peek() {
+                        Some(Token::Ident(_)) => self.peek_at(1) == Some(&Token::Colon),
+                        _ => false,
+                    };
+                    if is_named {
+                        let key = self.expect_ident()?;
+                        self.expect(&Token::Colon)?;
+                        let val = self.parse_literal()?;
+                        args.insert(key, val);
+                    } else {
+                        let val = self.parse_literal()?;
+                        let key = match algo_name.to_lowercase().as_str() {
+                            "vector.similaritysearch" | "vector.search" => match pos_idx {
+                                0 => "label".to_string(),
+                                1 => "property".to_string(),
+                                2 => "query".to_string(),
+                                3 => "k".to_string(),
+                                4 => "metric".to_string(),
+                                _ => format!("arg{}", pos_idx),
+                            },
+                            _ => format!("arg{}", pos_idx),
+                        };
+                        args.insert(key, val);
+                        pos_idx += 1;
+                    }
                     if self.peek() == Some(&Token::Comma) {
                         self.advance();
                     } else {
@@ -664,6 +699,20 @@ impl Parser {
                 "BOOL" | "BOOLEAN" => DataType::Boolean,
                 "DATE" => DataType::Date,
                 "TIMESTAMP" => DataType::Timestamp,
+                "VECTOR" => {
+                    let dim = if self.peek() == Some(&Token::LParen) {
+                        self.advance();
+                        let d = match self.advance() {
+                            Some(Token::IntLit(n)) => *n as usize,
+                            _ => return Err(GdbError::Parser("Expected integer dimension inside VECTOR(...)".into())),
+                        };
+                        self.expect(&Token::RParen)?;
+                        d
+                    } else {
+                        128
+                    };
+                    DataType::Vector(dim)
+                }
                 other => return Err(GdbError::Parser(format!("Unknown data type: {}", other))),
             };
             specs.push(PropertySpec::new(name, data_type, true));
@@ -931,6 +980,31 @@ impl Parser {
     }
 
     fn parse_literal(&mut self) -> GdbResult<DataValue> {
+        if self.peek() == Some(&Token::LBracket) {
+            self.advance();
+            let mut vec = Vec::new();
+            while self.peek() != Some(&Token::RBracket) && self.peek().is_some() {
+                let sign = if self.peek() == Some(&Token::Dash) {
+                    self.advance();
+                    -1.0f32
+                } else {
+                    1.0f32
+                };
+                match self.advance() {
+                    Some(Token::FloatLit(f)) => vec.push(sign * (*f as f32)),
+                    Some(Token::IntLit(i)) => vec.push(sign * (*i as f32)),
+                    other => return Err(GdbError::Parser(format!("Expected numeric literal in vector, found {:?}", other))),
+                }
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(&Token::RBracket)?;
+            return Ok(DataValue::Vector(vec));
+        }
+
         match self.advance() {
             Some(Token::IntLit(i)) => Ok(DataValue::Int64(*i)),
             Some(Token::FloatLit(f)) => Ok(DataValue::Float64(*f)),
@@ -1100,6 +1174,96 @@ impl Parser {
                         break;
                     }
                 }
+            } else if self.peek() == Some(&Token::Create) {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let src_var = self.expect_ident()?;
+                self.expect(&Token::RParen)?;
+
+                self.expect(&Token::Dash)?;
+                let mut edge_type = "RELATED".to_string();
+                let mut props = Vec::new();
+                if self.peek() == Some(&Token::LBracket) {
+                    self.advance();
+                    if let Some(Token::Ident(_)) = self.peek() {
+                        let _var = self.expect_ident()?;
+                    }
+                    if self.peek() == Some(&Token::Colon) {
+                        self.advance();
+                        edge_type = self.expect_ident()?;
+                    }
+                    if self.peek() == Some(&Token::LBrace) {
+                        self.advance();
+                        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+                            let p_name = self.expect_ident()?;
+                            self.expect(&Token::Colon)?;
+                            let p_expr = self.parse_expr()?;
+                            props.push((p_name, p_expr));
+                            if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.expect(&Token::RBrace)?;
+                    }
+                    self.expect(&Token::RBracket)?;
+                }
+                self.expect(&Token::RArrow)?;
+                self.expect(&Token::LParen)?;
+                let dst_var = self.expect_ident()?;
+                self.expect(&Token::RParen)?;
+                updates.push(UpdateClause::CreateEdge {
+                    src_var,
+                    dst_var,
+                    edge_type,
+                    properties: props,
+                });
+            } else if self.peek() == Some(&Token::Merge) {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let src_var = self.expect_ident()?;
+                self.expect(&Token::RParen)?;
+
+                self.expect(&Token::Dash)?;
+                let mut edge_type = "RELATED".to_string();
+                let mut props = Vec::new();
+                if self.peek() == Some(&Token::LBracket) {
+                    self.advance();
+                    if let Some(Token::Ident(_)) = self.peek() {
+                        let _var = self.expect_ident()?;
+                    }
+                    if self.peek() == Some(&Token::Colon) {
+                        self.advance();
+                        edge_type = self.expect_ident()?;
+                    }
+                    if self.peek() == Some(&Token::LBrace) {
+                        self.advance();
+                        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+                            let p_name = self.expect_ident()?;
+                            self.expect(&Token::Colon)?;
+                            let p_expr = self.parse_expr()?;
+                            props.push((p_name, p_expr));
+                            if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.expect(&Token::RBrace)?;
+                    }
+                    self.expect(&Token::RBracket)?;
+                }
+                self.expect(&Token::RArrow)?;
+                self.expect(&Token::LParen)?;
+                let dst_var = self.expect_ident()?;
+                self.expect(&Token::RParen)?;
+                updates.push(UpdateClause::MergeEdge {
+                    src_var,
+                    dst_var,
+                    edge_type,
+                    properties: props,
+                });
             } else {
                 break;
             }
@@ -1481,4 +1645,105 @@ pub fn parse(input: &str) -> GdbResult<Statement> {
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
+}
+
+/// Splits a multi-statement script by semicolons, properly respecting
+/// single quotes, double quotes, escape characters, and line comments (`--`, `//`, `#`).
+pub fn split_statements(input: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_line_comment = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            current.push(ch);
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else if ch == '\'' {
+                in_single_quote = false;
+            }
+            continue;
+        }
+
+        if in_double_quote {
+            current.push(ch);
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else if ch == '"' {
+                in_double_quote = false;
+            }
+            continue;
+        }
+
+        // Check for comment starts: --, //, #
+        if ch == '#' {
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            in_line_comment = true;
+            continue;
+        }
+
+        if ch == '\'' {
+            in_single_quote = true;
+            current.push(ch);
+            continue;
+        }
+
+        if ch == '"' {
+            in_double_quote = true;
+            current.push(ch);
+            continue;
+        }
+
+        if ch == ';' {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                statements.push(trimmed.to_string());
+            }
+            current.clear();
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+
+    statements
+}
+
+/// Parses a multi-statement script into an array of Statements.
+pub fn parse_script(input: &str) -> GdbResult<Vec<Statement>> {
+    let raw_stmts = split_statements(input);
+    let mut statements = Vec::with_capacity(raw_stmts.len());
+    for s in raw_stmts {
+        statements.push(parse(&s)?);
+    }
+    Ok(statements)
 }

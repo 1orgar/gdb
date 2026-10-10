@@ -76,14 +76,17 @@ def setup_schema(base_url):
     send_query(base_url, "CREATE EDGE KNOWS ();")
     send_query(base_url, "CREATE EDGE FOLLOWS ();")
 
-    print("[*] Pre-seeding benchmark graph topology (100 vertices, 500 edges)...")
-    for vid in range(1, 101):
-        send_query(base_url, f"INSERT VERTEX User (id, name, age) VALUES ({vid}, 'User_{vid}', {20 + vid % 40});")
+    print("[*] Pre-seeding benchmark graph topology (100 vertices, 500 edges) via batch insert...")
+    user_vals = ", ".join([f"({vid}, 'User_{vid}', {20 + vid % 40})" for vid in range(1, 101)])
+    send_query(base_url, f"INSERT VERTEX User (id, name, age) VALUES {user_vals};")
+
+    edge_stmts = []
     for _ in range(500):
         u = random.randint(1, 100)
         v = random.randint(1, 100)
-        send_query(base_url, f"INSERT EDGE KNOWS FROM {u} TO {v};")
-        send_query(base_url, f"INSERT EDGE FOLLOWS FROM {u} TO {v};")
+        edge_stmts.append(f"INSERT EDGE KNOWS FROM {u} TO {v};")
+        edge_stmts.append(f"INSERT EDGE FOLLOWS FROM {u} TO {v};")
+    send_query(base_url, " ".join(edge_stmts))
     send_query(base_url, "compact;")
     print("[✓] Seed graph generated and compacted into CSR.\n")
 

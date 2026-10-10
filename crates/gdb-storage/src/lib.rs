@@ -5,7 +5,7 @@ pub mod properties;
 
 pub use csr::ChunkedCsr;
 pub use delta::{DeltaMemTable, MvccEdge};
-pub use engine::PartitionStorageEngine;
+pub use engine::{GraphStatistics, PartitionStorageEngine};
 pub use properties::VertexPropertyTable;
 
 #[cfg(test)]
