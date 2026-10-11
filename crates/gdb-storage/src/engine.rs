@@ -310,6 +310,12 @@ impl PartitionStorageEngine {
         false
     }
 
+    /// Checks whether a specific vertex ID exists under a specific label in properties.
+    pub fn has_vertex_label(&self, vid: VertexId, label_id: LabelId) -> bool {
+        let guard = self.vertex_properties.read();
+        guard.get(&label_id).map(|table| table.has_vertex(vid)).unwrap_or(false)
+    }
+
     fn get_or_create_property_table(&self, label_id: LabelId) -> GdbResult<Arc<VertexPropertyTable>> {
         {
             let guard = self.vertex_properties.read();

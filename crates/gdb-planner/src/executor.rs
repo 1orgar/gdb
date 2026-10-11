@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub struct QueryResult {
     pub message: String,
     pub batch: Option<RecordBatch>,
@@ -1522,8 +1523,59 @@ impl QueryExecutor {
         args: HashMap<String, DataValue>,
         yield_items: Vec<String>,
     ) -> GdbResult<QueryResult> {
-        let csr = self.storage.current_csr();
         let algo_lower = algorithm.to_lowercase();
+
+        let edge_type_filter: Option<u32> = match args
+            .get("edge_type")
+            .or_else(|| args.get("type"))
+            .or_else(|| args.get("relationship"))
+        {
+            Some(DataValue::String(s)) => {
+                let schema = self.schema.read();
+                match schema.get_edge_schema(s) {
+                    Some(es) => Some(es.edge_type.0),
+                    None => {
+                        return Err(GdbError::Schema(format!(
+                            "Edge type '{}' does not exist in schema",
+                            s
+                        )))
+                    }
+                }
+            }
+            Some(DataValue::Int64(i)) => Some(*i as u32),
+            _ => None,
+        };
+
+        let label_filter: Option<LabelId> = if !algo_lower.starts_with("vector.") {
+            match args.get("label") {
+                Some(DataValue::String(s)) => {
+                    let schema = self.schema.read();
+                    match schema.get_vertex_schema(s) {
+                        Some(vs) => Some(vs.label_id),
+                        None => {
+                            return Err(GdbError::Schema(format!(
+                                "Vertex label '{}' does not exist in schema",
+                                s
+                            )))
+                        }
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if self.storage.delta_edges() > 0 {
+            self.storage.compact();
+        }
+
+        let raw_csr = self.storage.current_csr();
+        let csr = if let Some(et) = edge_type_filter {
+            Arc::new(raw_csr.filter_by_edge_type(et))
+        } else {
+            raw_csr
+        };
 
         let batch = match algo_lower.as_str() {
             "algo.pagerank" => {
@@ -1663,6 +1715,30 @@ impl QueryExecutor {
                 RecordBatch::try_new(arrow_schema, cols)?
             }
             other => return Err(GdbError::Execution(format!("Unknown graph algorithm: {}", other))),
+        };
+
+        let batch = if let Some(lid) = label_filter {
+            let schema = batch.schema();
+            let vid_col_idx = schema.index_of("vertex_id").or_else(|_| schema.index_of("node")).ok();
+            if let Some(col_idx) = vid_col_idx {
+                let vid_arr = batch.column(col_idx).as_any().downcast_ref::<arrow::array::UInt64Array>();
+                if let Some(arr) = vid_arr {
+                    let mut keep_builder = arrow::array::BooleanBuilder::with_capacity(arr.len());
+                    for i in 0..arr.len() {
+                        let raw_id = arr.value(i);
+                        let keep = self.storage.has_vertex_label(VertexId(raw_id), lid);
+                        keep_builder.append_value(keep);
+                    }
+                    let filter_mask = keep_builder.finish();
+                    arrow::compute::filter_record_batch(&batch, &filter_mask)?
+                } else {
+                    batch
+                }
+            } else {
+                batch
+            }
+        } else {
+            batch
         };
 
         let final_batch = if !yield_items.is_empty() {

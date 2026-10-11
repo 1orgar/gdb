@@ -175,4 +175,113 @@ impl ChunkedCsr {
 
         results
     }
+
+    /// Creates a projected subgraph CSR containing only edges of the specified `edge_type`.
+    /// The vertex mappings (`vertex_map` and `reverse_map`) are preserved, ensuring
+    /// vertex identity remains identical to the parent graph.
+    pub fn filter_by_edge_type(&self, edge_type: u32) -> Self {
+        let num_vertices = self.vertex_count();
+        if num_vertices == 0 || self.targets.is_empty() {
+            return Self {
+                offsets: vec![0; num_vertices + 1],
+                targets: Vec::new(),
+                edge_types: Vec::new(),
+                ranks: Vec::new(),
+                vertex_map: self.vertex_map.clone(),
+                reverse_map: self.reverse_map.clone(),
+            };
+        }
+
+        let mut new_offsets = vec![0u32; num_vertices + 1];
+
+        // 1. Count matching degrees per vertex
+        for u in 0..num_vertices {
+            let start = self.offsets[u] as usize;
+            let end = (self.offsets[u + 1] as usize).min(self.targets.len());
+            let mut count = 0u32;
+            for off in start..end {
+                if self.edge_types[off] == edge_type {
+                    count += 1;
+                }
+            }
+            new_offsets[u + 1] = count;
+        }
+
+        // 2. Prefix sum
+        for u in 0..num_vertices {
+            new_offsets[u + 1] += new_offsets[u];
+        }
+
+        let total_matching_edges = new_offsets[num_vertices] as usize;
+        let mut new_targets = Vec::with_capacity(total_matching_edges);
+        let mut new_edge_types = Vec::with_capacity(total_matching_edges);
+        let mut new_ranks = Vec::with_capacity(total_matching_edges);
+
+        // 3. Populate matching edges
+        for u in 0..num_vertices {
+            let start = self.offsets[u] as usize;
+            let end = (self.offsets[u + 1] as usize).min(self.targets.len());
+            for off in start..end {
+                if self.edge_types[off] == edge_type {
+                    new_targets.push(self.targets[off]);
+                    new_edge_types.push(self.edge_types[off]);
+                    new_ranks.push(self.ranks[off]);
+                }
+            }
+        }
+
+        Self {
+            offsets: new_offsets,
+            targets: new_targets,
+            edge_types: new_edge_types,
+            ranks: new_ranks,
+            vertex_map: self.vertex_map.clone(),
+            reverse_map: self.reverse_map.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_by_edge_type() {
+        let v1 = VertexId(1);
+        let v2 = VertexId(2);
+        let v3 = VertexId(3);
+
+        let type_follows = EdgeType(1);
+        let type_blocks = EdgeType(2);
+
+        let edges = vec![
+            EdgeId::simple(v1, type_follows, v2),
+            EdgeId::simple(v2, type_follows, v3),
+            EdgeId::simple(v1, type_blocks, v3),
+        ];
+
+        let csr = ChunkedCsr::from_edges(edges);
+        assert_eq!(csr.vertex_count(), 3);
+        assert_eq!(csr.edge_count(), 3);
+
+        // Filter follows
+        let follows_csr = csr.filter_by_edge_type(1);
+        assert_eq!(follows_csr.vertex_count(), 3);
+        assert_eq!(follows_csr.edge_count(), 2);
+        assert_eq!(follows_csr.get_out_edges(v1, None).len(), 1);
+        assert_eq!(follows_csr.get_out_edges(v1, None)[0].dst, v2);
+
+        // Filter blocks
+        let blocks_csr = csr.filter_by_edge_type(2);
+        assert_eq!(blocks_csr.vertex_count(), 3);
+        assert_eq!(blocks_csr.edge_count(), 1);
+        assert_eq!(blocks_csr.get_out_edges(v1, None).len(), 1);
+        assert_eq!(blocks_csr.get_out_edges(v1, None)[0].dst, v3);
+        assert_eq!(blocks_csr.get_out_edges(v2, None).len(), 0);
+
+        // Filter non-existent
+        let empty_csr = csr.filter_by_edge_type(99);
+        assert_eq!(empty_csr.vertex_count(), 3);
+        assert_eq!(empty_csr.edge_count(), 0);
+    }
 }

@@ -318,3 +318,83 @@ fn test_where_id_pushdown_and_explain() {
     assert_eq!(res_hop.batch.unwrap().num_rows(), 2);
 }
 
+#[test]
+fn test_algorithm_edge_and_label_filtering() {
+    let (executor, storage, _) = setup_executor();
+
+    // 1. Setup multi-schema graph
+    executor.execute(parse("CREATE VERTEX Person (name STRING);").unwrap()).unwrap();
+    executor.execute(parse("CREATE VERTEX Bot (name STRING);").unwrap()).unwrap();
+    executor.execute(parse("CREATE EDGE FOLLOWS ();").unwrap()).unwrap();
+    executor.execute(parse("CREATE EDGE BLOCKS ();").unwrap()).unwrap();
+
+    executor.execute(parse("INSERT VERTEX Person (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie');").unwrap()).unwrap();
+    executor.execute(parse("INSERT VERTEX Bot (id, name) VALUES (4, 'SpamBot');").unwrap()).unwrap();
+
+    // Alice -> Bob -> Charlie via FOLLOWS
+    executor.execute(parse("INSERT EDGE FOLLOWS FROM 1 TO 2;").unwrap()).unwrap();
+    executor.execute(parse("INSERT EDGE FOLLOWS FROM 2 TO 3;").unwrap()).unwrap();
+
+    // Charlie -> Alice via BLOCKS
+    executor.execute(parse("INSERT EDGE BLOCKS FROM 3 TO 1;").unwrap()).unwrap();
+    // SpamBot -> Alice via BLOCKS
+    executor.execute(parse("INSERT EDGE BLOCKS FROM 4 TO 1;").unwrap()).unwrap();
+
+    storage.compact();
+
+    // 2. Run PageRank filtered by edge_type: 'FOLLOWS'
+    let pr_follows = executor.execute(parse(
+        "CALL algo.pageRank({edge_type: 'FOLLOWS', damping: 0.85, max_iter: 20}) YIELD vertex_id, score;"
+    ).unwrap()).unwrap();
+    assert!(pr_follows.batch.is_some());
+    let b_f = pr_follows.batch.unwrap();
+    assert!(b_f.num_rows() > 0);
+
+    // 3. Run PageRank filtered by edge_type: 'BLOCKS'
+    let pr_blocks = executor.execute(parse(
+        "CALL algo.pageRank({edge_type: 'BLOCKS', damping: 0.85, max_iter: 20}) YIELD vertex_id, score;"
+    ).unwrap()).unwrap();
+    assert!(pr_blocks.batch.is_some());
+    let b_b = pr_blocks.batch.unwrap();
+    assert!(b_b.num_rows() > 0);
+
+    let f_scores: std::collections::HashMap<u64, f64> = {
+        let vids = b_f.column(0).as_any().downcast_ref::<arrow::array::UInt64Array>().unwrap();
+        let scores = b_f.column(1).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+        (0..vids.len()).map(|i| (vids.value(i), scores.value(i))).collect()
+    };
+    let b_scores: std::collections::HashMap<u64, f64> = {
+        let vids = b_b.column(0).as_any().downcast_ref::<arrow::array::UInt64Array>().unwrap();
+        let scores = b_b.column(1).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+        (0..vids.len()).map(|i| (vids.value(i), scores.value(i))).collect()
+    };
+    assert_ne!(f_scores.get(&3), b_scores.get(&3));
+
+    // 4. Test label filtering: CALL algo.pageRank({label: 'Person'})
+    let pr_persons = executor.execute(parse(
+        "CALL algo.pageRank({label: 'Person'}) YIELD vertex_id, score;"
+    ).unwrap()).unwrap();
+    let b_p = pr_persons.batch.unwrap();
+    assert_eq!(b_p.num_rows(), 3); // 1, 2, 3 only (Bot 4 excluded!)
+    let p_vids: Vec<u64> = {
+        let vids = b_p.column(0).as_any().downcast_ref::<arrow::array::UInt64Array>().unwrap();
+        (0..vids.len()).map(|i| vids.value(i)).collect()
+    };
+    assert!(!p_vids.contains(&4));
+    assert!(p_vids.contains(&1));
+
+    // 5. Test error on unknown edge_type
+    let err_edge = executor.execute(parse(
+        "CALL algo.pageRank({edge_type: 'NONEXISTENT'}) YIELD vertex_id, score;"
+    ).unwrap());
+    assert!(err_edge.is_err());
+    assert!(err_edge.unwrap_err().to_string().contains("does not exist"));
+
+    // 6. Test error on unknown label
+    let err_label = executor.execute(parse(
+        "CALL algo.pageRank({label: 'NONEXISTENT'}) YIELD vertex_id, score;"
+    ).unwrap());
+    assert!(err_label.is_err());
+    assert!(err_label.unwrap_err().to_string().contains("does not exist"));
+}
+
