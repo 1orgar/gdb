@@ -19,13 +19,17 @@ fn test_replication_mode_and_ring_helpers() {
         RingNode {
             node_id: 1,
             http_url: "http://127.0.0.1:8847".into(),
+            flight_address: "127.0.0.1".into(),
             flight_port: 8848,
+            client_flight_address: "127.0.0.1".into(),
             client_flight_port: 8860,
         },
         RingNode {
             node_id: 2,
             http_url: "http://127.0.0.1:8846".into(),
+            flight_address: "127.0.0.1".into(),
             flight_port: 8849,
+            client_flight_address: "127.0.0.1".into(),
             client_flight_port: 8861,
         },
     ];
@@ -34,6 +38,8 @@ fn test_replication_mode_and_ring_helpers() {
     let deserialized: Vec<RingNode> = serde_json::from_str(&json_str).unwrap();
     assert_eq!(deserialized.len(), 2);
     assert_eq!(deserialized[0].node_id, 1);
+    assert_eq!(deserialized[0].flight_address, "127.0.0.1");
+    assert_eq!(deserialized[0].client_flight_address, "127.0.0.1");
 }
 
 #[tokio::test]
@@ -49,6 +55,8 @@ async fn test_server_rest_endpoints_comprehensive() {
     assert!(res.status().is_success());
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["status"], "UP");
+    assert_eq!(body["flight_address"], "127.0.0.1");
+    assert_eq!(body["client_flight_address"], "127.0.0.1");
 
     // 2. GET /schema (empty at boot)
     let res = client.get(format!("{}/schema", base_url)).send().await.unwrap();
@@ -61,6 +69,29 @@ async fn test_server_rest_endpoints_comprehensive() {
     assert!(res.status().is_success());
     let cluster_body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(cluster_body["gpu_max_vram_mb"], 2048);
+    assert_eq!(cluster_body["flight_address"], "127.0.0.1");
+    assert_eq!(cluster_body["client_flight_address"], "127.0.0.1");
+    assert_eq!(cluster_body["ring_nodes"][0]["flight_address"], "127.0.0.1");
+
+    // 3b. POST /cluster/join
+    let join_node = RingNode {
+        node_id: 2,
+        http_url: "http://10.0.0.2:8846".into(),
+        flight_address: "10.0.0.2".into(),
+        flight_port: 8849,
+        client_flight_address: "10.0.0.2".into(),
+        client_flight_port: 8861,
+    };
+    let join_res = client
+        .post(format!("{}/cluster/join", base_url))
+        .json(&join_node)
+        .send()
+        .await
+        .unwrap();
+    assert!(join_res.status().is_success());
+    let join_body: serde_json::Value = join_res.json().await.unwrap();
+    assert_eq!(join_body["status"], "ok");
+    assert_eq!(join_body["ring_nodes"].as_array().unwrap().len(), 2);
 
     // 4. GET /resources
     let res = client.get(format!("{}/resources", base_url)).send().await.unwrap();
@@ -240,22 +271,26 @@ async fn test_server_replication_multinode_and_async() {
     let node1 = RingNode {
         node_id: 1,
         http_url: format!("http://{}", addr1),
+        flight_address: "127.0.0.1".into(),
         flight_port: 0,
+        client_flight_address: "127.0.0.1".into(),
         client_flight_port: 0,
     };
     let node2 = RingNode {
         node_id: 2,
         http_url: format!("http://{}", addr2),
+        flight_address: "127.0.0.1".into(),
         flight_port: 0,
+        client_flight_address: "127.0.0.1".into(),
         client_flight_port: 0,
     };
 
     let ring = vec![node1.clone(), node2.clone()];
-    state1.ring_nodes = ring.clone();
+    *state1.ring_nodes.write() = ring.clone();
     state1.replication_factor = 2;
     state1.replication_mode = ReplicationMode::Sync;
 
-    state2.ring_nodes = ring.clone();
+    *state2.ring_nodes.write() = ring.clone();
     state2.replication_factor = 2;
     state2.replication_mode = ReplicationMode::Sync;
 

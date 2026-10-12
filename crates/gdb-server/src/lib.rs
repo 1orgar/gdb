@@ -48,11 +48,39 @@ impl FromStr for ReplicationMode {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+fn default_address() -> String {
+    "127.0.0.1".to_string()
+}
+
+pub fn detect_local_address() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local_addr) = socket.local_addr() {
+                let ip = local_addr.ip();
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+    if let Ok(hostname) = std::env::var("HOSTNAME") {
+        let h = hostname.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RingNode {
     pub node_id: u64,
     pub http_url: String,
+    #[serde(default = "default_address")]
+    pub flight_address: String,
     pub flight_port: u16,
+    #[serde(default = "default_address")]
+    pub client_flight_address: String,
     pub client_flight_port: u16,
 }
 
@@ -67,9 +95,17 @@ pub struct Args {
     #[arg(long, default_value_t = 4)]
     pub partitions: u32,
 
+    /// IP or hostname for internal inter-node Arrow Flight & RPC connections (auto-detected if omitted)
+    #[arg(long, env = "GDB_FLIGHT_ADDRESS")]
+    pub flight_address: Option<String>,
+
     /// Port for internal inter-node Arrow Flight & RPC
     #[arg(short, long, default_value_t = 8848)]
     pub port: u16,
+
+    /// External IP or hostname for client Arrow Flight ingestion & queries (auto-detected if omitted)
+    #[arg(long, env = "GDB_CLIENT_FLIGHT_ADDRESS")]
+    pub client_flight_address: Option<String>,
 
     /// Dedicated Arrow Flight port for external client data ingestion & bulk loading
     #[arg(long, default_value_t = 8860)]
@@ -148,7 +184,9 @@ pub struct ReplicationPayload {
 pub struct AppState {
     pub node_id: u64,
     pub partitions: u32,
+    pub flight_address: String,
     pub port: u16,
+    pub client_flight_address: String,
     pub client_flight_port: u16,
     pub http_port: u16,
     pub start_time: Instant,
@@ -156,7 +194,7 @@ pub struct AppState {
     pub executor: Arc<QueryExecutor>,
     pub storage: Arc<PartitionStorageEngine>,
     pub peers: Vec<String>,
-    pub ring_nodes: Vec<RingNode>,
+    pub ring_nodes: Arc<RwLock<Vec<RingNode>>>,
     pub replication_factor: u32,
     pub replication_mode: ReplicationMode,
     pub http_client: reqwest::Client,
@@ -183,7 +221,11 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
         "role": "Peer",
         "cluster_topology": "leaderless-ring",
         "replication_factor": state.replication_factor,
-        "replication_mode": state.replication_mode.to_string()
+        "replication_mode": state.replication_mode.to_string(),
+        "flight_address": state.flight_address,
+        "flight_port": state.port,
+        "client_flight_address": state.client_flight_address,
+        "client_flight_port": state.client_flight_port
     }))
 }
 
@@ -200,7 +242,8 @@ async fn handle_schema(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
-    let total_nodes = state.ring_nodes.len();
+    let ring_nodes = state.ring_nodes.read().clone();
+    let total_nodes = ring_nodes.len();
     let effective_rf = (state.replication_factor as usize).min(total_nodes).max(1);
     Json(serde_json::json!({
         "node_id": state.node_id,
@@ -211,11 +254,13 @@ async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
         "replication_mode": state.replication_mode.to_string(),
         "total_nodes": total_nodes,
         "partitions": state.partitions,
+        "flight_address": state.flight_address,
         "flight_port": state.port,
+        "client_flight_address": state.client_flight_address,
         "client_flight_port": state.client_flight_port,
         "http_port": state.http_port,
         "peers": state.peers,
-        "ring_nodes": state.ring_nodes,
+        "ring_nodes": ring_nodes,
         "assigned_tokens": format!("Primary token: u % {} == {}", total_nodes, state.node_id.saturating_sub(1)),
         "s3_tiering": if state.s3_manager.is_some() { "Enabled" } else { "Disabled" },
         "s3_bucket": state.s3_bucket.clone().unwrap_or_default(),
@@ -248,7 +293,7 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
         "cluster_topology": "leaderless-ring",
         "replication_factor": state.replication_factor,
         "replication_mode": state.replication_mode.to_string(),
-        "total_nodes": state.ring_nodes.len(),
+        "total_nodes": state.ring_nodes.read().len(),
         "total_vertices": total_vertices,
         "total_edges": total_edges,
         "memtable_edges": memtable_edges,
@@ -451,13 +496,31 @@ async fn handle_compact(State(state): State<AppState>) -> impl IntoResponse {
     state.compactions_count.fetch_add(1, Ordering::Relaxed);
 
     // Replicate compaction to all other peers in the ring
-    let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+    let other_nodes: Vec<RingNode> = state.ring_nodes.read().iter().filter(|n| n.node_id != state.node_id).cloned().collect();
     replicate_to_targets(&state.http_client, &other_nodes, "compact;", state.replication_mode, &state.replications_count).await;
 
     Json(serde_json::json!({
         "status": "ok",
         "message": "Compaction completed",
         "elapsed_us": start.elapsed().as_micros()
+    }))
+}
+
+async fn handle_cluster_join(
+    State(state): State<AppState>,
+    Json(node): Json<RingNode>,
+) -> impl IntoResponse {
+    let mut ring = state.ring_nodes.write();
+    if let Some(existing) = ring.iter_mut().find(|n| n.node_id == node.node_id) {
+        *existing = node;
+    } else {
+        ring.push(node);
+        ring.sort_by_key(|n| n.node_id);
+    }
+    let current_ring = ring.clone();
+    Json(serde_json::json!({
+        "status": "ok",
+        "ring_nodes": current_ring,
     }))
 }
 
@@ -481,22 +544,36 @@ async fn handle_replicate(
     }
 }
 
+fn parse_peer_host_and_port(peer: &str) -> (String, u16) {
+    let trimmed = peer.trim_start_matches("http://").trim_start_matches("https://");
+    let host_port = trimmed.split('/').next().unwrap_or(trimmed);
+    let mut parts = host_port.split(':');
+    let host = parts.next().unwrap_or("127.0.0.1").to_string();
+    let port = parts.next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(8847);
+    (if host.is_empty() { "127.0.0.1".to_string() } else { host }, port)
+}
+
 fn build_ring_nodes(
     my_id: u64,
     my_http_port: u16,
+    my_flight_address: &str,
     my_flight_port: u16,
+    my_client_flight_address: &str,
     my_client_flight_port: u16,
     peers: &[String],
 ) -> Vec<RingNode> {
     let mut nodes = Vec::new();
     nodes.push(RingNode {
         node_id: my_id,
-        http_url: format!("http://127.0.0.1:{}", my_http_port),
+        http_url: format!("http://{}:{}", my_client_flight_address, my_http_port),
+        flight_address: my_flight_address.to_string(),
         flight_port: my_flight_port,
+        client_flight_address: my_client_flight_address.to_string(),
         client_flight_port: my_client_flight_port,
     });
 
     for (idx, peer) in peers.iter().enumerate() {
+        let (peer_host, _peer_http_port) = parse_peer_host_and_port(peer);
         let (peer_id, flight_p, client_p) = if peer.contains("8847") {
             (1, 8848, 8860)
         } else if peer.contains("8846") {
@@ -514,7 +591,9 @@ fn build_ring_nodes(
         nodes.push(RingNode {
             node_id: peer_id,
             http_url: peer.clone(),
+            flight_address: peer_host.clone(),
             flight_port: flight_p,
+            client_flight_address: peer_host,
             client_flight_port: client_p,
         });
     }
@@ -623,7 +702,7 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
         state.queries_ok.fetch_add(1, Ordering::Relaxed);
         state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
 
-        let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+        let other_nodes: Vec<RingNode> = state.ring_nodes.read().iter().filter(|n| n.node_id != state.node_id).cloned().collect();
         replicate_to_targets(&state.http_client, &other_nodes, "compact;", state.replication_mode, &state.replications_count).await;
 
         return serde_json::json!({
@@ -710,7 +789,7 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
                 state.queries_ok.fetch_add(1, Ordering::Relaxed);
                 state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
 
-                let other_nodes: Vec<RingNode> = state.ring_nodes.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+                let other_nodes: Vec<RingNode> = state.ring_nodes.read().iter().filter(|n| n.node_id != state.node_id).cloned().collect();
                 replicate_to_targets(&state.http_client, &other_nodes, trimmed, state.replication_mode, &state.replications_count).await;
 
                 return serde_json::json!({
@@ -734,10 +813,11 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
     }
 
     if let gdb_parser::ast::Statement::InsertVertices { vertices, .. } = &stmt {
-        if state.ring_nodes.len() > 1 {
+        let ring_snapshot = state.ring_nodes.read().clone();
+        if ring_snapshot.len() > 1 {
             let mut targets: Vec<RingNode> = Vec::new();
             for (vid, _) in vertices {
-                for rep in calculate_replica_set(vid.0, &state.ring_nodes, state.replication_factor) {
+                for rep in calculate_replica_set(vid.0, &ring_snapshot, state.replication_factor) {
                     if rep.node_id != state.node_id && !targets.iter().any(|t| t.node_id == rep.node_id) {
                         targets.push(rep);
                     }
@@ -775,10 +855,11 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
     }
 
     if let gdb_parser::ast::Statement::InsertEdges { edges, .. } = &stmt {
-        if state.ring_nodes.len() > 1 {
+        let ring_snapshot = state.ring_nodes.read().clone();
+        if ring_snapshot.len() > 1 {
             let mut targets: Vec<RingNode> = Vec::new();
             for (src, _, _, _) in edges {
-                for rep in calculate_replica_set(src.0, &state.ring_nodes, state.replication_factor) {
+                for rep in calculate_replica_set(src.0, &ring_snapshot, state.replication_factor) {
                     if rep.node_id != state.node_id && !targets.iter().any(|t| t.node_id == rep.node_id) {
                         targets.push(rep);
                     }
@@ -825,7 +906,8 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
     };
 
     if let Some(key) = dml_key {
-        let replica_set = calculate_replica_set(key, &state.ring_nodes, state.replication_factor);
+        let ring_snapshot = state.ring_nodes.read().clone();
+        let replica_set = calculate_replica_set(key, &ring_snapshot, state.replication_factor);
         let is_local_replica = replica_set.iter().any(|n| n.node_id == state.node_id);
 
         if !is_local_replica && !replica_set.is_empty() {
@@ -1065,6 +1147,7 @@ pub fn create_router(app_state: AppState) -> Router {
         .route("/health", get(handle_health))
         .route("/schema", get(handle_schema))
         .route("/cluster", get(handle_cluster))
+        .route("/cluster/join", post(handle_cluster_join))
         .route("/resources", get(handle_resources))
         .route("/gpu", get(handle_gpu))
         .route("/metrics", get(handle_metrics))
@@ -1086,17 +1169,21 @@ pub async fn create_test_server(
     raft_manager.register_partition(0, storage.clone(), vec![])?;
     let executor = Arc::new(QueryExecutor::new(schema.clone(), storage.clone()));
 
-    let ring_nodes = vec![RingNode {
+    let ring_nodes = Arc::new(RwLock::new(vec![RingNode {
         node_id: 1,
         http_url: "http://127.0.0.1:0".to_string(),
+        flight_address: "127.0.0.1".to_string(),
         flight_port: 0,
+        client_flight_address: "127.0.0.1".to_string(),
         client_flight_port: 0,
-    }];
+    }]));
 
     let app_state = AppState {
         node_id: 1,
         partitions: 1,
+        flight_address: "127.0.0.1".to_string(),
         port: 0,
+        client_flight_address: "127.0.0.1".to_string(),
         client_flight_port: 0,
         http_port: 0,
         start_time: Instant::now(),
@@ -1166,6 +1253,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "\x1b[1;32m[+] Node ID:\x1b[0m {} | \x1b[1;32mPartitions:\x1b[0m {}",
         args.node_id, args.partitions
+    );
+
+    let detected_ip = detect_local_address();
+    let flight_address = args.flight_address.unwrap_or_else(|| detected_ip.clone());
+    let client_flight_address = args.client_flight_address.unwrap_or_else(|| flight_address.clone());
+
+    println!(
+        "\x1b[1;32m[+] Arrow Flight Internal Address:\x1b[0m {}:{}",
+        flight_address, args.port
+    );
+    println!(
+        "\x1b[1;32m[+] Client Flight Public Address:\x1b[0m {}:{}",
+        client_flight_address, args.client_flight_port
     );
 
     let peers: Vec<String> = args
@@ -1240,10 +1340,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let ring_nodes = build_ring_nodes(args.node_id, args.http_port, args.port, args.client_flight_port, &peers);
-    let total_nodes = ring_nodes.len() as u64;
+    let ring_nodes_vec = build_ring_nodes(
+        args.node_id,
+        args.http_port,
+        &flight_address,
+        args.port,
+        &client_flight_address,
+        args.client_flight_port,
+        &peers,
+    );
+    let my_ring_node = ring_nodes_vec.iter().find(|n| n.node_id == args.node_id).cloned().unwrap();
+    let total_nodes = ring_nodes_vec.len() as u64;
+    let ring_nodes = Arc::new(RwLock::new(ring_nodes_vec));
     let replication_mode = ReplicationMode::from_str(&args.replication_mode).unwrap_or(ReplicationMode::Sync);
-    let effective_rf = (args.replication_factor as usize).min(ring_nodes.len()).max(1);
+    let effective_rf = (args.replication_factor as usize).min(total_nodes as usize).max(1);
 
     println!(
         "\x1b[1;32m[+] Cluster Topology:\x1b[0m LEADERLESS HASH RING (Nodes: {})",
@@ -1265,15 +1375,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = AppState {
         node_id: args.node_id,
         partitions: args.partitions,
+        flight_address: flight_address.clone(),
         port: args.port,
+        client_flight_address: client_flight_address.clone(),
         client_flight_port: args.client_flight_port,
         http_port: args.http_port,
         start_time: Instant::now(),
         schema: schema.clone(),
         executor: executor.clone(),
         storage: storage_p0.clone(),
-        peers,
-        ring_nodes,
+        peers: peers.clone(),
+        ring_nodes: ring_nodes.clone(),
         replication_factor: args.replication_factor,
         replication_mode,
         http_client: reqwest::Client::builder()
@@ -1292,6 +1404,51 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         s3_manager,
         s3_bucket: args.s3_bucket.clone(),
     };
+
+    if !peers.is_empty() {
+        let join_client = app_state.http_client.clone();
+        let my_node = my_ring_node.clone();
+        let ring_arc = ring_nodes.clone();
+        let peers_list = peers.clone();
+
+        tokio::spawn(async move {
+            for peer in &peers_list {
+                let join_url = format!("{}/cluster/join", peer.trim_end_matches('/'));
+                match join_client
+                    .post(&join_url)
+                    .json(&my_node)
+                    .timeout(std::time::Duration::from_millis(3000))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                            if let Some(nodes_arr) = body.get("ring_nodes").and_then(|v| v.as_array()) {
+                                let mut ring = ring_arc.write();
+                                for item in nodes_arr {
+                                    if let Ok(rn) = serde_json::from_value::<RingNode>(item.clone()) {
+                                        if let Some(existing) = ring.iter_mut().find(|e| e.node_id == rn.node_id) {
+                                            *existing = rn;
+                                        } else {
+                                            ring.push(rn);
+                                        }
+                                    }
+                                }
+                                ring.sort_by_key(|n| n.node_id);
+                            }
+                        }
+                        println!("\x1b[1;32m[+] Cluster Handshake:\x1b[0m Announced self to {}", join_url);
+                    }
+                    Ok(resp) => {
+                        tracing::warn!("Cluster join handshake to {} returned status {}", join_url, resp.status());
+                    }
+                    Err(e) => {
+                        tracing::debug!("Cluster join handshake to {} failed: {}", join_url, e);
+                    }
+                }
+            }
+        });
+    }
 
     let app = create_router(app_state);
 
