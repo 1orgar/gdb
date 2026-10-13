@@ -4,46 +4,42 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 ---
 
-## 📌 Current Status (Version v0.5.3 — Huygens+)
+## 📌 Current Status (Version v0.5.6 — Release)
 
+- ✅ **Cross-Node Multi-Hop Traversal & Sharded $RF=1$ Support (v0.5.6)**:
+  - Introduced `RemoteEdgeExpander` trait in `gdb-planner` with batch pre-fetching of boundary vertex edges (`batch_get_out_edges`).
+  - Added high-throughput internal HTTP endpoint `POST /storage/out_edges` and `ClusterEdgeExpander` in `gdb-server`.
+  - Full support for pure distributed sharding ($RF=1$, 0% RAM duplication) for multi-hop paths (`MATCH (a)-[:REL*1..k]->(b)`).
+  - Cluster telemetry aggregation in `/resources`: accurate `cluster_total_edges` (sum for $RF=1$, max for $RF \ge N$) and `cluster_total_vertices`.
+- ✅ **Python SDK (`gdb-client` v0.5.6 on PyPI)**:
+  - `scatter_ingest_edges` and `scatter_ingest_vertices` strictly respect `replication_factor` (streams to exactly 1 primary node $src \pmod N$ when $RF=1$).
+  - Added `target_replica_nodes_for_key` helper to `ClusterTopology`.
+- ✅ **GDB Studio UI (v0.5.6)**:
+  - Fixed blocking semi-transparent blur overlay in Unity 3D Spatial Canvas, restoring interactive mouse controls.
+  - Display cluster totals and local sharded node breakdown.
+- ✅ **Cluster-Wide MPP Scatter-Gather & Vector Search (v0.5.5)**:
+  - Scatter-gather execution of Cypher read queries and analytical procedures with stream merging.
+  - Distributed `CALL vector.similaritySearch` with global Top-K merging across `cosine`, `dot`, and `l2` metrics.
+  - Explicit routing control via `local_only: true` parameter.
+- ✅ **Announced Flight Addresses (v0.5.4)**:
+  - `--flight-address` (internal Raft/Flight inter-node gossip) and `--client-flight-address` (external client MPP ingest behind Docker/NAT/LB).
 - ✅ **Algorithm Subgraph Filtering by Edge Type & Vertex Label (v0.5.3)**:
   - Subgraph CSR projection via `ChunkedCsr::filter_by_edge_type(edge_type)` maintaining consistent vertex identity.
   - Cypher support for `CALL algo.*({edge_type: 'TYPE', label: 'LABEL'})` allowing isolated analytics execution (PageRank, WCC, Louvain, SSSP, etc.) on heterogeneous graphs.
-  - Descriptive schema errors when invalid edge types or vertex labels are supplied.
-- ✅ **Keyword Identifiers & Backtick Escaping (v0.5.3)**:
-  - Schema labels and relationship types can match Cypher reserved keywords (`DROP VERTEX VERTEX;`, `DROP EDGE EDGE;`, `RANK`, `ORDER`).
-  - openCypher backtick escaping support (``` `VERTEX` ```).
-- ✅ **Official Python SDK (`gdb-client` v0.5.3 on PyPI)**:
-  - Published to PyPI (`gdb-client==0.5.3`).
-  - Streaming partition ingestion in 64k chunks with 256MB Arrow Flight message limits.
-  - Cluster topology auto-discovery (`flight_port`, `client_flight_port`) via REST API.
-- ✅ **Query Planner Primary Key Pushdown (v0.5.2)**:
-  - Fast-path pushdown of `WHERE id = <val>` into `PhysicalOperator::ScanVertices { id_filter: Some(vid) }`.
-  - Added $O(1)$ point-lookup vertex existence checks (`has_vertex`) across StorageEngine, VertexPropertyTable, and DeltaMemTable.
-  - Eliminates multi-hop wavefront BFS traversal timeouts and redundant full-graph scans (>5,000x speedup).
-- ✅ **GDB Studio Web UI & Startup Script Overhaul (v0.5.2)**:
-  - Updated `scripts/start_studio.sh` with robust CLI flag parsing (`--port`, `--cluster-url`, `--host`, `--no-browser`) and positional argument compatibility.
-  - Resilient health check retry loop with automatic diagnosis and log dumping on failure.
-- ✅ **Discrete GPU Out-of-Core Memory Paging (v0.5.1)**:
-  - High-performance **Windowed Chunked CSR Streaming with Double-Buffering** for discrete GPUs (NVIDIA CUDA / non-UMA architectures).
-  - Keeps lightweight `offsets` array in GPU VRAM while streaming sequential chunks of `targets` across PCIe asynchronously, eliminating PCIe page-fault thrashing and preventing GPU OOM on large graphs.
-  - Server configuration `--gpu-max-vram-mb` (env: `GDB_GPU_MAX_VRAM_MB`, default: 2048 MB).
-- ✅ **Multi-Statement & Relationship DML**:
-  - Lexical script splitter (`split_statements`) respecting comments and string quotes.
-  - Multi-statement execution via `/query` and dedicated `POST /batch` API.
-  - Cypher relationship DML: `MATCH (a), (b) CREATE (a)-[r:TYPE]->(b)` and `MERGE (a)-[r:TYPE]->(b)`.
-  - GDB Studio UI: "Run All" multi-statement execution with step-by-step progress indicator (`Step: X / Y`).
-- ✅ **Native Vector Embeddings & Similarity Search**:
-  - `VECTOR(dim)` native data type with Apache Arrow `FixedSizeList` columnar storage.
-  - `CALL vector.similaritySearch(label, property, query_vector, k, metric)` (Cosine, DotProduct, Euclidean L2).
-- ✅ **Quality & Code Coverage**:
-  - 100% test pass rate across all workspace crates; workspace test coverage $\ge 80\%$.
+  - Keyword identifiers and backtick escaping (``` `VERTEX` ```).
+- ✅ **Planner Primary Key Pushdown & Out-of-Core GPU Paging (v0.5.1–v0.5.2)**:
+  - Pushdown of `WHERE id = <val>` into vertex scan ($O(1)$ existence checks).
+  - Windowed Chunked CSR Streaming with Double-Buffering for discrete GPUs preventing VRAM OOM.
 
 ---
 
 ## 🏗️ 4-Component Roadmap Matrix
 
 ### 1. `gdb-server` (Storage Engine, Distributed Multi-Raft & Compute)
+* **[v0.6.0] Distributed Pregel / BSP Analytics Framework ($RF < N$ & $RF=1$)**:
+  * Iterative **Bulk Synchronous Parallel (BSP) / Pregel** computation engine for global graph algorithms (`CALL algo.pageRank`, `CALL algo.wcc`, `CALL algo.louvain`, `CALL algo.sssp`, `CALL algo.betweenness`) over distributed shards when $RF=1$ or arbitrary $RF < N$.
+  * Inter-shard Superstep Message Shuffle: boundary vertex delta propagation across cluster nodes via high-speed **Arrow Flight Shuffle Streams** at the end of each superstep.
+  * Global convergence: local delta tracking converges to global `tolerance`, providing 100% mathematical parity with single-node full-graph execution while maintaining a minimal RAM footprint ($1 \times \text{RAM}$).
 * **[v0.6.0] Graph Spaces / Namespaces (Multi-Tenancy & Multi-Graph)**:
   * DDL operations: `CREATE GRAPH <name>;`, `SHOW GRAPHS;`, `USE GRAPH <name>;`, `DROP GRAPH <name>;`.
   * Physical & logical isolation: each space owns dedicated `GraphSchema`, partitioned `PartitionStorageEngine`, WAL directories, and CSR topology buffers.
@@ -61,6 +57,8 @@ This document outlines strategic milestones, architectural priorities, and futur
 ### 2. `gdb-studio` (Web UI & Analytical Workspace)
 * **[v0.6.0] Graph Spaces Switcher**:
   * Dropdown selector for active graph spaces in the Studio top header (`USE GRAPH`) with instant session switching.
+* **[v0.6.0] Distributed Analytics Monitor (Pregel Superstep Tracker)**:
+  * Real-time superstep progress tracker for distributed analytics (iteration progress, volume of Arrow Flight messages exchanged across shards).
 * **[v0.6.0] Interactive Multi-Graph Schema Explorer**:
   * Visual entity relationship graph showing active vertex labels, edge types, indexes, and live vertex counters.
 * **[v0.6.0] Visual Graph Analytics Panel**:
@@ -91,7 +89,7 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 | Release | Codename | Primary Focus | Key Deliverables |
 | :---: | :---: | :--- | :--- |
-| **v0.5.3** | **Huygens+** *(Current)* | **Flight Streaming, Keywords, Algorithm Filtering** | Subgraph `edge_type` filtering in `CALL algo.*`, backtick identifier quoting, PyPI `gdb-client==0.5.3`, Flight 256MB limit. |
-| **v0.6.0** | **Hals** | **Graph Spaces (Namespaces) & AI Integrations** | 1. Multi-Graph: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (schema & CSR isolation).<br>2. Graph space selectors across GDB Studio, REPL CLI, and Python SDK.<br>3. LangChain & LangGraph connectors (`langchain-gdb`).<br>4. Native HNSW Vector Graph Index and hybrid Graph RAG. |
+| **v0.5.6** | **Huygens+** *(Current)* | **Cross-Node Multi-Hop Traversal (RF=1), Telemetry Aggregation, Studio UI Fix** | 1. 2/3-hop traversals over pure sharding ($RF=1$) via `RemoteEdgeExpander`.<br>2. Cluster telemetry aggregation in `/resources`.<br>3. $RF$-aware `scatter_ingest` in Python SDK.<br>4. Fixed Unity 3D Spatial Canvas overlay. |
+| **v0.6.0** | **Hals** | **Distributed Pregel/BSP ($RF=1$), Graph Spaces & AI Integrations** | 1. **Distributed Pregel/BSP Analytics**: global PageRank, WCC, Louvain over sharded graphs ($RF=1$) via Arrow Flight Shuffle.<br>2. **Multi-Graph**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (schema & CSR isolation).<br>3. Graph space selectors across GDB Studio, REPL CLI, and Python SDK.<br>4. LangChain & LangGraph connectors (`langchain-gdb`).<br>5. Native HNSW Vector Graph Index and hybrid Graph RAG. |
 | **v0.7.0** | **Steen** | **Distributed ACID Transactions & Advanced Analytics** | 1. Distributed multi-partition ACID transactions (2PC, Snapshot Isolation).<br>2. Weighted shortest path algorithms (Dijkstra, A*).<br>3. Real-time topology and GPU telemetry in Studio. |
 | **v1.0.0** | **Erasmus** | **Enterprise Security & LTS** | 1. TLS/mTLS, JWT authentication, and granular RBAC per graph/label/property.<br>2. Streaming Raft Snapshots over Arrow Flight RPC.<br>3. Long-Term Support (LTS) release with strict API stability guarantees. |

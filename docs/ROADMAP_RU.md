@@ -4,45 +4,42 @@
 
 ---
 
-## 📌 Текущий статус (Версия v0.5.3 — Huygens+)
+## 📌 Текущий статус (Версия v0.5.6 — Релиз)
 
+- ✅ **Межшардовые Multi-Hop обходы и поддержка $RF=1$ (v0.5.6)**:
+  - Введен интерфейс `RemoteEdgeExpander` в `gdb-planner` с пакетным подтягиванием связей граничных вершин (`batch_get_out_edges`).
+  - Добавлен высокопроизводительный внутренний HTTP эндпоинт `POST /storage/out_edges` и `ClusterEdgeExpander` в `gdb-server`.
+  - Полноценная поддержка чистого шардирования ($RF=1$, 0% дублирования данных в RAM) для многошаговых путей (`MATCH (a)-[:REL*1..k]->(b)`).
+  - Агрегация кластерной телеметрии в `/resources`: корректный расчет `cluster_total_edges` (сумма при $RF=1$, максимум при $RF \ge N$) и `cluster_total_vertices`.
+- ✅ **Python SDK (`gdb-client` v0.5.6 на PyPI)**:
+  - `scatter_ingest_edges` и `scatter_ingest_vertices` строго соблюдают `replication_factor` (при $RF=1$ данные направляются ровно на 1 целевой узел $src \pmod N$).
+  - Добавлен метод `target_replica_nodes_for_key` в `ClusterTopology`.
+- ✅ **GDB Studio UI (v0.5.6)**:
+  - Устранена перекрывающая размытая панель в Unity 3D Spatial Canvas, возвращено интерактивное управление сценой мыши.
+  - Отображение суммарных показателей кластера и разбивки локального шардового узла.
+- ✅ **Кластерный MPP Scatter-Gather & Векторный поиск (v0.5.5)**:
+  - Распараллеливание открытых Cypher-запросов и аналитических процедур по узлам с объединением потоков.
+  - Распределенный поиск векторного сходства `CALL vector.similaritySearch` с глобальным слиянием Top-K по метрикам `cosine`, `dot`, `l2`.
+  - Управление маршрутизацией `local_only: true` для предотвращения циклов пересылки.
+- ✅ **Анонсирование сетевых Flight-адресов (v0.5.4)**:
+  - Параметры `--flight-address` (внутренний интер-нодовый Raft/Flight) и `--client-flight-address` (внешний MPP-инжест клиентов через NAT/Docker).
 - ✅ **Фильтрация алгоритмов по типу связей и меткам (v0.5.3)**:
   - Проекция подграфов в `ChunkedCsr::filter_by_edge_type(edge_type)` с сохранением единой адресации вершин.
   - Поддержка `CALL algo.*({edge_type: 'TYPE', label: 'LABEL'})` для изолированного запуска аналитики (PageRank, WCC, Louvain, SSSP и др.) на гетерогенных графах.
-  - Валидация типов связей и меток по схеме с понятными диагностическими ошибками.
-- ✅ **Поддержка ключевых слов как идентификаторов и обратные кавычки (v0.5.3)**:
-  - Имена меток и связей могут совпадать с зарезервированными словами Cypher (`DROP VERTEX VERTEX;`, `DROP EDGE EDGE;`, `RANK`, `ORDER`).
-  - Поддержка экранирования openCypher через обратные кавычки (``` `VERTEX` ```).
-- ✅ **Официальный Python SDK (`gdb-client` v0.5.3 на PyPI)**:
-  - Пакет опубликован в PyPI (`gdb-client==0.5.3`).
-  - Стриминговая загрузка партиций чанками по 64k строк и конфигурирование лимитов Arrow Flight до 256MB.
-  - Автоматическое обнаружение топологии и портов кластера (`flight_port`, `client_flight_port`) из REST API.
-- ✅ **Pushdown первичного ключа в планировщике (v0.5.2)**:
-  - Прямой перенос фильтра `WHERE id = <val>` в `PhysicalOperator::ScanVertices { id_filter: Some(vid) }`.
-  - Добавлена $O(1)$ проверка существования вершин (`has_vertex`) в StorageEngine, VertexPropertyTable и DeltaMemTable.
-  - Устранены таймауты многошагового обхода BFS и избыточные полные сканирования графа (>5000x ускорение).
-- ✅ **GDB Studio Web UI и обновление скрипта запуска (v0.5.2)**:
-  - Скрипт `scripts/start_studio.sh` полностью поддерживает именованные флаги (`--port`, `--cluster-url`, `--host`, `--no-browser`) и позиционные аргументы.
-  - Устойчивый цикл проверки здоровья с автоматической диагностикой и выводом логов при сбоях.
-- ✅ **Out-of-Core пейджинг памяти дискретных GPU (v0.5.1)**:
-  - Потоковая передача графа **Windowed Chunked CSR Streaming с двойной буферизацией** для дискретных GPU (NVIDIA CUDA / PCIe).
-  - Удержание массива `offsets` в VRAM GPU и асинхронный стриминг `targets` через DMA по шине PCIe.
-  - Конфигурация сервера `--gpu-max-vram-mb` (env: `GDB_GPU_MAX_VRAM_MB`, по умолчанию: 2048 МБ).
-- ✅ **Multi-Statement & Relationship DML**:
-  - Лексический сплиттер скриптов (`split_statements`), исполнение через `/query` и `POST /batch`.
-  - Cypher Relationship DML: `MATCH (a), (b) CREATE (a)-[r:TYPE]->(b)` и `MERGE (a)-[r:TYPE]->(b)`.
-  - GDB Studio UI: кнопка «Run All» с индикатором прогресса (`Step: X / Y`).
-- ✅ **Нативные векторные эмбеддинги и поиск сходства**:
-  - Тип `VECTOR(dim)` с колоночным представлением Apache Arrow `FixedSizeList`.
-  - `CALL vector.similaritySearch(label, property, query_vector, k, metric)` (Cosine, DotProduct, L2).
-- ✅ **Качество кода и покрытие тестами**:
-  - 100% успешных тестов во всех крейтах воркспейса, тестовое покрытие $\ge 80\%$.
+  - Экранирование идентификаторов кавычками (``` `VERTEX` ```) и поддержка зарезервированных слов как имен сущностей.
+- ✅ **Pushdown первичного ключа и Out-of-Core GPU Paging (v0.5.1–v0.5.2)**:
+  - Pushdown `WHERE id = <val>` в сканирование вершин ($O(1)$ проверки existence).
+  - Стриминг графа Windowed Chunked CSR с двойной буферизацией для дискретных GPU без OOM.
 
 ---
 
 ## 🏗️ План развития по 4 компонентам
 
 ### 1. `gdb-server` (Ядро, Хранилище, Распределенность)
+* **[v0.6.0] Распределенный Pregel / BSP фреймворк для графовой аналитики ($RF < N$ и $RF=1$)**:
+  * Итеративная модель вычислений **Bulk Synchronous Parallel (BSP) / Pregel** для выполнения алгоритмов (`CALL algo.pageRank`, `CALL algo.wcc`, `CALL algo.louvain`, `CALL algo.sssp`, `CALL algo.betweenness`) над шардированным графом при $RF=1$ и произвольном $RF < N$.
+  * Сетевая фаза синхронизации (Superstep Message Shuffle): передача граничных сообщений между шардами через высокоскоростные стримы **Arrow Flight Shuffle** в конце каждого супершага.
+  * Глобальная сходимость: локальные счетчики дельт сходятся к глобальному `tolerance`, обеспечивая 100% математическую эквивалентность расчетам на монолитном графе при минимальном расходе памяти ($1 \times \text{RAM}$).
 * **[v0.6.0] Graph Spaces / Namespaces (Мультиграф & Мультитенантность)**:
   * Команды DDL: `CREATE GRAPH <name>;`, `SHOW GRAPHS;`, `USE GRAPH <name>;`, `DROP GRAPH <name>;`.
   * Логическая и физическая изоляция: у каждого пространства свой экземпляр `GraphSchema`, независимые партиции `PartitionStorageEngine`, каталоги WAL и CSR топологии.
@@ -60,6 +57,8 @@
 ### 2. `gdb-studio` (Web UI & Графическое рабочее место)
 * **[v0.6.0] Селектор Graph Spaces (Workspace Switcher)**:
   * Выпадающий список активных графов в верхней панели Studio (`USE GRAPH`) с переключением контекста в один клик.
+* **[v0.6.0] Мониторинг распределенной аналитики (Pregel Superstep Tracker)**:
+  * Индикатор супершагов распределенных алгоритмов в реальном времени (прогресс итераций, объем передаваемых Arrow Flight сообщений между шардами).
 * **[v0.6.0] Интерактивный обозреватель схемы мультиграфа**:
   * Визуальная диаграмма графа сущностей с фильтрацией по меткам, типам связей, индексам и счетчикам вершин.
 * **[v0.6.0] Панель Graph Analytics**:
@@ -90,7 +89,7 @@
 
 | Релиз | Кодовое имя | Главный фокус | Ключевые возможности |
 | :---: | :---: | :--- | :--- |
-| **v0.5.3** | **Huygens+** *(Текущий)* | **Стриминг Flight, Ключевые слова, Фильтрация алгосов** | Фильтрация по `edge_type` в `CALL algo.*`, экранирование идентификаторов кавычками, PyPI релиз `gdb-client==0.5.3`, Flight лимит 256MB. |
-| **v0.6.0** | **Hals** | **Graph Spaces (Namespaces) & AI Интеграции** | 1. Мультиграф: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (изоляция схем и CSR).<br>2. Селектор пространств в GDB Studio, REPL CLI и Python SDK.<br>3. Коннекторы LangChain & LangGraph (`langchain-gdb`).<br>4. Векторный граф-индекс HNSW и гибридный Graph RAG. |
+| **v0.5.6** | **Huygens+** *(Текущий)* | **Межшардовые Multi-Hop обходы (RF=1), Агрегация телеметрии, Фикс Studio UI** | 1. Обходы 2/3-hop при чистом шардировании ($RF=1$) через `RemoteEdgeExpander`.<br>2. Агрегация кластерных метрик в `/resources`.<br>3. Учет $RF$ в `scatter_ingest` Python SDK.<br>4. Фикс панели Unity 3D Spatial Canvas. |
+| **v0.6.0** | **Hals** | **Распределенный Pregel/BSP ($RF=1$), Graph Spaces & AI Интеграции** | 1. **Distributed Pregel/BSP Analytics**: глобальные PageRank, WCC, Louvain на шардированном графе ($RF=1$) через сетевой Arrow Flight Shuffle.<br>2. **Мультиграф**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (изоляция схем и CSR).<br>3. Селектор пространств в GDB Studio, REPL CLI и Python SDK.<br>4. Коннекторы LangChain & LangGraph (`langchain-gdb`).<br>5. Векторный граф-индекс HNSW и гибридный Graph RAG. |
 | **v0.7.0** | **Steen** | **Распределенные ACID-транзакции & Продвинутая аналитика** | 1. Распределенные многопартиционные ACID-транзакции (2PC, Snapshot Isolation).<br>2. Алгоритмы взвешенных путей (Dijkstra, A*).<br>3. Мониторинг топологии и GPU в Studio. |
 | **v1.0.0** | **Erasmus** | **Корпоративная безопасность & LTS** | 1. TLS/mTLS, JWT-аутентификация и гранулярный RBAC по графам и меткам.<br>2. Streaming Raft Snapshots через Arrow Flight RPC.<br>3. Долгосрочная поддержка (LTS) и строгая гарантия обратной совместимости API. |
