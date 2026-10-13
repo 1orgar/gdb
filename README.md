@@ -2,7 +2,7 @@
 
 # GDB — Distributed High-Performance In-Memory Graph Database (Nebula Graph Alternative)
 
-[![Version](https://img.shields.io/badge/version-v0.5.5-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-v0.5.6-blue.svg)](Cargo.toml)
 [![CI & Code Coverage](https://github.com/kirill/gdb/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-80.8%25-brightgreen)](docs/COVERAGE.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
@@ -23,7 +23,7 @@ A next-generation, high-performance distributed HTAP graph database engine built
 2. **Query Language, Multi-Statement DML & Analytics (openCypher / GQL / CALL algo):**
    - **Multi-Statement Script Execution & Batch API:** Semicolon-delimited queries (`split_statements`), `/query` multi-statement execution, `/batch` endpoint, and Studio UI "Run All" with step progress tracking.
    - **Cypher Relationship DML:** `MATCH (a:User), (b:User) CREATE (a)-[r:FOLLOWS]->(b)`, `MERGE (a)-[r:KNOWS]->(b)`.
-   - **Patterns & Multi-Hop Traversal:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name` with GPU-accelerated BFS expansion.
+   - **Patterns & Multi-Hop Traversal:** `MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) WHERE a.age > 25 RETURN b.name` with GPU-accelerated BFS expansion and distributed cross-node sharded traversal ($RF \ge 1$).
    - **`WITH` Operator Pipeline:** Inter-clause pipeline transformations, intermediate projections, and aggregations.
    - **Cypher Mutations & Merges:** `MATCH (u:User {name: 'Alice'}) SET u.age = 31`, `DELETE`, `DETACH DELETE`, `MERGE`.
    - **Physical Execution Plan (EXPLAIN):** `EXPLAIN <query>` produces an optimized physical execution plan DAG.
@@ -41,7 +41,7 @@ A next-generation, high-performance distributed HTAP graph database engine built
    - **Linux NVIDIA (CUDA):** Native CudaComputeBackend in `gdb-gpu` for parallel BFS, PageRank, Louvain, WCC, and Triangle Counting on server GPUs.
    - **CPU SIMD Fallback:** When GPU is disabled or absent, computations automatically execute via a vectorized Rayon CPU backend.
 
-5. **GDB Studio v0.5.5 (Interactive Web Workspace):**
+5. **GDB Studio v0.5.6 (Interactive Web Workspace):**
    - **"Run All" Multi-Statement Execution:** Step-by-step progress indicator (`Step: X / Y`), automated batching, and error tracing.
    - **Vector Array Inspector:** Clean monospace display for high-dimensional vectors and embedding scores.
    - **Clean Catalog Boot & Interactive Schema Manager:** Inspect, create, alter, and drop vertex tags and edge types visually.

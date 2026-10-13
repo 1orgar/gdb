@@ -20,11 +20,26 @@ pub struct QueryResult {
     pub rows_affected: usize,
 }
 
+pub trait RemoteEdgeExpander: Send + Sync {
+    fn get_out_edges(&self, vid: VertexId, edge_type: Option<EdgeType>) -> Vec<EdgeId>;
+    fn batch_get_out_edges(&self, vids: &[VertexId], edge_type: Option<EdgeType>) -> HashMap<VertexId, Vec<EdgeId>> {
+        let mut map = HashMap::new();
+        for &vid in vids {
+            let edges = self.get_out_edges(vid, edge_type);
+            if !edges.is_empty() {
+                map.insert(vid, edges);
+            }
+        }
+        map
+    }
+}
+
 pub struct QueryExecutor {
     pub schema: Arc<RwLock<GraphSchema>>,
     pub storage: Arc<PartitionStorageEngine>,
     pub gpu: Option<Arc<gdb_gpu::GpuDispatcher>>,
     pub stats: Arc<RwLock<Option<gdb_storage::GraphStatistics>>>,
+    pub remote_expander: Option<Arc<dyn RemoteEdgeExpander>>,
 }
 
 impl QueryExecutor {
@@ -34,7 +49,13 @@ impl QueryExecutor {
             storage,
             gpu: None,
             stats: Arc::new(RwLock::new(None)),
+            remote_expander: None,
         }
+    }
+
+    pub fn with_remote_expander(mut self, expander: Arc<dyn RemoteEdgeExpander>) -> Self {
+        self.remote_expander = Some(expander);
+        self
     }
 
     pub fn with_gpu(
@@ -47,6 +68,7 @@ impl QueryExecutor {
             storage,
             gpu: Some(gpu),
             stats: Arc::new(RwLock::new(None)),
+            remote_expander: None,
         }
     }
 
@@ -1066,7 +1088,12 @@ impl QueryExecutor {
                     let mut next_hop_rows = Vec::new();
                     for r in current_rows {
                         if let Some(&(src_vid, _)) = r.vertices.get(&prev_var) {
-                            let out_edges = self.storage.get_out_edges(src_vid, edge_type, snapshot);
+                            let mut out_edges = self.storage.get_out_edges(src_vid, edge_type, snapshot);
+                            if out_edges.is_empty() {
+                                if let Some(ref remote) = self.remote_expander {
+                                    out_edges = remote.get_out_edges(src_vid, edge_type);
+                                }
+                            }
                             for e in out_edges {
                                 let mut new_r = r.clone();
                                 if let Some(ev) = &edge_pat.variable {
@@ -1315,9 +1342,42 @@ impl QueryExecutor {
                 let input_rows = self.execute_plan(input, snapshot)?;
                 let mut output_rows = Vec::new();
 
+                let mut missing_vids = Vec::new();
+                if self.remote_expander.is_some() {
+                    let mut seen = std::collections::HashSet::new();
+                    for row in &input_rows {
+                        if let Some(&(src_vid, _)) = row.vertices.get(src_var) {
+                            if seen.insert(src_vid) {
+                                let local_edges = self.storage.get_out_edges(src_vid, *edge_type, snapshot);
+                                if local_edges.is_empty() {
+                                    missing_vids.push(src_vid);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let remote_map = if !missing_vids.is_empty() {
+                    if let Some(ref remote) = self.remote_expander {
+                        remote.batch_get_out_edges(&missing_vids, *edge_type)
+                    } else {
+                        HashMap::new()
+                    }
+                } else {
+                    HashMap::new()
+                };
+
                 for row in input_rows {
                     if let Some(&(src_vid, _)) = row.vertices.get(src_var) {
-                        let edges = self.storage.get_out_edges(src_vid, *edge_type, snapshot);
+                        let local_edges = self.storage.get_out_edges(src_vid, *edge_type, snapshot);
+                        let edges = if !local_edges.is_empty() {
+                            local_edges
+                        } else if let Some(re) = remote_map.get(&src_vid) {
+                            re.clone()
+                        } else {
+                            Vec::new()
+                        };
+
                         for edge in edges {
                             let mut new_row = row.clone();
                             if let Some(ev) = edge_var {
@@ -1349,6 +1409,8 @@ impl QueryExecutor {
                 } else {
                     false
                 };
+
+                let mut bfs_cache: HashMap<VertexId, Vec<EdgeId>> = HashMap::new();
 
                 for row in input_rows {
                     if let Some(&(start_vid, _)) = row.vertices.get(src_var) {
@@ -1382,7 +1444,19 @@ impl QueryExecutor {
                             }
 
                             if depth < max_depth {
-                                let edges = self.storage.get_out_edges(curr_vid, *edge_type, snapshot);
+                                let edges = if let Some(cached) = bfs_cache.get(&curr_vid) {
+                                    cached.clone()
+                                } else {
+                                    let mut e = self.storage.get_out_edges(curr_vid, *edge_type, snapshot);
+                                    if e.is_empty() {
+                                        if let Some(ref remote) = self.remote_expander {
+                                            e = remote.get_out_edges(curr_vid, *edge_type);
+                                        }
+                                    }
+                                    bfs_cache.insert(curr_vid, e.clone());
+                                    e
+                                };
+
                                 for edge in edges {
                                     if !visited_edges.contains(&edge) {
                                         let mut next_visited = visited_edges.clone();

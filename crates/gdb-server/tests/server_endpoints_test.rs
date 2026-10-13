@@ -591,5 +591,117 @@ async fn test_server_mpp_scatter_gather_queries() {
     assert_eq!(body_vec["num_rows"], 2);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sharded_cross_node_multi_hop_traversal_and_resources() {
+    let tdir1 = tempdir().unwrap();
+    let tdir2 = tempdir().unwrap();
+    let (addr1, _h1, state1) = create_test_server(tdir1.path().to_path_buf()).await.unwrap();
+    let (addr2, _h2, state2) = create_test_server(tdir2.path().to_path_buf()).await.unwrap();
+
+    let url1 = format!("http://{}", addr1);
+    let url2 = format!("http://{}", addr2);
+
+    let node1 = RingNode {
+        node_id: 1,
+        http_url: url1.clone(),
+        flight_address: "127.0.0.1".into(),
+        flight_port: 8848,
+        client_flight_address: "127.0.0.1".into(),
+        client_flight_port: 8860,
+    };
+    let node2 = RingNode {
+        node_id: 2,
+        http_url: url2.clone(),
+        flight_address: "127.0.0.1".into(),
+        flight_port: 8849,
+        client_flight_address: "127.0.0.1".into(),
+        client_flight_port: 8861,
+    };
+
+    *state1.ring_nodes.write() = vec![node1.clone(), node2.clone()];
+    *state2.ring_nodes.write() = vec![node1.clone(), node2.clone()];
+
+    // Explicitly set RF=1 (pure distributed sharding)
+    // state1.replication_factor is already 1 by default
+    assert_eq!(state1.replication_factor, 1);
+    assert_eq!(state2.replication_factor, 1);
+
+    let client = Client::new();
+
+    // 1. Setup Schema on both nodes
+    client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "CREATE VERTEX Device (id INT64); CREATE EDGE CONNECTED ();",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    client.post(format!("{}/query", url2))
+        .json(&serde_json::json!({
+            "query": "CREATE VERTEX Device (id INT64); CREATE EDGE CONNECTED ();",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    // 2. Sharded Ingestion:
+    // Node 1 receives: 1 -> 2
+    client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Device (id) VALUES (1); INSERT VERTEX Device (id) VALUES (2); INSERT EDGE CONNECTED FROM 1 TO 2;",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    // Node 2 receives: 2 -> 3
+    client.post(format!("{}/query", url2))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Device (id) VALUES (2); INSERT VERTEX Device (id) VALUES (3); INSERT EDGE CONNECTED FROM 2 TO 3;",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    // Compact both
+    client.post(format!("{}/compact", url1)).send().await.unwrap();
+    client.post(format!("{}/compact", url2)).send().await.unwrap();
+
+    // 3. Verify /storage/out_edges endpoint on Node 2
+    let res_edges = client.post(format!("{}/storage/out_edges", url2))
+        .json(&serde_json::json!({
+            "vids": [2]
+        }))
+        .send().await.unwrap();
+    assert!(res_edges.status().is_success());
+    let edge_map: serde_json::Value = res_edges.json().await.unwrap();
+    assert!(edge_map.get("2").is_some());
+    let edges_for_2 = edge_map["2"].as_array().unwrap();
+    assert_eq!(edges_for_2.len(), 1);
+    assert_eq!(edges_for_2[0]["src"], 2);
+    assert_eq!(edges_for_2[0]["dst"], 3);
+
+    // 4. Verify /resources aggregation on Node 1 (RF=1)
+    let res_res = client.get(format!("{}/resources", url1)).send().await.unwrap();
+    assert!(res_res.status().is_success());
+    let res_body: serde_json::Value = res_res.json().await.unwrap();
+    assert_eq!(res_body["total_nodes"], 2);
+    assert_eq!(res_body["local_edges"], 1); // Local Node 1 has 1 edge
+    assert_eq!(res_body["cluster_total_edges"], 2); // Cluster total is 1 + 1 = 2
+    assert_eq!(res_body["total_edges"], 2);
+
+    // 5. Query 2-hop traversal across shards: MATCH (a:Device)-[:CONNECTED]->(b:Device)-[:CONNECTED]->(c:Device)
+    // Hop 1 (1->2) is on Node 1, Hop 2 (2->3) is on Node 2!
+    let res_query = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "MATCH (a:Device)-[:CONNECTED]->(b:Device)-[:CONNECTED]->(c:Device) RETURN a.id, b.id, c.id;"
+        }))
+        .send().await.unwrap();
+    assert!(res_query.status().is_success());
+    let query_body: serde_json::Value = res_query.json().await.unwrap();
+    assert_eq!(query_body["status"], "ok");
+    assert_eq!(query_body["num_rows"], 1);
+    let rows = query_body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], serde_json::json!([1, 2, 3]));
+}
+
 
 

@@ -1,13 +1,13 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use gdb_core::schema::GraphSchema;
-use gdb_core::DataValue;
+use gdb_core::{DataValue, EdgeId, EdgeType, VertexId};
 use gdb_flight::{GdbClientFlightService, GdbFlightService};
 use gdb_gpu::GpuDispatcher;
-use gdb_planner::QueryExecutor;
+use gdb_planner::{QueryExecutor, RemoteEdgeExpander};
 use gdb_raft::MultiRaftManager;
 use gdb_s3::S3StorageManager;
 use gdb_storage::PartitionStorageEngine;
@@ -278,7 +278,63 @@ async fn handle_cluster(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Debug, Deserialize, Default)]
+struct ResourcesParams {
+    local: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StorageOutEdgesRequest {
+    pub vids: Vec<u64>,
+    pub edge_type: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EdgeDto {
+    pub src: u64,
+    pub edge_type: u32,
+    pub rank: i64,
+    pub dst: u64,
+}
+
+impl From<EdgeId> for EdgeDto {
+    fn from(e: EdgeId) -> Self {
+        Self {
+            src: e.src.0,
+            edge_type: e.edge_type.0,
+            rank: e.rank,
+            dst: e.dst.0,
+        }
+    }
+}
+
+impl From<EdgeDto> for EdgeId {
+    fn from(dto: EdgeDto) -> Self {
+        EdgeId::new(VertexId(dto.src), EdgeType(dto.edge_type), dto.rank, VertexId(dto.dst))
+    }
+}
+
+async fn handle_storage_out_edges(
+    State(state): State<AppState>,
+    Json(payload): Json<StorageOutEdgesRequest>,
+) -> impl IntoResponse {
+    let et = payload.edge_type.map(EdgeType);
+    let snapshot = state.storage.latest_version();
+    let mut results: HashMap<u64, Vec<EdgeDto>> = HashMap::new();
+    for vid_u64 in payload.vids {
+        let vid = VertexId(vid_u64);
+        let edges = state.storage.get_out_edges(vid, et, snapshot);
+        if !edges.is_empty() {
+            results.insert(vid_u64, edges.into_iter().map(EdgeDto::from).collect());
+        }
+    }
+    Json(results)
+}
+
+async fn handle_resources(
+    State(state): State<AppState>,
+    Query(params): Query<ResourcesParams>,
+) -> impl IntoResponse {
     let csr_edges = state.storage.csr_edges();
     let memtable_edges = state.storage.delta_edges();
     let total_edges = state.storage.total_edges();
@@ -291,6 +347,83 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
     // Estimated memory: 32 bytes per edge in CSR + 64 bytes per delta edge + base overhead
     let estimated_memory = (csr_edges * 32) + (memtable_edges * 64) + 20_971_520;
 
+    let ring_snapshot = state.ring_nodes.read().clone();
+    let total_nodes = ring_snapshot.len();
+
+    let mut cluster_total_edges = total_edges;
+    let mut cluster_total_vertices = total_vertices;
+    let mut peer_metrics = vec![serde_json::json!({
+        "node_id": state.node_id,
+        "edges": total_edges,
+        "vertices": total_vertices,
+        "csr_edges": csr_edges,
+        "memtable_edges": memtable_edges,
+        "role": "Coordinator"
+    })];
+
+    if params.local != Some(true) && total_nodes > 1 {
+        let peers: Vec<RingNode> = ring_snapshot.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+        let client = state.http_client.clone();
+        let mut peer_futs = Vec::new();
+
+        for peer in peers {
+            let p_url = format!("{}/resources?local=true", peer.http_url.trim_end_matches('/'));
+            let c = client.clone();
+            peer_futs.push(tokio::spawn(async move {
+                match c.get(&p_url)
+                    .timeout(std::time::Duration::from_millis(500))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+                    Err(_) => None,
+                }
+            }));
+        }
+
+        let peer_resps = futures::future::join_all(peer_futs).await;
+        let mut sum_edges = total_edges;
+        let mut sum_vertices = total_vertices;
+        let mut max_edges = total_edges;
+        let mut max_vertices = total_vertices;
+
+        for pres in peer_resps {
+            if let Ok(Some(val)) = pres {
+                let pe = val.get("total_edges").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let pv = val.get("total_vertices").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let pn = val.get("node_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let pcsr = val.get("csr_edges").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let pmem = val.get("memtable_edges").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+                sum_edges += pe;
+                sum_vertices += pv;
+                max_edges = max_edges.max(pe);
+                max_vertices = max_vertices.max(pv);
+
+                peer_metrics.push(serde_json::json!({
+                    "node_id": pn,
+                    "edges": pe,
+                    "vertices": pv,
+                    "csr_edges": pcsr,
+                    "memtable_edges": pmem,
+                    "role": "Peer"
+                }));
+            }
+        }
+
+        if state.replication_factor == 1 {
+            cluster_total_edges = sum_edges;
+            cluster_total_vertices = sum_vertices.max(max_vertices);
+        } else if (state.replication_factor as usize) >= total_nodes {
+            cluster_total_edges = max_edges;
+            cluster_total_vertices = max_vertices;
+        } else {
+            let rf_f64 = state.replication_factor as f64;
+            cluster_total_edges = (sum_edges as f64 / rf_f64).round() as usize;
+            cluster_total_vertices = (sum_vertices as f64 / rf_f64).round() as usize;
+        }
+    }
+
     Json(serde_json::json!({
         "node_id": state.node_id,
         "role": "Peer",
@@ -298,9 +431,16 @@ async fn handle_resources(State(state): State<AppState>) -> impl IntoResponse {
         "cluster_topology": "leaderless-ring",
         "replication_factor": state.replication_factor,
         "replication_mode": state.replication_mode.to_string(),
-        "total_nodes": state.ring_nodes.read().len(),
-        "total_vertices": total_vertices,
-        "total_edges": total_edges,
+        "total_nodes": total_nodes,
+        "cluster_total_vertices": cluster_total_vertices,
+        "cluster_total_edges": cluster_total_edges,
+        "total_vertices": cluster_total_vertices,
+        "total_edges": cluster_total_edges,
+        "local_vertices": total_vertices,
+        "local_edges": total_edges,
+        "node_total_vertices": total_vertices,
+        "node_total_edges": total_edges,
+        "peer_metrics": peer_metrics,
         "memtable_edges": memtable_edges,
         "csr_edges": csr_edges,
         "compactions_total": compactions,
@@ -621,6 +761,153 @@ fn calculate_replica_set(key: u64, ring: &[RingNode], rf: u32) -> Vec<RingNode> 
         replicas.push(ring[idx].clone());
     }
     replicas
+}
+
+pub struct ClusterEdgeExpander {
+    pub ring_nodes: Arc<RwLock<Vec<RingNode>>>,
+    pub node_id: u64,
+    pub http_client: reqwest::Client,
+    pub replication_factor: u32,
+    pub cache: Arc<RwLock<HashMap<VertexId, Vec<EdgeId>>>>,
+}
+
+impl RemoteEdgeExpander for ClusterEdgeExpander {
+    fn get_out_edges(&self, vid: VertexId, edge_type: Option<EdgeType>) -> Vec<EdgeId> {
+        let batch_map = self.batch_get_out_edges(&[vid], edge_type);
+        batch_map.get(&vid).cloned().unwrap_or_default()
+    }
+
+    fn batch_get_out_edges(&self, vids: &[VertexId], edge_type: Option<EdgeType>) -> HashMap<VertexId, Vec<EdgeId>> {
+        let mut results: HashMap<VertexId, Vec<EdgeId>> = HashMap::new();
+        let mut missing: Vec<VertexId> = Vec::new();
+
+        {
+            let cache = self.cache.read();
+            for &vid in vids {
+                if let Some(edges) = cache.get(&vid) {
+                    let filtered: Vec<EdgeId> = if let Some(et) = edge_type {
+                        edges.iter().filter(|e| e.edge_type == et).cloned().collect()
+                    } else {
+                        edges.clone()
+                    };
+                    results.insert(vid, filtered);
+                } else {
+                    missing.push(vid);
+                }
+            }
+        }
+
+        if missing.is_empty() {
+            return results;
+        }
+
+        let ring_snapshot = self.ring_nodes.read().clone();
+        if ring_snapshot.len() <= 1 {
+            return results;
+        }
+
+        let mut peer_groups: HashMap<String, Vec<u64>> = HashMap::new();
+        for vid in missing {
+            let replica_set = calculate_replica_set(vid.0, &ring_snapshot, self.replication_factor);
+            if let Some(target) = replica_set.into_iter().find(|n| n.node_id != self.node_id) {
+                peer_groups.entry(target.http_url.trim_end_matches('/').to_string())
+                    .or_default()
+                    .push(vid.0);
+            } else {
+                for peer in ring_snapshot.iter().filter(|n| n.node_id != self.node_id) {
+                    peer_groups.entry(peer.http_url.trim_end_matches('/').to_string())
+                        .or_default()
+                        .push(vid.0);
+                }
+            }
+        }
+
+        if peer_groups.is_empty() {
+            return results;
+        }
+
+        let client = self.http_client.clone();
+        let et_u32 = edge_type.map(|e| e.0);
+
+        let do_fetch = |pg: HashMap<String, Vec<u64>>, c: reqwest::Client, et: Option<u32>| async move {
+            let mut futs = Vec::new();
+            for (peer_url, vids_list) in pg {
+                let client = c.clone();
+                let payload = serde_json::json!({
+                    "vids": vids_list,
+                    "edge_type": et,
+                });
+                let url = format!("{}/storage/out_edges", peer_url);
+                futs.push(async move {
+                    match client.post(&url)
+                        .json(&payload)
+                        .timeout(std::time::Duration::from_millis(2000))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => resp.json::<HashMap<u64, Vec<EdgeDto>>>().await.unwrap_or_default(),
+                        Err(e) => {
+                            tracing::debug!("Remote edge lookup at {} failed: {}", url, e);
+                            HashMap::new()
+                        }
+                    }
+                });
+            }
+            let mut combined = HashMap::new();
+            for map in futures::future::join_all(futs).await {
+                combined.extend(map);
+            }
+            combined
+        };
+
+        let fetched_map: HashMap<u64, Vec<EdgeDto>> = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            match handle.runtime_flavor() {
+                tokio::runtime::RuntimeFlavor::MultiThread => {
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(do_fetch(peer_groups, client, et_u32))
+                    })
+                }
+                _ => {
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                        rt.block_on(do_fetch(peer_groups, client, et_u32))
+                    })
+                    .join()
+                    .unwrap_or_default()
+                }
+            }
+        } else {
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(do_fetch(peer_groups, client, et_u32))
+            })
+            .join()
+            .unwrap_or_default()
+        };
+
+        {
+            let mut cache = self.cache.write();
+            for (vid_u64, edge_dtos) in fetched_map {
+                let vid = VertexId(vid_u64);
+                let edge_ids: Vec<EdgeId> = edge_dtos.into_iter().map(EdgeId::from).collect();
+                cache.insert(vid, edge_ids.clone());
+                let filtered: Vec<EdgeId> = if let Some(et) = edge_type {
+                    edge_ids.into_iter().filter(|e| e.edge_type == et).collect()
+                } else {
+                    edge_ids
+                };
+                results.insert(vid, filtered);
+            }
+        }
+
+        results
+    }
 }
 
 async fn replicate_to_targets(
@@ -954,7 +1241,7 @@ async fn execute_single_query(state: &AppState, trimmed: &str, local_only: bool)
 
     if let gdb_parser::ast::Statement::InsertVertices { vertices, .. } = &stmt {
         let ring_snapshot = state.ring_nodes.read().clone();
-        if ring_snapshot.len() > 1 {
+        if !local_only && ring_snapshot.len() > 1 {
             let mut targets: Vec<RingNode> = Vec::new();
             for (vid, _) in vertices {
                 for rep in calculate_replica_set(vid.0, &ring_snapshot, state.replication_factor) {
@@ -996,7 +1283,7 @@ async fn execute_single_query(state: &AppState, trimmed: &str, local_only: bool)
 
     if let gdb_parser::ast::Statement::InsertEdges { edges, .. } = &stmt {
         let ring_snapshot = state.ring_nodes.read().clone();
-        if ring_snapshot.len() > 1 {
+        if !local_only && ring_snapshot.len() > 1 {
             let mut targets: Vec<RingNode> = Vec::new();
             for (src, _, _, _) in edges {
                 for rep in calculate_replica_set(src.0, &ring_snapshot, state.replication_factor) {
@@ -1050,7 +1337,7 @@ async fn execute_single_query(state: &AppState, trimmed: &str, local_only: bool)
         let replica_set = calculate_replica_set(key, &ring_snapshot, state.replication_factor);
         let is_local_replica = replica_set.iter().any(|n| n.node_id == state.node_id);
 
-        if !is_local_replica && !replica_set.is_empty() {
+        if !local_only && !is_local_replica && !replica_set.is_empty() {
             // Coordinator is not part of this key's replica set (RF < N): forward to primary replica
             let primary = &replica_set[0];
             let primary_url = format!("{}/query", primary.http_url.trim_end_matches('/'));
@@ -1069,8 +1356,10 @@ async fn execute_single_query(state: &AppState, trimmed: &str, local_only: bool)
                 state.queries_ok.fetch_add(1, Ordering::Relaxed);
                 state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
 
-                let remote_replicas: Vec<RingNode> = replica_set.into_iter().filter(|n| n.node_id != state.node_id).collect();
-                replicate_to_targets(&state.http_client, &remote_replicas, trimmed, state.replication_mode, &state.replications_count).await;
+                if !local_only {
+                    let remote_replicas: Vec<RingNode> = replica_set.into_iter().filter(|n| n.node_id != state.node_id).collect();
+                    replicate_to_targets(&state.http_client, &remote_replicas, trimmed, state.replication_mode, &state.replications_count).await;
+                }
 
                 return serde_json::json!({
                     "status": "ok",
@@ -1342,6 +1631,7 @@ pub fn create_router(app_state: AppState) -> Router {
         .route("/snapshot", post(handle_snapshot))
         .route("/query", post(handle_query))
         .route("/batch", post(handle_batch))
+        .route("/storage/out_edges", post(handle_storage_out_edges))
         .route("/replicate", post(handle_replicate))
         .route("/raft/replicate", post(handle_replicate))
         .with_state(app_state)
@@ -1354,7 +1644,6 @@ pub async fn create_test_server(
     let raft_manager = Arc::new(MultiRaftManager::new(1, 1, wal_dir));
     let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
     raft_manager.register_partition(0, storage.clone(), vec![])?;
-    let executor = Arc::new(QueryExecutor::new(schema.clone(), storage.clone()));
 
     let ring_nodes = Arc::new(RwLock::new(vec![RingNode {
         node_id: 1,
@@ -1364,6 +1653,21 @@ pub async fn create_test_server(
         client_flight_address: "127.0.0.1".to_string(),
         client_flight_port: 0,
     }]));
+
+    let remote_expander = Arc::new(ClusterEdgeExpander {
+        ring_nodes: ring_nodes.clone(),
+        node_id: 1,
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(2000))
+            .build()?,
+        replication_factor: 1,
+        cache: Arc::new(RwLock::new(HashMap::new())),
+    });
+
+    let executor = Arc::new(
+        QueryExecutor::new(schema.clone(), storage.clone())
+            .with_remote_expander(remote_expander),
+    );
 
     let app_state = AppState {
         node_id: 1,
@@ -1487,11 +1791,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("\x1b[1;32m[+] Multi-Raft:\x1b[0m Initialized {} partition groups", args.partitions);
 
     let storage_p0 = raft_manager.get_group(0).unwrap().storage.clone();
-    let executor = Arc::new(QueryExecutor::with_gpu(
-        schema.clone(),
-        storage_p0.clone(),
-        Arc::new(gpu_dispatcher.clone()),
-    ));
 
     // Clean graph catalog boot (no default entities created on startup)
     println!("\x1b[1;32m[+] Graph Catalog:\x1b[0m Clean graph catalog initialized (no default entities)");
@@ -1541,6 +1840,25 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let ring_nodes = Arc::new(RwLock::new(ring_nodes_vec));
     let replication_mode = ReplicationMode::from_str(&args.replication_mode).unwrap_or(ReplicationMode::Sync);
     let effective_rf = (args.replication_factor as usize).min(total_nodes as usize).max(1);
+
+    let remote_expander = Arc::new(ClusterEdgeExpander {
+        ring_nodes: ring_nodes.clone(),
+        node_id: args.node_id,
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(2000))
+            .build()?,
+        replication_factor: args.replication_factor,
+        cache: Arc::new(RwLock::new(HashMap::new())),
+    });
+
+    let executor = Arc::new(
+        QueryExecutor::with_gpu(
+            schema.clone(),
+            storage_p0.clone(),
+            Arc::new(gpu_dispatcher.clone()),
+        )
+        .with_remote_expander(remote_expander),
+    );
 
     println!(
         "\x1b[1;32m[+] Cluster Topology:\x1b[0m LEADERLESS HASH RING (Nodes: {})",

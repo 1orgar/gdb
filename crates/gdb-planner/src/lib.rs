@@ -3,7 +3,7 @@ pub mod executor;
 pub mod plan;
 
 pub use eval::{eval_expr, PathRow};
-pub use executor::{QueryResult, QueryExecutor};
+pub use executor::{QueryResult, QueryExecutor, RemoteEdgeExpander};
 pub use plan::PhysicalOperator;
 
 #[cfg(test)]
@@ -325,5 +325,51 @@ mod tests {
         let res3 = executor.execute(q3).unwrap();
         let b3 = res3.batch.unwrap();
         assert_eq!(b3.num_rows(), 2); // Alice->Bob and Alice->Charlie
+    }
+
+    #[test]
+    fn test_remote_edge_expander_sharded_traversal() {
+        use gdb_core::{EdgeId, EdgeType, VertexId};
+        use std::collections::HashMap;
+
+        struct MockRemoteExpander {
+            edges: HashMap<VertexId, Vec<EdgeId>>,
+        }
+
+        impl RemoteEdgeExpander for MockRemoteExpander {
+            fn get_out_edges(&self, vid: VertexId, _edge_type: Option<EdgeType>) -> Vec<EdgeId> {
+                self.edges.get(&vid).cloned().unwrap_or_default()
+            }
+        }
+
+        let schema = Arc::new(RwLock::new(GraphSchema::new("test_sharded")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+
+        // Setup local storage: only has 1 -> 2
+        let mut executor = QueryExecutor::new(schema, storage.clone());
+        executor.execute(parse("CREATE VERTEX User (name STRING)").unwrap()).unwrap();
+        executor.execute(parse("CREATE EDGE FOLLOWS ()").unwrap()).unwrap();
+        executor.execute(parse("INSERT VERTEX User (id, name) VALUES (1, 'Alice')").unwrap()).unwrap();
+        executor.execute(parse("INSERT VERTEX User (id, name) VALUES (2, 'Bob')").unwrap()).unwrap();
+        executor.execute(parse("INSERT VERTEX User (id, name) VALUES (3, 'Charlie')").unwrap()).unwrap();
+        executor.execute(parse("INSERT EDGE FOLLOWS FROM 1 TO 2").unwrap()).unwrap();
+        storage.compact();
+
+        // Without remote expander: 2-hop traversal returns 0 rows because 2->3 is on another shard
+        let q_2hop = parse("MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) RETURN a.name, b.name, c.name").unwrap();
+        let res_local = executor.execute(q_2hop.clone()).unwrap();
+        assert_eq!(res_local.rows_affected, 0);
+        assert!(res_local.batch.is_none());
+
+        // Attach MockRemoteExpander holding 2 -> 3 (from shard 1)
+        let mut remote_map = HashMap::new();
+        remote_map.insert(VertexId(2), vec![EdgeId::new(VertexId(2), EdgeType(1), 0, VertexId(3))]);
+        executor = executor.with_remote_expander(Arc::new(MockRemoteExpander { edges: remote_map }));
+
+        // With remote expander: 2-hop traversal successfully discovers Alice -> Bob -> Charlie!
+        let res_remote = executor.execute(q_2hop).unwrap();
+        let batch = res_remote.batch.expect("Batch returned with remote edge expansion");
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 3);
     }
 }

@@ -1128,14 +1128,14 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
         <!-- 3D Unity Viewport -->
         <div id="unity-viewport" class="viewport" style="display:none; width:100%; height:100%; position:relative; background:#080b10; overflow:hidden;">
           <canvas id="unity-canvas" style="width:100%; height:100%; display:block; outline:none; cursor:grab;"></canvas>
-          <div class="graph-controls" style="top:14px; right:14px;">
+          <div class="graph-controls" style="top:14px; right:14px; bottom:auto; left:auto; width:fit-content; height:fit-content;">
             <button class="control-btn" title="Zoom In" onclick="zoomUnity3D(1.2)">➕</button>
             <button class="control-btn" title="Zoom Out" onclick="zoomUnity3D(0.8)">➖</button>
             <button class="control-btn" title="Reset 3D View" onclick="resetUnity3DView()">⟲</button>
             <button class="control-btn" title="Toggle 3D Physics" id="unity-physics-btn" onclick="toggleUnityPhysics()">⏸</button>
             <button class="control-btn" title="Auto Rotate" id="unity-rotate-btn" onclick="toggleUnityAutoRotate()">🔄</button>
           </div>
-          <div id="unity-hud-bar" style="position:absolute; bottom:16px; left:16px; display:flex; align-items:center; gap:10px; background:rgba(13,17,23,0.85); backdrop-filter:blur(6px); border:1px solid var(--border); padding:8px 14px; border-radius:8px; font-size:12px; pointer-events:auto; z-index:10;">
+          <div id="unity-hud-bar" style="position:absolute; bottom:16px; left:16px; display:flex; align-items:center; gap:10px; background:rgba(13,17,23,0.85); backdrop-filter:blur(6px); border:1px solid var(--border); padding:8px 14px; border-radius:8px; font-size:12px; pointer-events:none; z-index:10;">
             <span style="font-size:16px;">🎮</span>
             <div>
               <div style="font-weight:600; color:var(--text-bright);" id="unity-stats-title">3D Graph Spatial Visualizer</div>
@@ -1255,7 +1255,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span id="footer-version">GDB Studio v0.5.5</span>
+      <span id="footer-version">GDB Studio v0.5.6</span>
       <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
       <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>
@@ -3402,12 +3402,22 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
       const ramSub = document.getElementById('res-ram-sub');
       if (ramSub) ramSub.textContent = `CSR: ${data.csr_edges || 0} edges | MemTable: ${data.memtable_edges || 0} edges`;
 
+      const clusterEdges = data.cluster_total_edges != null ? data.cluster_total_edges : (data.total_edges || 0);
+      const clusterVertices = data.cluster_total_vertices != null ? data.cluster_total_vertices : (data.total_vertices || 0);
+      const localEdges = data.local_edges != null ? data.local_edges : (data.node_total_edges != null ? data.node_total_edges : (data.total_edges || 0));
+
       const vVal = document.getElementById('res-v-val');
-      if (vVal) vVal.textContent = (data.total_vertices || 0).toLocaleString();
+      if (vVal) vVal.textContent = clusterVertices.toLocaleString();
       const eVal = document.getElementById('res-e-val');
-      if (eVal) eVal.textContent = (data.total_edges || 0).toLocaleString();
+      if (eVal) eVal.textContent = clusterEdges.toLocaleString();
       const edgesBreakdown = document.getElementById('res-edges-breakdown');
-      if (edgesBreakdown) edgesBreakdown.textContent = `CSR: ${data.csr_edges || 0} | MemTable: ${data.memtable_edges || 0}`;
+      if (edgesBreakdown) {
+        if (data.total_nodes && data.total_nodes > 1) {
+          edgesBreakdown.textContent = `Cluster: ${clusterEdges} | Node #${data.node_id || 1}: ${localEdges} (CSR: ${data.csr_edges || 0}, MemTable: ${data.memtable_edges || 0})`;
+        } else {
+          edgesBreakdown.textContent = `CSR: ${data.csr_edges || 0} | MemTable: ${data.memtable_edges || 0}`;
+        }
+      }
 
       const compVal = document.getElementById('res-compaction-val');
       if (compVal) compVal.textContent = (data.compactions_total || 0).toLocaleString();

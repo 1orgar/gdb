@@ -4,6 +4,27 @@ All notable changes to **GDB** (Distributed High-Performance In-Memory Graph Dat
 
 ---
 
+## [0.5.6] - 2026-10-13
+
+### Distributed MPP & Multi-Hop Traversal (Pure Sharding $RF=1$)
+- **Sharded Cross-Node Multi-Hop Traversal:** Enabled seamless 2-hop, 3-hop, and $k$-hop path pattern matching (`MATCH (a)-[:REL]->(b)-[:REL]->(c)...`) across distributed cluster nodes when $RF=1$ (pure sharding, 0% RAM duplication) and arbitrary $RF \ge 1$.
+- **Remote Edge Expander (`gdb-planner`):** Introduced `RemoteEdgeExpander` trait in `QueryExecutor` with batch pre-fetching of boundary vertices across shards in `ExpandEdges`, `VarLengthExpand`, and `execute_next_match`.
+- **Peer Batch Edge Lookup (`gdb-server`):** Added high-throughput internal endpoint `POST /storage/out_edges` and `ClusterEdgeExpander` with concurrency-safe thread runtime handling and local LRU caching.
+- **Cluster Storage Telemetry Aggregation:** `/resources` now queries cluster peers to aggregate cluster totals (`cluster_total_edges`, `cluster_total_vertices`), dynamically calculating the sum across shards when $RF=1$ and cluster max when $RF \ge N$, alongside per-node breakdown metrics.
+
+### Python SDK & Flight Client (`gdb-client 0.5.6`)
+- **Replication-Factor-Aware Ingest:** Updated `scatter_ingest_edges` and `scatter_ingest_vertices` to strictly respect cluster `replication_factor`:
+  - When $RF=1$, each partition is streamed to exactly one primary shard ($src \pmod N$) with 0% memory duplication across nodes.
+  - When $RF > 1$, streams to all $RF$ nodes in the replica set.
+- **Topology Helpers:** Added `target_replica_nodes_for_key(key)` to `ClusterTopology`.
+
+### GDB Studio UI (`gdb-studio`)
+- **Unity 3D Canvas Viewport Fix:** Fixed semi-transparent HUD overlay panel that blocked mouse controls and obscured the graph by adjusting `.graph-controls` sizing (`fit-content`) and adding `pointer-events: none` to `#unity-hud-bar`.
+- **Telemetry UI:** Cluster telemetry in the status bar now renders both total cluster edges/vertices and the local node's sharded partition breakdown.
+- **Version Bump:** Updated UI footer to `v0.5.6`.
+
+---
+
 ## [0.5.5] - 2026-10-13
 
 ### Distributed MPP & Scatter-Gather
