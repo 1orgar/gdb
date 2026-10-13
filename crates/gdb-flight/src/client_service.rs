@@ -145,12 +145,60 @@ impl FlightService for GdbClientFlightService {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
 
         tokio::spawn(async move {
-            let mapped_stream = in_stream.map(|res| res.map_err(arrow_flight::error::FlightError::Tonic));
+            let mut in_stream = in_stream;
+            let (first_data, is_edge_from_desc, label_or_type_from_desc) = match in_stream.next().await {
+                Some(Ok(fd)) => {
+                    let parse_desc = |bytes: &[u8]| -> (Option<bool>, Option<String>) {
+                        if let Ok(desc) = serde_json::from_slice::<IngestDescriptor>(bytes) {
+                            if !desc.r#type.is_empty() {
+                                if desc.r#type.eq_ignore_ascii_case("edge") {
+                                    return (Some(true), desc.edge_type);
+                                } else {
+                                    return (Some(false), desc.label);
+                                }
+                            }
+                        }
+                        (None, None)
+                    };
+
+                    let (mut is_e, mut lt) = if let Some(ref d) = fd.flight_descriptor {
+                        if !d.cmd.is_empty() {
+                            parse_desc(&d.cmd)
+                        } else {
+                            (None, None)
+                        }
+                    } else {
+                        (None, None)
+                    };
+
+                    if is_e.is_none() && !fd.app_metadata.is_empty() {
+                        let (ie, l) = parse_desc(&fd.app_metadata);
+                        if ie.is_some() {
+                            is_e = ie;
+                            lt = l;
+                        }
+                    }
+
+                    (Some(fd), is_e, lt)
+                }
+                Some(Err(e)) => {
+                    let _ = tx.send(Err(Status::internal(format!("Flight stream error: {}", e)))).await;
+                    return;
+                }
+                None => (None, None, None),
+            };
+
+            let stream_to_decode = match first_data {
+                Some(fd) => futures::stream::once(async move { Ok(fd) }).chain(in_stream).boxed(),
+                None => in_stream.boxed(),
+            };
+
+            let mapped_stream = stream_to_decode.map(|res| res.map_err(arrow_flight::error::FlightError::Tonic));
             let mut batch_stream = FlightRecordBatchStream::new(FlightDataDecoder::new(mapped_stream));
 
             let mut total_rows = 0usize;
-            let mut is_edge: Option<bool> = None;
-            let mut label_or_type: Option<String> = None;
+            let mut is_edge: Option<bool> = is_edge_from_desc;
+            let mut label_or_type: Option<String> = label_or_type_from_desc;
 
             while let Some(batch_res) = batch_stream.next().await {
                 let batch = match batch_res {
@@ -166,10 +214,26 @@ impl FlightService for GdbClientFlightService {
                     let field_names: Vec<&str> = batch_schema.fields().iter().map(|f| f.name().as_str()).collect();
                     if field_names.contains(&"src") && field_names.contains(&"dst") {
                         is_edge = Some(true);
-                        label_or_type = Some("EDGE".into());
+                        if label_or_type.is_none() {
+                            let sc = schema.read();
+                            let edge_schemas = sc.list_edge_schemas();
+                            if edge_schemas.len() == 1 {
+                                label_or_type = Some(edge_schemas[0].edge_type_name.clone());
+                            } else {
+                                label_or_type = Some("EDGE".into());
+                            }
+                        }
                     } else {
                         is_edge = Some(false);
-                        label_or_type = Some("VERTEX".into());
+                        if label_or_type.is_none() {
+                            let sc = schema.read();
+                            let vertex_schemas = sc.list_vertex_schemas();
+                            if vertex_schemas.len() == 1 {
+                                label_or_type = Some(vertex_schemas[0].label.clone());
+                            } else {
+                                label_or_type = Some("VERTEX".into());
+                            }
+                        }
                     }
                 }
 
@@ -195,6 +259,7 @@ impl FlightService for GdbClientFlightService {
                     };
                     let rank_col = batch.column_by_name("rank");
                     let edge_type_col = batch.column_by_name("edge_type");
+                    let default_edge_type = label_or_type.clone().unwrap_or_else(|| "DEFAULT".into());
 
                     let commit_ver = storage.next_commit_version();
 
@@ -219,12 +284,20 @@ impl FlightService for GdbClientFlightService {
                             0
                         };
 
-                        let et_id = if let Some(etc) = edge_type_col {
-                            let et_name = extract_string(etc, i).unwrap_or_else(|| "DEFAULT".into());
-                            let mut sc = schema.write();
-                            sc.register_edge_type(&et_name, vec![]).unwrap_or(EdgeType(1))
+                        let et_name = if let Some(etc) = edge_type_col {
+                            extract_string(etc, i).unwrap_or_else(|| default_edge_type.clone())
                         } else {
-                            EdgeType(1)
+                            default_edge_type.clone()
+                        };
+
+                        let et_id = {
+                            let mut sc = schema.write();
+                            if let Some(es) = sc.get_edge_schema(&et_name) {
+                                es.edge_type
+                            } else {
+                                let props = infer_properties_from_schema(&batch_schema, &["src", "dst", "rank", "edge_type"]);
+                                sc.register_edge_type(&et_name, props).unwrap_or(EdgeType(1))
+                            }
                         };
 
                         let edge = EdgeId::new(src_id, et_id, rank, dst_id);
@@ -266,7 +339,12 @@ impl FlightService for GdbClientFlightService {
 
                         let label_id = {
                             let mut sg = schema.write();
-                            sg.register_vertex_label(&label_name, vec![]).unwrap_or(LabelId(1))
+                            if let Some(vs) = sg.get_vertex_schema(&label_name) {
+                                vs.label_id
+                            } else {
+                                let props = infer_properties_from_schema(&batch_schema, &["id", "_id", "label"]);
+                                sg.register_vertex_label(&label_name, props).unwrap_or(LabelId(1))
+                            }
                         };
 
                         let mut props = HashMap::new();
@@ -402,4 +480,46 @@ fn extract_data_value(col: &arrow::array::ArrayRef, idx: usize) -> Option<DataVa
         )),
         _ => None,
     }
+}
+
+fn arrow_to_gdb_type(dt: &DataType) -> gdb_core::schema::DataType {
+    match dt {
+        DataType::Boolean => gdb_core::schema::DataType::Boolean,
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => gdb_core::schema::DataType::Int64,
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+            gdb_core::schema::DataType::Float64
+        }
+        DataType::Utf8 | DataType::LargeUtf8 => gdb_core::schema::DataType::String,
+        DataType::Date32 | DataType::Date64 => gdb_core::schema::DataType::Date,
+        DataType::Timestamp(_, _) => gdb_core::schema::DataType::Timestamp,
+        DataType::FixedSizeList(_, dim) => {
+            gdb_core::schema::DataType::Vector(*dim as usize)
+        }
+        _ => gdb_core::schema::DataType::String,
+    }
+}
+
+fn infer_properties_from_schema(
+    schema: &arrow::datatypes::Schema,
+    exclude: &[&str],
+) -> Vec<gdb_core::schema::PropertySpec> {
+    schema
+        .fields()
+        .iter()
+        .filter(|f| !exclude.contains(&f.name().as_str()))
+        .map(|f| {
+            gdb_core::schema::PropertySpec::new(
+                f.name(),
+                arrow_to_gdb_type(f.data_type()),
+                f.is_nullable(),
+            )
+        })
+        .collect()
 }

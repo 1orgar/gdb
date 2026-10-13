@@ -504,4 +504,92 @@ async fn test_server_multi_statement_and_batch_endpoints() {
     assert!(body["total_vertices"].as_u64().unwrap() > 0);
 }
 
+#[tokio::test]
+async fn test_server_mpp_scatter_gather_queries() {
+    let client = reqwest::Client::new();
+    let tdir1 = tempdir().unwrap();
+    let tdir2 = tempdir().unwrap();
+
+    let (addr1, _h1, state1) = create_test_server(tdir1.path().to_path_buf()).await.unwrap();
+    let (addr2, _h2, state2) = create_test_server(tdir2.path().to_path_buf()).await.unwrap();
+
+    let url1 = format!("http://{}", addr1);
+    let url2 = format!("http://{}", addr2);
+
+    let node1 = RingNode {
+        node_id: 1,
+        http_url: url1.clone(),
+        flight_address: "127.0.0.1".into(),
+        flight_port: 0,
+        client_flight_address: "127.0.0.1".into(),
+        client_flight_port: 0,
+    };
+    let node2 = RingNode {
+        node_id: 2,
+        http_url: url2.clone(),
+        flight_address: "127.0.0.1".into(),
+        flight_port: 0,
+        client_flight_address: "127.0.0.1".into(),
+        client_flight_port: 0,
+    };
+
+    let ring = vec![node1.clone(), node2.clone()];
+    *state1.ring_nodes.write() = ring.clone();
+    *state2.ring_nodes.write() = ring.clone();
+
+    // DDL on both nodes
+    client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({ "query": "CREATE VERTEX Product (name STRING, emb VECTOR(2));" }))
+        .send().await.unwrap();
+    client.post(format!("{}/query", url2))
+        .json(&serde_json::json!({ "query": "CREATE VERTEX Product (name STRING, emb VECTOR(2));" }))
+        .send().await.unwrap();
+
+    // Insert Product 1 on Node 1 (local_only)
+    client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Product (id, name, emb) VALUES (1, 'Prod1', [1.0, 0.0]);",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    // Insert Product 2 on Node 2 (local_only)
+    client.post(format!("{}/query", url2))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Product (id, name, emb) VALUES (2, 'Prod2', [0.0, 1.0]);",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    // Compact on both nodes
+    client.post(format!("{}/compact", url1)).send().await.unwrap();
+    client.post(format!("{}/compact", url2)).send().await.unwrap();
+
+    // 2. Query MATCH (p:Product) from Node 1 (scatter-gather)
+    let res = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({ "query": "MATCH (p:Product) RETURN p.name;" }))
+        .send().await.unwrap();
+    assert!(res.status().is_success());
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["num_rows"], 2);
+
+    let rows = body["rows"].as_array().unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert!(names.contains(&"Prod1"));
+    assert!(names.contains(&"Prod2"));
+
+    // 3. Query Vector Similarity Search from Node 1 (scatter-gather Top-K across both nodes)
+    let res_vec = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "CALL vector.similaritySearch('Product', 'emb', [1.0, 0.0], 2, 'cosine') YIELD vertex_id, score;"
+        }))
+        .send().await.unwrap();
+    assert!(res_vec.status().is_success());
+    let body_vec: serde_json::Value = res_vec.json().await.unwrap();
+    assert_eq!(body_vec["status"], "ok");
+    assert_eq!(body_vec["num_rows"], 2);
+}
+
+
 

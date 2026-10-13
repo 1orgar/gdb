@@ -130,4 +130,87 @@ mod tests {
         }
         assert!(!flight_batches.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_client_flight_descriptor_label_ingest() {
+        use arrow_flight::encode::FlightDataEncoderBuilder;
+        use arrow_flight::{FlightData, FlightDescriptor, Ticket};
+        use futures::StreamExt;
+        use gdb_core::schema::GraphSchema;
+        use gdb_planner::QueryExecutor;
+        use gdb_storage::PartitionStorageEngine;
+        use parking_lot::RwLock;
+
+        let schema = Arc::new(RwLock::new(GraphSchema::new("descriptor_test")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let executor = Arc::new(QueryExecutor::new(schema.clone(), storage.clone()));
+        let service = GdbClientFlightService::new(storage.clone(), schema.clone(), executor.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service.into_server())
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let mut client = arrow_flight::flight_service_client::FlightServiceClient::connect(format!("http://{}", addr))
+            .await
+            .unwrap();
+
+        let batch_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::UInt64, false),
+            Field::new("email", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(batch_schema.clone(), vec![
+            Arc::new(UInt64Array::from(vec![501u64, 502])),
+            Arc::new(arrow::array::StringArray::from(vec!["test1@example.com", "test2@example.com"])),
+        ]).unwrap();
+
+        let mut initial_flight_data = FlightDataEncoderBuilder::new()
+            .with_schema(batch_schema)
+            .build(futures::stream::once(async move { Ok(batch) }))
+            .map(|r| r.unwrap())
+            .collect::<Vec<FlightData>>()
+            .await;
+
+        let desc_cmd = serde_json::json!({
+            "type": "vertex",
+            "label": "Customer"
+        }).to_string();
+
+        initial_flight_data[0].flight_descriptor = Some(FlightDescriptor {
+            r#type: 1,
+            cmd: bytes::Bytes::from(desc_cmd),
+            path: vec![],
+        });
+
+        let flight_stream = futures::stream::iter(initial_flight_data);
+        let put_resp = client.do_put(flight_stream).await.unwrap();
+        let mut put_stream = put_resp.into_inner();
+        let _ = put_stream.next().await.unwrap().unwrap();
+
+        // Check that Customer schema was registered with properties
+        {
+            let sc = schema.read();
+            let vs = sc.get_vertex_schema("Customer").expect("Customer label should be registered");
+            assert!(vs.properties.iter().any(|p| p.name == "email"));
+        }
+
+        storage.compact();
+
+        let ticket = Ticket {
+            ticket: "MATCH (c:Customer) RETURN c.email".as_bytes().to_vec().into(),
+        };
+        let get_resp = client.do_get(ticket).await.unwrap();
+        let mut get_stream = get_resp.into_inner();
+        let mut batches = Vec::new();
+        while let Some(item) = get_stream.next().await {
+            batches.push(item);
+        }
+        assert!(!batches.is_empty());
+    }
 }

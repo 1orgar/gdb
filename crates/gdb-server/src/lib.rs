@@ -13,6 +13,7 @@ use gdb_s3::S3StorageManager;
 use gdb_storage::PartitionStorageEngine;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -167,12 +168,16 @@ pub struct Args {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QueryRequest {
     pub query: String,
+    #[serde(default)]
+    pub local_only: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BatchRequest {
     pub queries: Option<Vec<String>>,
     pub script: Option<String>,
+    #[serde(default)]
+    pub local_only: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -691,7 +696,142 @@ async fn replicate_to_targets(
     }
 }
 
-async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Value {
+fn merge_scatter_gather_results(
+    stmt: &gdb_parser::ast::Statement,
+    local_val: serde_json::Value,
+    peer_vals: Vec<Result<Option<serde_json::Value>, tokio::task::JoinError>>,
+) -> serde_json::Value {
+    let mut successful_responses = Vec::new();
+    if local_val.get("status").and_then(|s| s.as_str()) == Some("ok") {
+        successful_responses.push(local_val.clone());
+    }
+    for pres in peer_vals {
+        if let Ok(Some(val)) = pres {
+            if val.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                successful_responses.push(val);
+            }
+        }
+    }
+
+    if successful_responses.is_empty() {
+        return local_val;
+    }
+
+    if successful_responses.len() == 1 {
+        return successful_responses.remove(0);
+    }
+
+    let columns = successful_responses[0]
+        .get("columns")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    let mut all_rows: Vec<serde_json::Value> = Vec::new();
+    let mut total_rows_affected = 0u64;
+    for resp in &successful_responses {
+        if let Some(arr) = resp.get("rows").and_then(|r| r.as_array()) {
+            all_rows.extend(arr.clone());
+        }
+        if let Some(ra) = resp.get("rows_affected").and_then(|r| r.as_u64()) {
+            total_rows_affected += ra;
+        }
+    }
+
+    let merged_rows: Vec<serde_json::Value> = match stmt {
+        gdb_parser::ast::Statement::CallAlgorithm { algorithm, args, .. }
+            if algorithm.to_lowercase().starts_with("vector.") =>
+        {
+            let score_idx = if let Some(cols) = columns.as_array() {
+                cols.iter()
+                    .position(|c| {
+                        let name = c.as_str().unwrap_or("").to_lowercase();
+                        name == "score" || name == "similarity"
+                    })
+                    .unwrap_or(1)
+            } else {
+                1
+            };
+
+            let metric = match args.get("metric") {
+                Some(DataValue::String(s)) => s.to_lowercase(),
+                _ => "cosine".to_string(),
+            };
+            let is_ascending = metric == "l2";
+
+            let top_k = match args.get("k").or_else(|| args.get("top_k")) {
+                Some(DataValue::Int64(i)) => *i as usize,
+                _ => 10,
+            };
+
+            let mut node_best_row: HashMap<String, (serde_json::Value, f64)> = HashMap::new();
+            for row in all_rows {
+                if let Some(arr) = row.as_array() {
+                    if !arr.is_empty() {
+                        let key = arr[0].to_string();
+                        let score = arr.get(score_idx).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        match node_best_row.entry(key) {
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                e.insert((row, score));
+                            }
+                            std::collections::hash_map::Entry::Occupied(mut e) => {
+                                let cur_score = e.get().1;
+                                let is_better = if is_ascending {
+                                    score < cur_score
+                                } else {
+                                    score > cur_score
+                                };
+                                if is_better {
+                                    e.insert((row, score));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut scored_rows: Vec<(serde_json::Value, f64)> =
+                node_best_row.into_values().collect();
+            if is_ascending {
+                scored_rows.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            } else {
+                scored_rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            }
+
+            scored_rows.into_iter().take(top_k).map(|(r, _)| r).collect()
+        }
+        _ => {
+            // Deduplicate exact matching rows across nodes
+            let mut seen = HashSet::new();
+            let mut deduped = Vec::new();
+            for row in all_rows {
+                let key = row.to_string();
+                if seen.insert(key) {
+                    deduped.push(row);
+                }
+            }
+            deduped
+        }
+    };
+
+    let num_rows = merged_rows.len();
+    let elapsed = local_val
+        .get("elapsed_us")
+        .and_then(|e| e.as_u64())
+        .or_else(|| successful_responses[0].get("elapsed_us").and_then(|e| e.as_u64()))
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "status": "ok",
+        "message": format!("Cluster query completed across {} nodes, {} rows returned", successful_responses.len(), num_rows),
+        "elapsed_us": elapsed,
+        "num_rows": num_rows,
+        "rows_affected": total_rows_affected,
+        "columns": columns,
+        "rows": merged_rows,
+    })
+}
+
+async fn execute_single_query(state: &AppState, trimmed: &str, local_only: bool) -> serde_json::Value {
     let start = Instant::now();
 
     // Check for compact command
@@ -953,6 +1093,48 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
         }
     }
 
+    let is_read_or_algo = matches!(
+        stmt,
+        gdb_parser::ast::Statement::Query(_) | gdb_parser::ast::Statement::CallAlgorithm { .. }
+    );
+
+    let ring_snapshot = state.ring_nodes.read().clone();
+    let peers: Vec<RingNode> = ring_snapshot.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
+
+    if is_read_or_algo && !local_only && !peers.is_empty() {
+        let local_val = Box::pin(execute_single_query(state, trimmed, true)).await;
+
+        let client = state.http_client.clone();
+        let payload = serde_json::json!({
+            "query": trimmed,
+            "local_only": true,
+        });
+
+        let mut peer_futs = Vec::new();
+        for peer in peers {
+            let p_url = format!("{}/query", peer.http_url.trim_end_matches('/'));
+            let c = client.clone();
+            let p = payload.clone();
+            peer_futs.push(tokio::spawn(async move {
+                match c.post(&p_url)
+                    .json(&p)
+                    .timeout(std::time::Duration::from_millis(5000))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+                    Err(e) => {
+                        tracing::warn!("Scatter query to peer {} failed: {}", p_url, e);
+                        None
+                    }
+                }
+            }));
+        }
+
+        let peer_vals = futures::future::join_all(peer_futs).await;
+        return merge_scatter_gather_results(&stmt, local_val, peer_vals);
+    }
+
     let exec_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state.executor.execute(stmt)
     }));
@@ -1013,7 +1195,7 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
             let panic_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
                 s.to_string()
             } else if let Some(s) = panic_err.downcast_ref::<String>() {
-                s.clone()
+                panic_msg_cleanup(s)
             } else {
                 "Internal execution panic".to_string()
             };
@@ -1027,15 +1209,19 @@ async fn execute_single_query(state: &AppState, trimmed: &str) -> serde_json::Va
     }
 }
 
+fn panic_msg_cleanup(s: &str) -> String {
+    s.to_string()
+}
+
 async fn handle_query(
     State(state): State<AppState>,
     body: String,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let query_str = if let Ok(parsed) = serde_json::from_str::<QueryRequest>(&body) {
-        parsed.query
+    let (query_str, local_only) = if let Ok(parsed) = serde_json::from_str::<QueryRequest>(&body) {
+        (parsed.query, parsed.local_only.unwrap_or(false))
     } else {
-        body
+        (body, false)
     };
 
     let trimmed = query_str.trim();
@@ -1051,7 +1237,7 @@ async fn handle_query(
     }
 
     if stmts.len() == 1 {
-        let res = execute_single_query(&state, &stmts[0]).await;
+        let res = execute_single_query(&state, &stmts[0], local_only).await;
         return Json(res);
     }
 
@@ -1060,7 +1246,7 @@ async fn handle_query(
     let mut last_res = serde_json::Value::Null;
 
     for (idx, stmt_str) in stmts.iter().enumerate() {
-        let res = execute_single_query(&state, stmt_str).await;
+        let res = execute_single_query(&state, stmt_str, local_only).await;
         if res.get("status").and_then(|s| s.as_str()) == Some("error") {
             let err_msg = res.get("error").and_then(|e| e.as_str()).unwrap_or("Unknown error");
             return Json(serde_json::json!({
@@ -1100,18 +1286,19 @@ async fn handle_batch(
     body: String,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let queries: Vec<String> = if let Ok(parsed) = serde_json::from_str::<BatchRequest>(&body) {
-        if let Some(list) = parsed.queries {
+    let (queries, local_only) = if let Ok(parsed) = serde_json::from_str::<BatchRequest>(&body) {
+        let q = if let Some(list) = parsed.queries {
             list
         } else if let Some(script) = parsed.script {
             gdb_parser::split_statements(&script)
         } else {
             vec![]
-        }
+        };
+        (q, parsed.local_only.unwrap_or(false))
     } else if let Ok(parsed_list) = serde_json::from_str::<Vec<String>>(&body) {
-        parsed_list
+        (parsed_list, false)
     } else {
-        gdb_parser::split_statements(&body)
+        (gdb_parser::split_statements(&body), false)
     };
 
     let mut results = Vec::with_capacity(queries.len());
@@ -1123,7 +1310,7 @@ async fn handle_batch(
         if trimmed.is_empty() {
             continue;
         }
-        let res = execute_single_query(&state, trimmed).await;
+        let res = execute_single_query(&state, trimmed, local_only).await;
         if res.get("status").and_then(|s| s.as_str()) == Some("ok") {
             ok_count += 1;
         } else {

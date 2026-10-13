@@ -2,7 +2,7 @@
 
 # GDB: Server Configuration Guide & Query Reference
 
-Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.5.3** (Huygens+).
+Comprehensive technical guide for deploying, configuring, and operating the distributed in-memory graph database **GDB** (a high-performance Nebula Graph / Nebula Enterprise alternative), release **v0.5.5**.
 
 ---
 
@@ -31,7 +31,9 @@ gdb-server [OPTIONS]
 | `--node-id` | `-n` | — | `u64` | `1` | Unique numerical node ID in cluster ring. Determines primary token range: $\text{Token} = (u \pmod N) + 1$. |
 | `--partitions` | — | — | `u32` | `4` | Number of independent Multi-Raft groups and storage partitions per node. |
 | `--port` | `-p` | — | `u16` | `8848` | **Internal Apache Arrow Flight gRPC** network port for inter-node MPP shuffle and RecordBatch exchange. |
+| `--flight-address` | — | `GDB_FLIGHT_ADDRESS` | `string` | *(auto)* | Hostname or IP announced in cluster gossip/Raft for internal Flight inter-node communication. |
 | `--client-flight-port` | — | `GDB_CLIENT_FLIGHT_PORT` | `u16` | `8860` | **External Client Flight gRPC** port for streaming bulk ingestion (`do_put`) and direct Cypher streaming (`do_get`). |
+| `--client-flight-address` | — | `GDB_CLIENT_FLIGHT_ADDRESS` | `string` | *(auto)* | Hostname or IP announced for client Flight MPP connections (essential behind load balancers or Docker NAT). |
 | `--http-port` | — | — | `u16` | `8847` | **HTTP REST API** port for client queries (`POST /query`), schema (`GET /schema`), replication (`POST /replicate`), metrics (`GET /metrics`), cluster status (`GET /cluster`), and health checks (`GET /health`). |
 | `--wal-dir` | — | — | `path` | `./data/wal` | Disk path for the append-only **Write-Ahead Log (WAL)** with CRC32 checksums. |
 | `--peers` | — | — | `string` | *(empty)* | Comma-separated list of peer HTTP addresses (e.g. `"http://127.0.0.1:8846,http://127.0.0.1:8845"`). |
@@ -383,9 +385,19 @@ exit / quit               - Exit console.
 
 ---
 
+### 2.10. Distributed MPP Scatter-Gather Execution
+
+When deployed in a multi-node cluster, read queries (`MATCH`, path expansions, pattern matching) and analytical algorithms (`CALL algo.*`, `CALL vector.similaritySearch`) automatically execute in **MPP Scatter-Gather** mode:
+1. The receiving coordinator node partitions the query execution across all active peers in the cluster ring.
+2. Each node executes the query/algorithm against its local CSR topology and Arrow partition storage.
+3. The coordinator gathers the partial result sets, performs global Top-K re-ranking (for vector similarity search), deduplicates entities, and returns the aggregated result.
+4. Pass `"local_only": true` in `POST /query` to restrict execution exclusively to the local node.
+
+---
+
 ## Part 3. External Arrow Flight Client (`gdb-py-client`)
 
-Dedicated Flight port (`--client-flight-port`, default `:8860`) enables zero-overhead scatter-ingest directly from Python.
+The dedicated Flight client port (`--client-flight-port`, default `:8860`) enables zero-overhead parallel scatter-ingest directly from Python, with automatic schema validation and topology discovery:
 
 ```python
 import polars as pl
@@ -394,20 +406,26 @@ from gdb_client import GdbClient
 # Connect to cluster seed
 client = GdbClient(seed_url="http://localhost:8847")
 
-# Bulk insert 1,000,000 vertices via Arrow Flight do_put:
+# Verify schema catalog
+schema = client.schema()
+print("Registered labels:", schema["vertices"])
+
+# 1. Bulk insert 1,000,000 vertices via Arrow Flight do_put
+# Validates that vertex label exists before ingestion (validate_schema=True by default)
 df_vertices = pl.DataFrame({
     "id": range(1, 1_000_001),
     "name": [f"User_{i}" for i in range(1, 1_000_001)],
     "age": [20 + (i % 50) for i in range(1, 1_000_001)],
 })
-client.scatter_ingest_vertices(df_vertices, tag="User")
+client.scatter_ingest_vertices(df_vertices, label="User", id_col="id")
 
-# Bulk insert edges:
+# 2. Bulk insert edges partitioned by source node across cluster peers
+# Validates that edge_type exists before streaming
 df_edges = pl.DataFrame({
     "src": range(1, 1_000_000),
     "dst": range(2, 1_000_001),
 })
-client.scatter_ingest_edges(df_edges, edge_type="FOLLOWS")
+client.scatter_ingest_edges(df_edges, edge_type="FOLLOWS", src_col="src", dst_col="dst")
 ```
 
 ---

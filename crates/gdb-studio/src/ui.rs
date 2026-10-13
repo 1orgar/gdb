@@ -125,7 +125,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 
     /* Left Sidebar */
     .sidebar {
-      width: 280px;
+      width: 330px;
       background: var(--bg-dark);
       border-right: 1px solid var(--border);
       display: flex;
@@ -723,35 +723,59 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
   <!-- Workspace -->
   <div class="workspace">
 
-    <!-- Left Sidebar: Templates, Catalog, Cluster, History -->
+    <!-- Left Sidebar: Query Templates & History -->
     <div class="sidebar">
       <div class="sidebar-tabs">
-        <div class="sidebar-tab active" onclick="switchSidebarTab('templates', this)">Templates</div>
-        <div class="sidebar-tab" onclick="switchSidebarTab('schema', this)">Schema</div>
-        <div class="sidebar-tab" onclick="switchSidebarTab('cluster', this)">Cluster</div>
-        <div class="sidebar-tab" onclick="switchSidebarTab('history', this)">History</div>
+        <div class="sidebar-tab active" onclick="switchSidebarTab('templates', this)">⚡ Query Templates</div>
+        <div class="sidebar-tab" onclick="switchSidebarTab('history', this)">🕒 History</div>
       </div>
 
       <div class="sidebar-content">
         <!-- Templates View -->
         <div id="tab-templates">
-          <div class="section-title">Pattern Matching</div>
+          <div class="section-title">🌐 Pattern Matching &amp; Paths</div>
           <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name LIMIT 50;')">
             <div class="template-title">1-Hop Traversal</div>
-            <div class="template-query">MATCH (a)-[:FOLLOWS]->(b)...</div>
+            <div class="template-query">MATCH (a:User)-[:FOLLOWS]->(b:User)...</div>
           </div>
           <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) RETURN a.name, b.name, c.name LIMIT 25;')">
             <div class="template-title">2-Hop Traversal</div>
             <div class="template-query">MATCH (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c)...</div>
           </div>
+          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)-[:FOLLOWS]->(d:User) RETURN a.name, b.name, c.name, d.name LIMIT 20;')">
+            <div class="template-title">3-Hop Path Traversal</div>
+            <div class="template-query">MATCH (a)->(b)->(c)->(d)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) WHERE a.age > 25 RETURN a.name, b.name LIMIT 50;')">
+            <div class="template-title">Filtered Traversal (WHERE)</div>
+            <div class="template-query">MATCH ... WHERE a.age &gt; 25...</div>
+          </div>
 
-          <div class="section-title" style="margin-top: 14px;">Graph Analytics</div>
+          <div class="section-title" style="margin-top: 14px;">🎯 Vector Similarity Search</div>
+          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Document\', \'embedding\', [0.12, 0.45, -0.23, 0.88], 5, \'cosine\') YIELD vertex_id, score;')">
+            <div class="template-title">Vector Cosine Similarity</div>
+            <div class="template-query">CALL vector.similaritySearch(..., 'cosine')...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [1.0, 0.0, 0.0], 5, \'l2\') YIELD vertex_id, score;')">
+            <div class="template-title">Vector L2 Euclidean Search</div>
+            <div class="template-query">CALL vector.similaritySearch(..., 'l2')...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [0.5, 0.5, 0.5], 5, \'dot\') YIELD vertex_id, score;')">
+            <div class="template-title">Vector Dot Product Search</div>
+            <div class="template-query">CALL vector.similaritySearch(..., 'dot')...</div>
+          </div>
+
+          <div class="section-title" style="margin-top: 14px;">📊 Graph Analytics &amp; Subgraphs</div>
           <div class="template-item" onclick="setQuery('CALL algo.pageRank() YIELD vertex_id, score;')">
-            <div class="template-title">PageRank</div>
+            <div class="template-title">PageRank (Global)</div>
             <div class="template-query">CALL algo.pageRank()...</div>
           </div>
+          <div class="template-item" onclick="setQuery('CALL algo.pageRank({edge_type: \'FOLLOWS\', damping: 0.85}) YIELD vertex_id, score;')">
+            <div class="template-title">PageRank on Subgraph</div>
+            <div class="template-query">CALL algo.pageRank({edge_type: 'FOLLOWS'})...</div>
+          </div>
           <div class="template-item" onclick="setQuery('CALL algo.louvain() YIELD vertex_id, community;')">
-            <div class="template-title">Louvain Communities</div>
+            <div class="template-title">Louvain Community Detection</div>
             <div class="template-query">CALL algo.louvain()...</div>
           </div>
           <div class="template-item" onclick="setQuery('CALL algo.wcc() YIELD vertex_id, component;')">
@@ -759,55 +783,44 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
             <div class="template-query">CALL algo.wcc()...</div>
           </div>
           <div class="template-item" onclick="setQuery('CALL algo.triangleCount() YIELD vertex_id, triangles;')">
-            <div class="template-title">Triangle Count & LCC</div>
+            <div class="template-title">Triangle Count &amp; Clustering</div>
             <div class="template-query">CALL algo.triangleCount()...</div>
           </div>
           <div class="template-item" onclick="setQuery('CALL algo.sssp(1) YIELD vertex_id, distance;')">
-            <div class="template-title">Single Source Shortest Path</div>
+            <div class="template-title">Single Source Shortest Path (SSSP)</div>
             <div class="template-query">CALL algo.sssp(1)...</div>
           </div>
-
-          <div class="section-title" style="margin-top: 14px;">DDL / Operations</div>
-          <div class="template-item" onclick="setQuery('CREATE VERTEX User (name STRING, age INT64);')">
-            <div class="template-title">Create Vertex Schema</div>
-            <div class="template-query">CREATE VERTEX User...</div>
+          <div class="template-item" onclick="setQuery('CALL algo.bfs(1, 4) YIELD vertex_id, depth;')">
+            <div class="template-title">Breadth-First Search (BFS)</div>
+            <div class="template-query">CALL algo.bfs(1, 4)...</div>
           </div>
+
+          <div class="section-title" style="margin-top: 14px;">📐 Schema Catalog &amp; DDL</div>
+          <div class="template-item" onclick="setQuery('CREATE VERTEX User (name STRING, age INT64, embedding VECTOR(128));')">
+            <div class="template-title">Create Vertex Tag with Vector</div>
+            <div class="template-query">CREATE VERTEX User (name STRING...)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CREATE EDGE FOLLOWS (since INT64, weight FLOAT64);')">
+            <div class="template-title">Create Edge Type with Properties</div>
+            <div class="template-query">CREATE EDGE FOLLOWS (since INT64...)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CREATE INDEX ON User(name);')">
+            <div class="template-title">Create Property Index</div>
+            <div class="template-query">CREATE INDEX ON User(name);</div>
+          </div>
+
+          <div class="section-title" style="margin-top: 14px;">🛠️ Operations &amp; Batch Scripts</div>
           <div class="template-item" onclick="setQuery('compact;')">
             <div class="template-title">Force CSR Compaction</div>
             <div class="template-query">compact;</div>
           </div>
-        </div>
-
-        <!-- Schema View -->
-        <div id="tab-schema" style="display:none;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <div class="section-title" style="margin-bottom:0;">Schema Catalog</div>
-            <button class="btn btn-secondary btn-sm" style="font-size:10px; padding:2px 8px;" onclick="switchView('schema', document.getElementById('tab-btn-schema'))">📐 Manager</button>
+          <div class="template-item" onclick="setQuery('snapshot;')">
+            <div class="template-title">Commit Parquet S3 Snapshot</div>
+            <div class="template-query">snapshot;</div>
           </div>
-          <div class="section-title">Vertex Tags</div>
-          <div id="schema-vertices">
-            <div style="font-size:11px; color:var(--text-muted);">Loading tags...</div>
-          </div>
-          <div class="section-title" style="margin-top: 14px;">Edge Types</div>
-          <div id="schema-edges">
-            <div style="font-size:11px; color:var(--text-muted);">Loading edge types...</div>
-          </div>
-        </div>
-
-        <!-- Cluster View -->
-        <div id="tab-cluster" style="display:none;">
-          <div class="section-title">Ring Peer Nodes</div>
-          <div id="sidebar-cluster-nodes">
-            <div style="font-size:11px; color:var(--text-muted);">Loading cluster peers...</div>
-          </div>
-          <div class="section-title" style="margin-top: 14px;">Quick Actions</div>
-          <div class="template-item" onclick="switchView('cluster', document.getElementById('tab-btn-cluster'))">
-            <div class="template-title">Open Cluster Ring Dashboard</div>
-            <div class="template-query">View full topology &amp; tokens</div>
-          </div>
-          <div class="template-item" onclick="switchView('resources', document.getElementById('tab-btn-resources'))">
-            <div class="template-title">Open Storage &amp; Resources</div>
-            <div class="template-query">Inspect RAM, CSR, Compactions</div>
+          <div class="template-item" onclick="setQuery('CREATE VERTEX Person (name STRING);\nCREATE EDGE KNOWS ();\nINSERT VERTEX 1 Person (name=\'Alice\');\nINSERT VERTEX 2 Person (name=\'Bob\');\nINSERT EDGE 1->2 KNOWS ();\nMATCH (a)-[r]->(b) RETURN a.name, b.name;')">
+            <div class="template-title">Multi-Statement Script</div>
+            <div class="template-query">CREATE ... INSERT ... MATCH ...</div>
           </div>
         </div>
 
@@ -1242,7 +1255,7 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span id="footer-version">GDB Studio v0.5.4</span>
+      <span id="footer-version">GDB Studio v0.5.5</span>
       <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
       <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>
@@ -2067,7 +2080,19 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 
     // Auto-extract graph from generic rows (e.g. [a.name, b.name] or [vertex_id, score])
     function extractGraphFromRows(data) {
-      if (!data.columns || !data.rows || data.rows.length === 0) return;
+      if (!data || !data.columns || !data.rows || data.rows.length === 0) {
+        graphNodes = [];
+        graphEdges = [];
+        selectedEntity = null;
+        closeInspector();
+        document.getElementById('stat-graph').textContent = '0 nodes, 0 edges';
+        if (ctx && canvas) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        sync3DGraph();
+        if (currentView === 'unity') renderUnityGraph();
+        return;
+      }
 
       const MAX_GRAPH_NODES = 250;
       let capped = false;
@@ -2075,39 +2100,74 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
       graphNodes = [];
       graphEdges = [];
 
-      // Case 1: 2-column or 3-column path traversal (source -> target)
+      // Case 1: Multi-column path traversal (e.g. 1-hop, 2-hop, 3-hop: a -> b -> c -> d)
       if (data.columns.length >= 2 && !data.columns[1].includes('score') && !data.columns[1].includes('distance')) {
+        const isRelTypeMiddle = (data.columns.length === 3 &&
+          (data.columns[1].toLowerCase().includes('type') ||
+           data.columns[1].toLowerCase().includes('rel') ||
+           data.columns[1].toLowerCase().includes('edge')));
+
         for (const row of data.rows) {
           if (graphNodes.length >= MAX_GRAPH_NODES) {
             capped = true;
             break;
           }
-          const uId = String(row[0]);
-          const vId = String(row[1]);
 
-          if (!nodeMap.has(uId)) {
-            const u = { id: uId, label: uId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
-            nodeMap.set(uId, u);
-            graphNodes.push(u);
-          }
-          if (!nodeMap.has(vId)) {
-            const v = { id: vId, label: vId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
-            nodeMap.set(vId, v);
-            graphNodes.push(v);
-          }
+          if (isRelTypeMiddle) {
+            const uId = String(row[0]);
+            const relType = String(row[1]);
+            const vId = String(row[2]);
 
-          graphEdges.push({
-            source: nodeMap.get(uId),
-            target: nodeMap.get(vId),
-            label: data.columns.length > 2 ? String(row[2]) : ''
-          });
+            if (!nodeMap.has(uId)) {
+              const u = { id: uId, label: uId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
+              nodeMap.set(uId, u);
+              graphNodes.push(u);
+            }
+            if (!nodeMap.has(vId)) {
+              const v = { id: vId, label: vId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
+              nodeMap.set(vId, v);
+              graphNodes.push(v);
+            }
+            graphEdges.push({
+              source: nodeMap.get(uId),
+              target: nodeMap.get(vId),
+              label: relType
+            });
+          } else {
+            // Consecutive hops along path: row[0] -> row[1] -> row[2] -> row[3] ...
+            for (let step = 0; step < row.length - 1; step++) {
+              const uId = String(row[step]);
+              const vId = String(row[step + 1]);
+              if (!uId || !vId || uId === 'null' || vId === 'null' || uId === 'undefined' || vId === 'undefined') continue;
+
+              if (!nodeMap.has(uId)) {
+                const u = { id: uId, label: uId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
+                nodeMap.set(uId, u);
+                graphNodes.push(u);
+              }
+              if (!nodeMap.has(vId)) {
+                const v = { id: vId, label: vId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
+                nodeMap.set(vId, v);
+                graphNodes.push(v);
+              }
+
+              const exists = graphEdges.some(e => e.source.id === uId && e.target.id === vId);
+              if (!exists) {
+                graphEdges.push({
+                  source: nodeMap.get(uId),
+                  target: nodeMap.get(vId),
+                  label: ''
+                });
+              }
+            }
+          }
         }
       }
       // Case 2: Analytical single vertex score table (e.g. vertex_id, score/community)
-      else if (data.columns.includes('vertex_id')) {
-        const idIdx = data.columns.indexOf('vertex_id');
+      else if (data.columns.includes('vertex_id') || data.columns.includes('node')) {
+        const idIdx = data.columns.indexOf('vertex_id') !== -1 ? data.columns.indexOf('vertex_id') : data.columns.indexOf('node');
         const metricIdx = idIdx === 0 ? 1 : 0;
-        const metricName = data.columns[metricIdx];
+        const metricName = data.columns[metricIdx] || 'score';
 
         for (const row of data.rows) {
           if (graphNodes.length >= MAX_GRAPH_NODES) {
@@ -2157,7 +2217,10 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
         physicsRunning = false;
       }
       if (viewName === 'unity') {
-        renderUnityGraph();
+        setTimeout(() => {
+          resizeUnityCanvas();
+          renderUnityGraph();
+        }, 50);
       } else if (viewName === 'schema') {
         fetchSchema();
       } else if (viewName === 'cluster') {
@@ -2199,13 +2262,19 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 
     function resizeUnityCanvas() {
       if (!unityCanvas) return;
-      const rect = unityCanvas.parentElement.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
-      unityCanvas.width = rect.width * window.devicePixelRatio;
-      unityCanvas.height = rect.height * window.devicePixelRatio;
-      if (unityCtx) {
-        unityCtx.setTransform(1, 0, 0, 1, 0, 0);
-        unityCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+      const parent = unityCanvas.parentElement;
+      const rect = parent ? parent.getBoundingClientRect() : { width: 0, height: 0 };
+      const w = rect.width || (parent ? parent.clientWidth : 0) || window.innerWidth;
+      const h = rect.height || (parent ? parent.clientHeight : 0) || (window.innerHeight - 80);
+      if (w > 0 && h > 0) {
+        unityCanvas.width = w * window.devicePixelRatio;
+        unityCanvas.height = h * window.devicePixelRatio;
+        unityCanvas.style.width = w + 'px';
+        unityCanvas.style.height = h + 'px';
+        if (unityCtx) {
+          unityCtx.setTransform(1, 0, 0, 1, 0, 0);
+          unityCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+        }
       }
     }
     window.addEventListener('resize', resizeUnityCanvas);
@@ -2213,6 +2282,43 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
 
     function sync3DGraph() {
       const nodeMap = new Map();
+      if (graphNodes.length === 0) {
+        const demoNodes = [
+          { id: '1', label: 'Cluster-1', properties: { role: 'Coordinator', status: 'Online' } },
+          { id: '2', label: 'Cluster-2', properties: { role: 'Peer-Ring', status: 'Active' } },
+          { id: '3', label: 'Cluster-3', properties: { role: 'Peer-Ring', status: 'Active' } },
+          { id: '4', label: 'Storage', properties: { engine: 'Chunked-CSR', rf: '3' } },
+          { id: '5', label: 'Vector-HNSW', properties: { dim: '128', metric: 'Cosine' } },
+          { id: '6', label: 'Analytics', properties: { algo: 'PageRank', status: 'Ready' } }
+        ];
+        unityNodes = demoNodes.map((n, idx) => {
+          const angle = (idx / demoNodes.length) * Math.PI * 2;
+          const u = {
+            id: n.id,
+            label: n.label,
+            properties: n.properties,
+            x: Math.cos(angle) * 120,
+            y: (Math.random() - 0.5) * 80,
+            z: Math.sin(angle) * 120,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            radius: 14
+          };
+          nodeMap.set(n.id, u);
+          return u;
+        });
+        unityEdges = [
+          { source: nodeMap.get('1'), target: nodeMap.get('2'), label: 'RAFT' },
+          { source: nodeMap.get('2'), target: nodeMap.get('3'), label: 'RING' },
+          { source: nodeMap.get('3'), target: nodeMap.get('1'), label: 'SYNC' },
+          { source: nodeMap.get('1'), target: nodeMap.get('4'), label: 'CSR' },
+          { source: nodeMap.get('2'), target: nodeMap.get('5'), label: 'EMB' },
+          { source: nodeMap.get('3'), target: nodeMap.get('6'), label: 'MPP' }
+        ];
+        return;
+      }
+
       unityNodes = graphNodes.map(n => {
         const u = {
           id: n.id,
@@ -2579,6 +2685,26 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
         unity3DZoom = Math.max(100, Math.min(2500, unity3DZoom * factor));
       }, { passive: false });
 
+      unityCanvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+          unity3DDragging = true;
+          unity3DButton = 0;
+          unity3DDragStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        }
+      }, { passive: true });
+      window.addEventListener('touchmove', (e) => {
+        if (!unity3DDragging || currentView !== 'unity' || e.touches.length !== 1) return;
+        const dx = e.touches[0].clientX - unity3DDragStart.x;
+        const dy = e.touches[0].clientY - unity3DDragStart.y;
+        unity3DDragStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        unity3DRotY += dx * 0.008;
+        unity3DRotX += dy * 0.008;
+        unity3DRotX = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, unity3DRotX));
+      }, { passive: true });
+      window.addEventListener('touchend', () => {
+        unity3DDragging = false;
+      });
+
       unityCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
     }
 
@@ -2632,11 +2758,11 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
       }
 
       if (badge) {
-        if (count > 0) {
-          badge.textContent = `${count} 3D Spheres Active | Drag to Orbit | Scroll to Zoom | Click to Inspect`;
+        if (graphNodes.length > 0) {
+          badge.textContent = `${count} Live Nodes in 3D Space | Drag to Orbit | Scroll to Zoom | Click Sphere to Inspect`;
           badge.style.color = '#3fb950';
         } else {
-          badge.textContent = `Ready: Execute a query to visualize 3D graph nodes`;
+          badge.textContent = `Interactive 3D Spatial Visualizer | Drag to Orbit | Click Sphere | Run query to visualize live data`;
           badge.style.color = '#58a6ff';
         }
       }
@@ -3034,12 +3160,10 @@ pub const HTML_INDEX: &str = r###"<!DOCTYPE html>
     function switchSidebarTab(tabName, el) {
       document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
-      document.getElementById('tab-templates').style.display = tabName === 'templates' ? 'block' : 'none';
-      document.getElementById('tab-schema').style.display = tabName === 'schema' ? 'block' : 'none';
-      document.getElementById('tab-cluster').style.display = tabName === 'cluster' ? 'block' : 'none';
-      document.getElementById('tab-history').style.display = tabName === 'history' ? 'block' : 'none';
-      if (tabName === 'cluster') fetchClusterStatus();
-      if (tabName === 'schema') fetchSchema();
+      const tabT = document.getElementById('tab-templates');
+      const tabH = document.getElementById('tab-history');
+      if (tabT) tabT.style.display = tabName === 'templates' ? 'block' : 'none';
+      if (tabH) tabH.style.display = tabName === 'history' ? 'block' : 'none';
     }
 
     function setQuery(text) {
