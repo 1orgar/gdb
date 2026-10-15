@@ -40,6 +40,17 @@ impl ChunkedCsr {
         self.reverse_map.len()
     }
 
+    /// Total number of source vertices having outgoing degree > 0 in this CSR chunk.
+    #[inline]
+    pub fn source_vertex_count(&self) -> usize {
+        if self.offsets.len() <= 1 {
+            return 0;
+        }
+        (0..self.reverse_map.len())
+            .filter(|&i| self.offsets[i + 1] > self.offsets[i])
+            .count()
+    }
+
     /// Total number of edges in this CSR chunk.
     #[inline(always)]
     pub fn edge_count(&self) -> usize {

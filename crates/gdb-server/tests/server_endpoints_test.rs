@@ -703,5 +703,130 @@ async fn test_sharded_cross_node_multi_hop_traversal_and_resources() {
     assert_eq!(rows[0], serde_json::json!([1, 2, 3]));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rf_less_than_n_cross_node_property_resolution_and_ddl_drop() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+
+    let (addr1, _h1, state1) = create_test_server(dir1.path().to_path_buf()).await.unwrap();
+    let (addr2, _h2, state2) = create_test_server(dir2.path().to_path_buf()).await.unwrap();
+
+    let url1 = format!("http://{}", addr1);
+    let url2 = format!("http://{}", addr2);
+
+    let ring = vec![
+        RingNode {
+            node_id: 1,
+            http_url: url1.clone(),
+            flight_address: "127.0.0.1".into(),
+            flight_port: 0,
+            client_flight_address: "127.0.0.1".into(),
+            client_flight_port: 0,
+        },
+        RingNode {
+            node_id: 2,
+            http_url: url2.clone(),
+            flight_address: "127.0.0.1".into(),
+            flight_port: 0,
+            client_flight_address: "127.0.0.1".into(),
+            client_flight_port: 0,
+        },
+    ];
+
+    *state1.ring_nodes.write() = ring.clone();
+    *state2.ring_nodes.write() = ring;
+
+    let client = Client::new();
+
+    // 1. DDL: CREATE VERTEX Users and EDGES FOLLOWS
+    client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "CREATE VERTEX Users (name STRING, age int64); CREATE EDGES FOLLOWS ();"
+        }))
+        .send().await.unwrap();
+
+    // 2. Insert sharded data: Node 1 has User 1 (Alice) -> 2; Node 2 has User 2 (Bob)
+    client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Users (id, name, age) VALUES (1, 'Alice', 30); INSERT EDGE FOLLOWS FROM 1 TO 2;",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    client.post(format!("{}/query", url2))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Users (id, name, age) VALUES (2, 'Bob', 25);",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    // 3. Test /storage/vertex_properties on Node 2 directly
+    let res_props = client.post(format!("{}/storage/vertex_properties", url2))
+        .json(&serde_json::json!({
+            "vids": [2],
+            "properties": ["name", "age"]
+        }))
+        .send().await.unwrap();
+    assert!(res_props.status().is_success());
+    let props_map: serde_json::Value = res_props.json().await.unwrap();
+    assert!(props_map.get("2").is_some());
+    assert_eq!(props_map["2"]["name"]["String"], "Bob");
+    assert_eq!(props_map["2"]["age"]["Int64"], 25);
+
+    // 4. Test remote property resolution via openCypher query on Node 1:
+    // Destination vertex 2 properties must NOT be null!
+    let res_match = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name, b.age;"
+        }))
+        .send().await.unwrap();
+    let body: serde_json::Value = res_match.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], serde_json::json!(["Alice", "Bob", 25]));
+
+    // 5. Test DDL DROP and Re-create lifecycle
+    let res_drop = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "DROP VERTEX User; DROP EDGES FOLLOWS;"
+        }))
+        .send().await.unwrap();
+    assert_eq!(res_drop.json::<serde_json::Value>().await.unwrap()["status"], "ok");
+
+    let res_recreate = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "CREATE VERTEX Users (name STRING, age int64); CREATE EDGES FOLLOWS ();"
+        }))
+        .send().await.unwrap();
+    assert_eq!(res_recreate.json::<serde_json::Value>().await.unwrap()["status"], "ok");
+
+    // Ingest new data after drop/recreate
+    client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Users (id, name, age) VALUES (10, 'Carol', 28); INSERT EDGE FOLLOWS FROM 10 TO 20;",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    client.post(format!("{}/query", url2))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Users (id, name, age) VALUES (20, 'Dave', 35);",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    let res_after_recreate = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name, b.age;"
+        }))
+        .send().await.unwrap();
+    let body_after: serde_json::Value = res_after_recreate.json().await.unwrap();
+    assert_eq!(body_after["status"], "ok");
+    let rows_after = body_after["rows"].as_array().unwrap();
+    assert_eq!(rows_after.len(), 1);
+    assert_eq!(rows_after[0], serde_json::json!(["Carol", "Dave", 35]));
+}
+
 
 

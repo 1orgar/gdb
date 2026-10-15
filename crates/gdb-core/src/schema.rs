@@ -197,7 +197,7 @@ impl GraphSchema {
 
     pub fn get_vertex_schema(&self, label: &str) -> Option<&VertexSchema> {
         self.labels.get(label).or_else(|| {
-            self.labels.iter().find(|(k, _)| k.eq_ignore_ascii_case(label)).map(|(_, v)| v)
+            self.labels.iter().find(|(k, _)| matches_name_or_plural(k, label)).map(|(_, v)| v)
         })
     }
 
@@ -207,7 +207,7 @@ impl GraphSchema {
 
     pub fn get_edge_schema(&self, edge_type_name: &str) -> Option<&EdgeSchema> {
         self.edges.get(edge_type_name).or_else(|| {
-            self.edges.iter().find(|(k, _)| k.eq_ignore_ascii_case(edge_type_name)).map(|(_, v)| v)
+            self.edges.iter().find(|(k, _)| matches_name_or_plural(k, edge_type_name)).map(|(_, v)| v)
         })
     }
 
@@ -219,7 +219,7 @@ impl GraphSchema {
         let key = if self.labels.contains_key(label) {
             Some(label.to_string())
         } else {
-            self.labels.keys().find(|k| k.eq_ignore_ascii_case(label)).cloned()
+            self.labels.keys().find(|k| matches_name_or_plural(k, label)).cloned()
         };
 
         if let Some(actual_key) = key {
@@ -236,7 +236,7 @@ impl GraphSchema {
         let key = if self.edges.contains_key(edge_type_name) {
             Some(edge_type_name.to_string())
         } else {
-            self.edges.keys().find(|k| k.eq_ignore_ascii_case(edge_type_name)).cloned()
+            self.edges.keys().find(|k| matches_name_or_plural(k, edge_type_name)).cloned()
         };
 
         if let Some(actual_key) = key {
@@ -333,3 +333,21 @@ impl GraphSchema {
         list
     }
 }
+
+pub fn matches_name_or_plural(candidate: &str, target: &str) -> bool {
+    if candidate.eq_ignore_ascii_case(target) {
+        return true;
+    }
+    if candidate.len() > 1 && (candidate.ends_with('s') || candidate.ends_with('S')) {
+        if candidate[..candidate.len() - 1].eq_ignore_ascii_case(target) {
+            return true;
+        }
+    }
+    if target.len() > 1 && (target.ends_with('s') || target.ends_with('S')) {
+        if target[..target.len() - 1].eq_ignore_ascii_case(candidate) {
+            return true;
+        }
+    }
+    false
+}
+

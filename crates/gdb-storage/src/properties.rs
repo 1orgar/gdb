@@ -133,11 +133,17 @@ impl VertexPropertyTable {
         }
     }
 
+
     /// Fast OLTP lookup of a property by name.
     pub fn get_property(&self, vid: VertexId, prop_name: &str) -> Option<DataValue> {
         self.row_cache
             .get(&vid.as_u64())
             .and_then(|map| map.get(prop_name).cloned())
+    }
+
+    /// Fast OLTP lookup of all properties for a vertex.
+    pub fn get_all_properties(&self, vid: VertexId) -> Option<HashMap<String, DataValue>> {
+        self.row_cache.get(&vid.as_u64()).map(|map| map.clone())
     }
 
     /// Returns all vertex IDs currently stored in row cache.

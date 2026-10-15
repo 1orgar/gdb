@@ -24,6 +24,7 @@ pub enum PhysicalOperator {
         edge_var: Option<String>,
         dst_var: String,
         edge_type: Option<EdgeType>,
+        dst_label: Option<LabelId>,
     },
     /// Variable-length multi-hop path expansion (e.g., [:TYPE*1..3])
     VarLengthExpand {
@@ -32,6 +33,7 @@ pub enum PhysicalOperator {
         edge_var: Option<String>,
         dst_var: String,
         edge_type: Option<EdgeType>,
+        dst_label: Option<LabelId>,
         min_hops: usize,
         max_hops: Option<usize>,
     },
@@ -193,6 +195,7 @@ mod tests {
             edge_var: Some("e".into()),
             dst_var: "u".into(),
             edge_type: Some(EdgeType(10)),
+            dst_label: Some(LabelId(1)),
         };
         assert_eq!(expand.operator_name(), "ExpandEdges");
         assert!(expand.operator_details().contains("as e"));
@@ -203,6 +206,7 @@ mod tests {
             edge_var: None,
             dst_var: "w".into(),
             edge_type: Some(EdgeType(10)),
+            dst_label: None,
             min_hops: 1,
             max_hops: Some(3),
         };

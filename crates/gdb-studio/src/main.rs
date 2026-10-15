@@ -246,6 +246,74 @@ async fn handle_proxy_schema(
     }
 }
 
+fn parse_studio_node(val: &serde_json::Value, col_name: Option<&str>) -> Option<GraphNode> {
+    if val.is_null() {
+        return None;
+    }
+    // Check if val is a JSON Object or a JSON string representing a vertex entity
+    let obj_opt: Option<serde_json::Value> = if val.is_object() {
+        Some(val.clone())
+    } else if let Some(s) = val.as_str() {
+        let trimmed = s.trim();
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            serde_json::from_str(trimmed).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(obj) = obj_opt {
+        if let Some(id_v) = obj.get("id") {
+            let id = id_v.to_string().trim_matches('"').to_string();
+            let label = obj
+                .get("label")
+                .and_then(|l| l.as_str())
+                .unwrap_or_else(|| col_name.unwrap_or("Node"))
+                .to_string();
+            let properties = obj
+                .get("properties")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            return Some(GraphNode {
+                id,
+                label,
+                properties,
+            });
+        }
+    }
+
+    let raw = val.to_string().trim_matches('"').to_string();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let (label, properties) = match col_name {
+        Some(c) if c.contains('.') => {
+            let mut parts = c.splitn(2, '.');
+            let var = parts.next().unwrap_or("Node");
+            let prop = parts.next().unwrap_or("val");
+            (var.to_string(), serde_json::json!({ prop: val }))
+        }
+        Some(c) if c.to_lowercase().starts_with("id(") => {
+            let var = c
+                .trim_start_matches("id(")
+                .trim_start_matches("ID(")
+                .trim_end_matches(')');
+            (var.to_string(), serde_json::json!({ "id": val }))
+        }
+        Some(c) => (c.to_string(), serde_json::json!({ "value": val })),
+        None => ("Node".to_string(), serde_json::json!({ "id": val })),
+    };
+
+    Some(GraphNode {
+        id: raw,
+        label,
+        properties,
+    })
+}
+
 async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
@@ -297,37 +365,44 @@ async fn handle_query(
                 // Extract Graph Elements
                 let mut nodes = Vec::new();
                 let mut edges = Vec::new();
-                let mut node_set = std::collections::HashSet::new();
+                let mut node_idx_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+                let mut add_or_merge_node = |nodes: &mut Vec<GraphNode>, candidate: GraphNode| -> String {
+                    let id = candidate.id.clone();
+                    if let Some(&idx) = node_idx_map.get(&id) {
+                        if candidate.label != "Node" && (nodes[idx].label == "Node" || nodes[idx].label == nodes[idx].id) {
+                            nodes[idx].label = candidate.label;
+                        }
+                        if let (Some(existing_obj), Some(new_obj)) = (nodes[idx].properties.as_object_mut(), candidate.properties.as_object()) {
+                            for (k, v) in new_obj {
+                                existing_obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                    } else {
+                        node_idx_map.insert(id.clone(), nodes.len());
+                        nodes.push(candidate);
+                    }
+                    id
+                };
 
                 // If columns look like graph traversal (e.g. source, target)
                 if columns.len() >= 2 && !columns[1].contains("score") && !columns[1].contains("distance") {
                     for row in &rows {
                         if row.len() >= 2 {
-                            let u_id = row[0].to_string().trim_matches('"').to_string();
-                            let v_id = row[1].to_string().trim_matches('"').to_string();
+                            let u_cand = parse_studio_node(&row[0], columns.get(0).map(|s| s.as_str()));
+                            let v_cand = parse_studio_node(&row[1], columns.get(1).map(|s| s.as_str()));
 
-                            if node_set.insert(u_id.clone()) {
-                                nodes.push(GraphNode {
-                                    id: u_id.clone(),
-                                    label: u_id.clone(),
-                                    properties: serde_json::json!({ "id": u_id }),
+                            if let (Some(u), Some(v)) = (u_cand, v_cand) {
+                                let u_id = add_or_merge_node(&mut nodes, u);
+                                let v_id = add_or_merge_node(&mut nodes, v);
+
+                                edges.push(GraphEdge {
+                                    source: u_id,
+                                    target: v_id,
+                                    label: if row.len() > 2 { row[2].to_string().trim_matches('"').to_string() } else { "REL".to_string() },
+                                    properties: serde_json::json!({}),
                                 });
                             }
-
-                            if node_set.insert(v_id.clone()) {
-                                nodes.push(GraphNode {
-                                    id: v_id.clone(),
-                                    label: v_id.clone(),
-                                    properties: serde_json::json!({ "id": v_id }),
-                                });
-                            }
-
-                            edges.push(GraphEdge {
-                                source: u_id,
-                                target: v_id,
-                                label: if row.len() > 2 { row[2].to_string().trim_matches('"').to_string() } else { "REL".to_string() },
-                                properties: serde_json::json!({}),
-                            });
                         }
                     }
                 } else if columns.iter().any(|c| c == "vertex_id") {

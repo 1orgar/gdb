@@ -20,8 +20,24 @@ pub fn eval_expr(
         Expr::Variable(var) => {
             if let Some(val) = row.custom_values.get(var) {
                 Ok(val.clone())
-            } else if let Some(&(vid, _)) = row.vertices.get(var) {
-                Ok(DataValue::Int64(vid.as_u64() as i64))
+            } else if let Some(&(vid, label_id)) = row.vertices.get(var) {
+                let mut entity = serde_json::Map::new();
+                entity.insert("id".to_string(), serde_json::json!(vid.as_u64()));
+                if let Some(DataValue::String(lbl)) = row.custom_values.get(&format!("{}.__label", var)) {
+                    entity.insert("label".to_string(), serde_json::json!(lbl));
+                } else {
+                    entity.insert("label".to_string(), serde_json::json!(format!("Label_{}", label_id.0)));
+                }
+                let mut props_map = serde_json::Map::new();
+                if let Some(all_props) = storage.get_all_vertex_properties(vid, Some(label_id)) {
+                    for (k, v) in all_props {
+                        if let Ok(jv) = serde_json::to_value(&v) {
+                            props_map.insert(k, jv);
+                        }
+                    }
+                }
+                entity.insert("properties".to_string(), serde_json::Value::Object(props_map));
+                Ok(DataValue::String(serde_json::Value::Object(entity).to_string()))
             } else {
                 Err(GdbError::Execution(format!("Unbound variable: {}", var)))
             }
@@ -35,6 +51,12 @@ pub fn eval_expr(
                 if property == "id" || property == "_id" {
                     return Ok(DataValue::Int64(vid.as_u64() as i64));
                 }
+                if property == "label" || property == "_label" {
+                    if let Some(lbl_val) = row.custom_values.get(&format!("{}.__label", variable)) {
+                        return Ok(lbl_val.clone());
+                    }
+                    return Ok(DataValue::String(format!("Label_{}", label_id.0)));
+                }
                 let val = storage.get_vertex_property(vid, label_id, property);
                 Ok(val.unwrap_or(DataValue::Null))
             } else {
@@ -47,8 +69,45 @@ pub fn eval_expr(
             eval_binary_op(&left_val, op, &right_val)
         }
         Expr::CountStar => Err(GdbError::Execution("COUNT(*) must be handled by aggregator".into())),
-        Expr::FunctionCall { name, .. } => {
-            Err(GdbError::Execution(format!("Function '{}' not implemented", name)))
+        Expr::FunctionCall { name, args } => {
+            let fname = name.to_uppercase();
+            match fname.as_str() {
+                "ID" | "_ID" => {
+                    if let Some(Expr::Variable(var)) = args.first() {
+                        if let Some(&(vid, _)) = row.vertices.get(var) {
+                            return Ok(DataValue::Int64(vid.as_u64() as i64));
+                        }
+                    }
+                    if let Some(arg) = args.first() {
+                        let val = eval_expr(arg, row, storage)?;
+                        return Ok(val);
+                    }
+                    Err(GdbError::Execution("id() requires 1 argument".into()))
+                }
+                "LABEL" => {
+                    if let Some(Expr::Variable(var)) = args.first() {
+                        if let Some(lbl) = row.custom_values.get(&format!("{}.__label", var)) {
+                            return Ok(lbl.clone());
+                        }
+                        if let Some(&(_, lid)) = row.vertices.get(var) {
+                            return Ok(DataValue::String(format!("Label_{}", lid.0)));
+                        }
+                    }
+                    Err(GdbError::Execution("label() requires a vertex variable argument".into()))
+                }
+                "LABELS" => {
+                    if let Some(Expr::Variable(var)) = args.first() {
+                        if let Some(lbl) = row.custom_values.get(&format!("{}.__label", var)) {
+                            return Ok(DataValue::List(vec![lbl.clone()]));
+                        }
+                        if let Some(&(_, lid)) = row.vertices.get(var) {
+                            return Ok(DataValue::List(vec![DataValue::String(format!("Label_{}", lid.0))]));
+                        }
+                    }
+                    Err(GdbError::Execution("labels() requires a vertex variable argument".into()))
+                }
+                _ => Err(GdbError::Execution(format!("Function '{}' not implemented", name))),
+            }
         }
     }
 }

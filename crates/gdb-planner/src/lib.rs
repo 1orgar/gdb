@@ -3,7 +3,7 @@ pub mod executor;
 pub mod plan;
 
 pub use eval::{eval_expr, PathRow};
-pub use executor::{QueryResult, QueryExecutor, RemoteEdgeExpander};
+pub use executor::{QueryResult, QueryExecutor, RemoteEdgeExpander, RemotePropertyResolver};
 pub use plan::PhysicalOperator;
 
 #[cfg(test)]

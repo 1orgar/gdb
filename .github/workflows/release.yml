@@ -214,34 +214,36 @@ jobs:
           # Identify previous tag for comparison
           PREV_TAG=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -v "^${RELEASE_TAG}$" | head -n 1)
           if [ -z "$PREV_TAG" ]; then
-            PREV_TAG="v0.5.2"
+            PREV_TAG="v0.5.6"
           fi
 
-          cat << 'EOF' > release_notes.md
+          # Extract release notes for this specific version from CHANGELOG.md
+          CHANGELOG_BODY=$(python3 -c "
+          import re, os
+          tag = os.environ.get('RELEASE_TAG', '').lstrip('v')
+          try:
+              with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
+                  content = f.read()
+              pattern = rf'## \[?{re.escape(tag)}\]?.*?\n(.*?)(?=\n## |\Z)'
+              m = re.search(pattern, content, re.DOTALL)
+              if m:
+                  print(m.group(1).strip().rstrip('---').strip())
+              else:
+                  print('Release ' + tag)
+          except Exception as e:
+              print('Release ' + tag)
+          ")
+
+          cat << EOF > release_notes.md
           ## Release **${{ env.CODENAME }}** (${{ env.RELEASE_TAG }})
 
-          ### Key Highlights in v0.5.3
-          - **Algorithm Subgraph Filtering by Edge Type & Vertex Label**:
-            - Added `CALL algo.*({edge_type: 'TYPE', label: 'LABEL'})` across PageRank, WCC, Louvain, Triangle Counting, SSSP, etc.
-            - Fast contiguous subgraph projection via `ChunkedCsr::filter_by_edge_type` maintaining consistent vertex IDs.
-            - Automatic compaction of DeltaMemTable mutations prior to algorithm execution.
-          - **Keyword Identifiers & Backtick Escaping**:
-            - openCypher identifiers can now safely match keywords (`DROP VERTEX VERTEX;`, `DROP EDGE EDGE;`, `RANK`, `ORDER`).
-            - Support for backtick quoting (``` `VERTEX` ```).
-          - **Official Python SDK v0.5.3 (`gdb-client` on PyPI)**:
-            - Published `gdb-client==0.5.3` with streaming 64k partition ingestion and 256MB Arrow Flight limits.
-            - Automatic cluster topology port discovery from REST API.
-          - **Comprehensive Multi-Component Roadmap**:
-            - Overhauled development roadmap with Graph Spaces / Namespaces (`CREATE GRAPH`, `USE GRAPH`) planned for v0.6.0.
+          ${CHANGELOG_BODY}
 
           ### Checksums & Verification
-          Every binary archive is accompanied by a SHA256 checksum file (`.tar.gz.sha256`).
+          Every binary archive is accompanied by a SHA256 checksum file (\`.tar.gz.sha256\`).
 
           **Full Changelog**: https://github.com/1orgar/gdb/compare/${PREV_TAG}...${{ env.RELEASE_TAG }}
           EOF
-
-          # Replace variable in release_notes.md
-          sed -i "s/\${PREV_TAG}/$PREV_TAG/g" release_notes.md
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

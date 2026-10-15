@@ -72,7 +72,49 @@ impl PartitionStorageEngine {
         prop_name: &str,
     ) -> Option<DataValue> {
         let guard = self.vertex_properties.read();
-        guard.get(&label_id).and_then(|t| t.get_property(vid, prop_name))
+        if let Some(table) = guard.get(&label_id) {
+            if let Some(val) = table.get_property(vid, prop_name) {
+                return Some(val);
+            }
+        }
+        // Fallback across any other registered table containing this vid
+        for (&other_lid, table) in guard.iter() {
+            if other_lid != label_id {
+                if let Some(val) = table.get_property(vid, prop_name) {
+                    return Some(val);
+                }
+            }
+        }
+        None
+    }
+
+    /// Finds the LabelId for a given vertex ID, if present in any property table.
+    pub fn get_vertex_label(&self, vid: VertexId) -> Option<LabelId> {
+        let guard = self.vertex_properties.read();
+        for (&lid, table) in guard.iter() {
+            if table.has_vertex(vid) {
+                return Some(lid);
+            }
+        }
+        None
+    }
+
+    /// Reads all properties for a vertex, either under a specific label or any containing table.
+    pub fn get_all_vertex_properties(&self, vid: VertexId, label_id: Option<LabelId>) -> Option<HashMap<String, DataValue>> {
+        let guard = self.vertex_properties.read();
+        if let Some(lid) = label_id {
+            if let Some(table) = guard.get(&lid) {
+                if let Some(props) = table.get_all_properties(vid) {
+                    return Some(props);
+                }
+            }
+        }
+        for table in guard.values() {
+            if let Some(props) = table.get_all_properties(vid) {
+                return Some(props);
+            }
+        }
+        None
     }
 
     /// Creates a secondary index for vertices under a given label.
@@ -355,11 +397,20 @@ impl PartitionStorageEngine {
         self.delta.edge_count()
     }
 
-    /// Total distinct vertices in CSR or property tables.
+    /// Total distinct vertices in property tables or CSR.
     pub fn total_vertices(&self) -> usize {
-        let csr_cnt = self.current_csr().vertex_count();
         let prop_cnt: usize = self.vertex_properties.read().values().map(|t| t.len()).sum();
-        csr_cnt.max(prop_cnt)
+        if prop_cnt > 0 {
+            prop_cnt
+        } else {
+            let csr = self.current_csr();
+            let src_cnt = csr.source_vertex_count();
+            if src_cnt > 0 {
+                src_cnt
+            } else {
+                csr.vertex_count().max(self.delta.edge_count().min(1))
+            }
+        }
     }
 
     /// Performs vector similarity search over property tables for a given vertex label.

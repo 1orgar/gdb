@@ -4,6 +4,24 @@ All notable changes to **GDB** (Distributed High-Performance In-Memory Graph Dat
 
 ---
 
+## [0.5.7] - 2026-10-15
+
+### 🚀 New Features
+- **Entity JSON Serialization (`RETURN a, b`):** Whole vertex references in query projections now serialize to structured JSON objects (`{"id": vid, "label": label, "properties": {...}}`) with full property metadata.
+- **openCypher Built-in Functions:** Added first-class support for `id(n)`, `_id(n)`, `label(n)`, `labels(n)`, `n.id`, and `n.label`.
+- **Dynamic Entity Parsing in GDB Studio:** Studio automatically deserializes entity JSON objects, populates the Inspector drawer with property key-values, and highlights vertices with dynamic color palettes based on their label.
+- **Architecture Refactoring & Modularization:**
+  - `gdb-server`: Refactored monolithic `lib.rs` into specialized submodules (`src/state.rs`, `src/cluster/topology.rs`, `src/cluster/resolver.rs`, `src/handlers/storage.rs`, `src/handlers/resources.rs`, `src/handlers/query.rs`).
+  - `gdb-studio`: Split inline 3500-line UI into standalone modular assets under `web/` (`styles.css`, `body.html`, `graph.js`, `app.js`) compiled into the binary via `concat!` and `include_str!`.
+
+### 🐛 Bug Fixes
+- **RF < N Cross-Node Vertex Property Resolution:** Fixed target vertex properties returning `null` in multi-hop pattern queries (`MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name`) when $RF < N$. Introduced `RemotePropertyResolver` and `POST /storage/vertex_properties` to pre-fetch properties from replica-owning shards on demand.
+- **Total Vertices Telemetry Accuracy:** Fixed vertex double-counting in CSR telemetry reporting 19,998 instead of 10,000 for $RF=1$ ingestion. CSR vertex count now prioritizes partition-owned properties (`prop_cnt > 0`) with accurate `source_vertex_count` fallback.
+- **DDL Drop & Recreate Property Retention:** Fixed schema ID misalignment where re-created tables (`DROP VERTEX User; DROP EDGES FOLLOWS; CREATE VERTEX Users ...`) failed to return properties due to old schema ID references. Added plural/singular name tolerance (`User` $\leftrightarrow$ `Users`, `FOLLOW` $\leftrightarrow$ `FOLLOWS`) and resilient property table fallbacks.
+- **Safari WebKit Canvas Distortion & Layout Jump:** Fixed layout blowup in Safari by adding `min-width: 0; min-height: 0;` on flex parents and switching the Inspector drawer transition from `display: none` to `margin-right: -280px; opacity: 0; pointer-events: none;`. Fixed retina display canvas zoom accumulation by resetting transform before DPR scaling.
+
+---
+
 ## [0.5.6] - 2026-10-13
 
 ### Distributed MPP & Multi-Hop Traversal (Pure Sharding $RF=1$)

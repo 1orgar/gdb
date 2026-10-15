@@ -1,0 +1,565 @@
+  <!-- Top Navigation -->
+  <header>
+    <div class="brand">
+      <span>⚡ GDB STUDIO</span>
+      <span class="brand-badge">v0.5.7</span>
+    </div>
+
+    <div class="cluster-controls">
+      <div class="cluster-input-group">
+        <label>ENDPOINT:</label>
+        <input type="text" id="cluster-url" value="http://localhost:8847" placeholder="http://host:port">
+      </div>
+      <div id="cluster-status-pill" class="status-indicator">
+        <div class="status-dot"></div>
+        <span id="cluster-status-text">Connected</span>
+      </div>
+      <div class="node-pills" id="header-node-pills">
+        <div class="node-pill active" title="Flight :8848 | HTTP :8847">Peer #1</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Workspace -->
+  <div class="workspace">
+
+    <!-- Left Sidebar: Query Templates & History -->
+    <div class="sidebar">
+      <div class="sidebar-tabs">
+        <div class="sidebar-tab active" onclick="switchSidebarTab('templates', this)">⚡ Query Templates</div>
+        <div class="sidebar-tab" onclick="switchSidebarTab('history', this)">🕒 History</div>
+      </div>
+
+      <div class="sidebar-content">
+        <!-- Templates View -->
+        <div id="tab-templates">
+          <div class="section-title">🌐 Pattern Matching &amp; Paths</div>
+          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name LIMIT 50;')">
+            <div class="template-title">1-Hop Traversal</div>
+            <div class="template-query">MATCH (a:User)-[:FOLLOWS]->(b:User)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) RETURN a.name, b.name, c.name LIMIT 25;')">
+            <div class="template-title">2-Hop Traversal</div>
+            <div class="template-query">MATCH (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)-[:FOLLOWS]->(d:User) RETURN a.name, b.name, c.name, d.name LIMIT 20;')">
+            <div class="template-title">3-Hop Path Traversal</div>
+            <div class="template-query">MATCH (a)->(b)->(c)->(d)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) WHERE a.age > 25 RETURN a.name, b.name LIMIT 50;')">
+            <div class="template-title">Filtered Traversal (WHERE)</div>
+            <div class="template-query">MATCH ... WHERE a.age &gt; 25...</div>
+          </div>
+
+          <div class="section-title" style="margin-top: 14px;">🎯 Vector Similarity Search</div>
+          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Document\', \'embedding\', [0.12, 0.45, -0.23, 0.88], 5, \'cosine\') YIELD vertex_id, score;')">
+            <div class="template-title">Vector Cosine Similarity</div>
+            <div class="template-query">CALL vector.similaritySearch(..., 'cosine')...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [1.0, 0.0, 0.0], 5, \'l2\') YIELD vertex_id, score;')">
+            <div class="template-title">Vector L2 Euclidean Search</div>
+            <div class="template-query">CALL vector.similaritySearch(..., 'l2')...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [0.5, 0.5, 0.5], 5, \'dot\') YIELD vertex_id, score;')">
+            <div class="template-title">Vector Dot Product Search</div>
+            <div class="template-query">CALL vector.similaritySearch(..., 'dot')...</div>
+          </div>
+
+          <div class="section-title" style="margin-top: 14px;">📊 Graph Analytics &amp; Subgraphs</div>
+          <div class="template-item" onclick="setQuery('CALL algo.pageRank() YIELD vertex_id, score;')">
+            <div class="template-title">PageRank (Global)</div>
+            <div class="template-query">CALL algo.pageRank()...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL algo.pageRank({edge_type: \'FOLLOWS\', damping: 0.85}) YIELD vertex_id, score;')">
+            <div class="template-title">PageRank on Subgraph</div>
+            <div class="template-query">CALL algo.pageRank({edge_type: 'FOLLOWS'})...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL algo.louvain() YIELD vertex_id, community;')">
+            <div class="template-title">Louvain Community Detection</div>
+            <div class="template-query">CALL algo.louvain()...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL algo.wcc() YIELD vertex_id, component;')">
+            <div class="template-title">Weakly Connected Components</div>
+            <div class="template-query">CALL algo.wcc()...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL algo.triangleCount() YIELD vertex_id, triangles;')">
+            <div class="template-title">Triangle Count &amp; Clustering</div>
+            <div class="template-query">CALL algo.triangleCount()...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL algo.sssp(1) YIELD vertex_id, distance;')">
+            <div class="template-title">Single Source Shortest Path (SSSP)</div>
+            <div class="template-query">CALL algo.sssp(1)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CALL algo.bfs(1, 4) YIELD vertex_id, depth;')">
+            <div class="template-title">Breadth-First Search (BFS)</div>
+            <div class="template-query">CALL algo.bfs(1, 4)...</div>
+          </div>
+
+          <div class="section-title" style="margin-top: 14px;">📐 Schema Catalog &amp; DDL</div>
+          <div class="template-item" onclick="setQuery('CREATE VERTEX User (name STRING, age INT64, embedding VECTOR(128));')">
+            <div class="template-title">Create Vertex Tag with Vector</div>
+            <div class="template-query">CREATE VERTEX User (name STRING...)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CREATE EDGE FOLLOWS (since INT64, weight FLOAT64);')">
+            <div class="template-title">Create Edge Type with Properties</div>
+            <div class="template-query">CREATE EDGE FOLLOWS (since INT64...)...</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CREATE INDEX ON User(name);')">
+            <div class="template-title">Create Property Index</div>
+            <div class="template-query">CREATE INDEX ON User(name);</div>
+          </div>
+
+          <div class="section-title" style="margin-top: 14px;">🛠️ Operations &amp; Batch Scripts</div>
+          <div class="template-item" onclick="setQuery('compact;')">
+            <div class="template-title">Force CSR Compaction</div>
+            <div class="template-query">compact;</div>
+          </div>
+          <div class="template-item" onclick="setQuery('snapshot;')">
+            <div class="template-title">Commit Parquet S3 Snapshot</div>
+            <div class="template-query">snapshot;</div>
+          </div>
+          <div class="template-item" onclick="setQuery('CREATE VERTEX Person (name STRING);\nCREATE EDGE KNOWS ();\nINSERT VERTEX 1 Person (name=\'Alice\');\nINSERT VERTEX 2 Person (name=\'Bob\');\nINSERT EDGE 1->2 KNOWS ();\nMATCH (a)-[r]->(b) RETURN a.name, b.name;')">
+            <div class="template-title">Multi-Statement Script</div>
+            <div class="template-query">CREATE ... INSERT ... MATCH ...</div>
+          </div>
+        </div>
+
+        <!-- History View -->
+        <div id="tab-history" style="display:none;">
+          <div class="section-title">Recent Queries</div>
+          <div id="history-list">
+            <div style="font-size:11px; color:var(--text-muted);">No queries executed yet.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Content: Query Editor + Viewports -->
+    <div class="content-area">
+      <!-- Editor -->
+      <div class="editor-pane">
+        <div class="editor-toolbar">
+          <div class="editor-title">Query Editor (openCypher / GQL)</div>
+          <div class="editor-actions">
+            <button class="btn btn-secondary btn-sm" onclick="clearQuery()">Clear</button>
+            <button class="btn btn-secondary btn-sm" id="explain-btn" onclick="explainQuery()">🔍 Explain Plan</button>
+            <button class="btn btn-secondary btn-sm" id="batch-btn" onclick="executeBatchScript()" title="Execute multi-statement script with step progress">⚡ Run All</button>
+            <button class="btn btn-primary btn-sm" id="run-btn" onclick="executeQuery()">
+              <span id="run-spinner" style="display:none;" class="spinner"></span>
+              <span>▶ Run (Cmd+↵)</span>
+            </button>
+          </div>
+        </div>
+        <div class="editor-container">
+          <textarea id="query-input" spellcheck="false" placeholder="Enter openCypher, GQL, or CALL algo query here...">SHOW SCHEMA;</textarea>
+        </div>
+      </div>
+
+      <!-- Results Viewports -->
+      <div class="results-pane">
+        <div class="results-nav">
+          <div class="nav-tabs">
+            <div class="nav-tab active" id="tab-btn-graph" onclick="switchView('graph', this)">🕸️ Graph View</div>
+            <div class="nav-tab" id="tab-btn-table" onclick="switchView('table', this)">📊 Table View</div>
+            <div class="nav-tab" id="tab-btn-plan" onclick="switchView('plan', this)">🔍 Plan / Explain</div>
+            <div class="nav-tab" id="tab-btn-schema" onclick="switchView('schema', this)">📐 Schema Manager</div>
+            <div class="nav-tab" id="tab-btn-cluster" onclick="switchView('cluster', this)">🌐 Cluster Ring</div>
+            <div class="nav-tab" id="tab-btn-resources" onclick="switchView('resources', this)">⚡ Storage &amp; Resources</div>
+            <div class="nav-tab" id="tab-btn-unity" onclick="switchView('unity', this)">🎮 3D Unity View</div>
+            <div class="nav-tab" id="tab-btn-json" onclick="switchView('json', this)">📜 Raw JSON</div>
+          </div>
+          <div class="nav-stats" id="query-stats">
+            <div id="step-indicator" style="display:none; color:var(--purple); font-weight:600;">Step: <span id="stat-step">1/1</span></div>
+            <div>Status: <span class="highlight" id="stat-status">Ready</span></div>
+            <div>Time: <span class="highlight" id="stat-time">0.0 ms</span></div>
+            <div>Rows: <span class="highlight" id="stat-rows">0</span></div>
+            <div>Graph: <span class="highlight" id="stat-graph">0 nodes, 0 edges</span></div>
+          </div>
+        </div>
+
+        <!-- Graph Viewport -->
+        <div id="graph-viewport" class="viewport active">
+          <canvas id="graph-canvas"></canvas>
+          <div class="graph-controls">
+            <button class="control-btn" title="Zoom In" onclick="zoomGraph(1.2)">➕</button>
+            <button class="control-btn" title="Zoom Out" onclick="zoomGraph(0.8)">➖</button>
+            <button class="control-btn" title="Reset View" onclick="resetGraphView()">⟲</button>
+            <button class="control-btn" title="Toggle Physics" id="physics-btn" onclick="togglePhysics()">⏸</button>
+            <button class="control-btn" title="Export PNG" onclick="exportGraphPng()">📷 PNG</button>
+            <button class="control-btn" title="Export SVG" onclick="exportGraphSvg()">🖼️ SVG</button>
+            <button class="control-btn" title="Export CSV" onclick="exportGraphCsv()">📊 CSV</button>
+            <button class="control-btn" title="Export JSON" onclick="exportGraphJson()">📋 JSON</button>
+          </div>
+        </div>
+
+        <!-- Table Viewport -->
+        <div id="table-viewport" class="viewport">
+          <table class="data-grid" id="data-table">
+            <thead><tr id="table-header"><th>No Data</th></tr></thead>
+            <tbody id="table-body"><tr><td>Execute a query to view tabular results</td></tr></tbody>
+          </table>
+        </div>
+
+        <!-- Plan / Explain Viewport -->
+        <div id="plan-viewport" class="viewport" style="display:none; padding:20px; overflow-y:auto; background:var(--bg-darker);">
+          <div style="max-width:960px; margin:0 auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:16px; font-weight:700; color:var(--text-bright);">🔍 Query Physical Execution Plan</span>
+                <span id="plan-badge" class="dash-badge blue">Cost-Based Optimization</span>
+              </div>
+              <button class="btn btn-secondary btn-sm" onclick="copyPlanText()">📋 Copy Plan Text</button>
+            </div>
+            <div id="plan-dag-container" style="display:flex; flex-direction:column; gap:8px; margin-bottom:20px;"></div>
+            <div class="dash-card" style="background:var(--bg-dark); border:1px solid var(--border); border-radius:8px; padding:16px;">
+              <div class="card-label" style="margin-bottom:8px;">Plan Hierarchy (ASCII Tree)</div>
+              <pre id="plan-ascii-output" style="font-family:monospace; font-size:12px; color:var(--text); line-height:1.5; overflow-x:auto; margin:0;">Execute EXPLAIN &lt;query&gt; to generate execution plan DAG.</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cluster Ring Viewport -->
+        <div id="cluster-viewport" class="viewport">
+          <div class="dashboard-container">
+            <div class="dash-header">
+              <div class="dash-title">
+                <span>🌐 Leaderless Ring Cluster Topology</span>
+                <span id="cluster-rf-badge" class="dash-badge green">RF = 3 (SYNC)</span>
+                <span id="cluster-gpu-badge" class="dash-badge purple">GPU Disabled</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-secondary btn-sm" onclick="fetchClusterStatus()">🔄 Refresh Cluster</button>
+              </div>
+            </div>
+
+            <div class="dash-grid">
+              <div class="dash-card">
+                <div class="card-label">Topology Architecture</div>
+                <div class="card-value" style="font-size:16px; color:var(--accent);">LEADERLESS HASH RING</div>
+                <div class="card-subtext" id="cluster-sub-topology">Consistent hashing across peer nodes</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Replication Factor</div>
+                <div class="card-value" id="cluster-rf-val">RF = 3</div>
+                <div class="card-subtext" id="cluster-rf-sub">Mode: Synchronous Quorum</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Active Ring Nodes</div>
+                <div class="card-value" id="cluster-nodes-count">3 Peers</div>
+                <div class="card-subtext" id="cluster-partitions-count">8 Partitions per Node</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Hardware Acceleration</div>
+                <div class="card-value" id="cluster-gpu-val" style="font-size:16px;">Disabled</div>
+                <div class="card-subtext" id="cluster-gpu-sub">Pass --enable-gpu to activate</div>
+              </div>
+            </div>
+
+            <div class="dash-section">
+              <div class="dash-section-title">
+                <span>Ring Member Nodes</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="cluster-last-updated">Updated: Live</span>
+              </div>
+              <table class="data-grid" style="width:100%;">
+                <thead>
+                  <tr>
+                    <th>Node ID</th>
+                    <th>Role</th>
+                    <th>REST HTTP Endpoint</th>
+                    <th>Internal Flight Port</th>
+                    <th>Client Flight Port</th>
+                    <th>Assigned Token Range</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="cluster-nodes-table-body">
+                  <tr><td colspan="8" style="text-align:center;">Loading cluster nodes...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Resources & Storage Viewport -->
+        <div id="resources-viewport" class="viewport">
+          <div class="dashboard-container">
+            <div class="dash-header">
+              <div class="dash-title">
+                <span>⚡ System Resources &amp; In-Memory Storage</span>
+                <span id="res-health-badge" class="dash-badge green">Storage Healthy</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary btn-sm" id="btn-trigger-compact" onclick="triggerCompaction()">⚡ Compact CSR Now</button>
+                <button class="btn btn-secondary btn-sm" onclick="fetchResources()">🔄 Refresh</button>
+              </div>
+            </div>
+
+            <div class="dash-grid">
+              <div class="dash-card">
+                <div class="card-label">In-Memory Allocated RAM</div>
+                <div class="card-value" id="res-ram-val">0.00 MB</div>
+                <div class="card-subtext" id="res-ram-sub">CSR structure + Delta write buffers</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Total Vertices (CSR)</div>
+                <div class="card-value" id="res-v-val">0</div>
+                <div class="card-subtext">Compacted vertex index</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Total Graph Edges</div>
+                <div class="card-value" id="res-e-val">0</div>
+                <div class="card-subtext" id="res-edges-breakdown">CSR: 0 | Delta: 0</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Background Compactions</div>
+                <div class="card-value" id="res-compaction-val">0</div>
+                <div class="card-subtext">Delta to Chunked-CSR merges</div>
+              </div>
+            </div>
+
+            <div class="dash-grid">
+              <div class="dash-card" style="grid-column: span 2;">
+                <div class="card-label">GPU Acceleration &amp; Offload Engine</div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+                  <div>
+                    <div class="card-value" id="res-gpu-name" style="font-size:18px;">Apple Metal UMA</div>
+                    <div class="card-subtext" id="res-gpu-device" style="margin-top:2px;">Device #0 | Offload Threshold: 10,000 edges</div>
+                  </div>
+                  <span id="res-gpu-status-badge" class="dash-badge gray">Disabled</span>
+                </div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:8px;">
+                  Supported kernels: BFS Frontier Expansion, Vectorized PageRank, SIMD Graph Kernel
+                </div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Cloud Tiered Storage (S3)</div>
+                <div class="card-value" id="res-s3-val" style="font-size:18px;">Disabled</div>
+                <div class="card-subtext" id="res-s3-sub">Local WAL &amp; memory persistence only</div>
+              </div>
+              <div class="dash-card">
+                <div class="card-label">Executed Query Statistics</div>
+                <div class="card-value" id="res-queries-val">0</div>
+                <div class="card-subtext" id="res-queries-sub">OK: 0 | Errors: 0</div>
+              </div>
+            </div>
+
+            <!-- Live Telemetry Sparklines -->
+            <div class="dash-section">
+              <div class="dash-section-title">
+                <span>📈 Real-Time Engine Telemetry</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="telemetry-live-badge">🟢 Polling Live</span>
+              </div>
+              <div class="dash-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">
+                <div class="dash-card">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div class="card-label">Throughput (QPS)</div>
+                    <div id="spark-qps-val" style="font-size:14px; font-weight:700; color:var(--accent); font-family:monospace;">0.0 /s</div>
+                  </div>
+                  <svg id="sparkline-qps" width="100%" height="48" style="overflow:visible; margin-top:8px;"></svg>
+                </div>
+                <div class="dash-card">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div class="card-label">Execution Latency</div>
+                    <div id="spark-lat-val" style="font-size:14px; font-weight:700; color:var(--success); font-family:monospace;">0.0 ms</div>
+                  </div>
+                  <svg id="sparkline-latency" width="100%" height="48" style="overflow:visible; margin-top:8px;"></svg>
+                </div>
+                <div class="dash-card">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div class="card-label">Allocated RAM Trend</div>
+                    <div id="spark-ram-val" style="font-size:14px; font-weight:700; color:var(--purple); font-family:monospace;">0.0 MB</div>
+                  </div>
+                  <svg id="sparkline-ram" width="100%" height="48" style="overflow:visible; margin-top:8px;"></svg>
+                </div>
+              </div>
+            </div>
+
+            <div id="compaction-alert" style="display:none; padding:10px 14px; border-radius:6px; font-size:12px; background:rgba(63,185,80,0.15); border:1px solid #238636; color:#3fb950;">
+              Compaction completed successfully!
+            </div>
+          </div>
+        </div>
+
+        <!-- Schema Manager Viewport -->
+        <div id="schema-viewport" class="viewport" style="display:none; padding:20px; overflow-y:auto; background:var(--bg-darker);">
+          <div class="dashboard-container" style="max-width:1200px; margin:0 auto;">
+            <div class="dash-header">
+              <div class="dash-title">
+                <span>📐 Database Schema Catalog &amp; DDL Manager</span>
+                <span id="schema-total-tags-badge" class="dash-badge blue">0 Vertex Tags</span>
+                <span id="schema-total-edges-badge" class="dash-badge purple">0 Edge Types</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary btn-sm" onclick="openCreateVertexModal()">➕ Create Vertex Tag</button>
+                <button class="btn btn-primary btn-sm" style="background:#8957e5;" onclick="openCreateEdgeModal()">➕ Create Edge Type</button>
+                <button class="btn btn-secondary btn-sm" onclick="fetchSchema()">🔄 Refresh Schema</button>
+              </div>
+            </div>
+
+            <!-- Vertex Tags Section -->
+            <div class="dash-section" style="margin-bottom:24px;">
+              <div class="dash-section-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Vertex Tags (Entity Schemas)</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="schema-v-count-label">0 tags</span>
+              </div>
+              <div id="schema-vertex-grid" class="schema-grid">
+                <div style="grid-column: 1/-1; padding:24px; text-align:center; color:var(--text-muted); background:var(--bg-card); border-radius:8px; border:1px dashed var(--border);">
+                  No vertex schemas defined yet. Create your first vertex tag or execute <code>CREATE VERTEX TagName (id: INT64, ...);</code>
+                </div>
+              </div>
+            </div>
+
+            <!-- Edge Types Section -->
+            <div class="dash-section">
+              <div class="dash-section-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Edge Types (Relationship Schemas)</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="schema-e-count-label">0 edge types</span>
+              </div>
+              <div id="schema-edge-grid" class="schema-grid">
+                <div style="grid-column: 1/-1; padding:24px; text-align:center; color:var(--text-muted); background:var(--bg-card); border-radius:8px; border:1px dashed var(--border);">
+                  No edge schemas defined yet. Create your first edge type or execute <code>CREATE EDGE EdgeType (weight: FLOAT64, ...);</code>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3D Unity Viewport -->
+        <div id="unity-viewport" class="viewport" style="display:none; width:100%; height:100%; position:relative; background:#080b10; overflow:hidden;">
+          <canvas id="unity-canvas" style="width:100%; height:100%; display:block; outline:none; cursor:grab;"></canvas>
+          <div class="graph-controls" style="top:14px; right:14px; bottom:auto; left:auto; width:fit-content; height:fit-content;">
+            <button class="control-btn" title="Zoom In" onclick="zoomUnity3D(1.2)">➕</button>
+            <button class="control-btn" title="Zoom Out" onclick="zoomUnity3D(0.8)">➖</button>
+            <button class="control-btn" title="Reset 3D View" onclick="resetUnity3DView()">⟲</button>
+            <button class="control-btn" title="Toggle 3D Physics" id="unity-physics-btn" onclick="toggleUnityPhysics()">⏸</button>
+            <button class="control-btn" title="Auto Rotate" id="unity-rotate-btn" onclick="toggleUnityAutoRotate()">🔄</button>
+          </div>
+          <div id="unity-hud-bar" style="position:absolute; bottom:16px; left:16px; display:flex; align-items:center; gap:10px; background:rgba(13,17,23,0.85); backdrop-filter:blur(6px); border:1px solid var(--border); padding:8px 14px; border-radius:8px; font-size:12px; pointer-events:none; z-index:10;">
+            <span style="font-size:16px;">🎮</span>
+            <div>
+              <div style="font-weight:600; color:var(--text-bright);" id="unity-stats-title">3D Graph Spatial Visualizer</div>
+              <div style="font-size:11px; color:var(--text-muted);" id="unity-status-badge">Drag to Orbit | Scroll to Zoom | Click Sphere to Inspect</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- JSON Viewport -->
+        <div id="json-viewport" class="viewport">
+          <pre id="json-output">// Result JSON will appear here...</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Side: Property Inspector -->
+    <div class="inspector closed" id="inspector-panel">
+      <div class="inspector-header">
+        <div class="inspector-title" id="inspector-title">Entity Inspector</div>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeInspector()">✕</button>
+      </div>
+      <div class="inspector-body" id="inspector-body">
+        <div style="color:var(--text-muted); font-size:11px;">Click on any node or edge in the graph to inspect its properties.</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Modal: Create Vertex Tag -->
+  <div class="modal-overlay" id="modal-create-vertex">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span>➕ Create Vertex Tag</span>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeModal('modal-create-vertex')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Vertex Tag Name</label>
+          <input type="text" class="form-input" id="new-vertex-name" placeholder="e.g. Account, Customer, Product" />
+        </div>
+        <div class="form-group">
+          <label>Primary Key Property (Optional)</label>
+          <input type="text" class="form-input" id="new-vertex-pk" placeholder="e.g. id, uid, account_no" value="id" />
+        </div>
+        <div class="form-group">
+          <label>Properties Definition (name: TYPE, separated by commas)</label>
+          <input type="text" class="form-input" id="new-vertex-props" placeholder="e.g. name: STRING, age: INT64, balance: FLOAT64" value="name: STRING, created_at: INT64" />
+          <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">Supported types: STRING, INT64, FLOAT64, BOOLEAN</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-create-vertex')">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="submitCreateVertex()">Create Tag</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Create Edge Type -->
+  <div class="modal-overlay" id="modal-create-edge">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span>➕ Create Edge Type</span>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeModal('modal-create-edge')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Edge Type Name</label>
+          <input type="text" class="form-input" id="new-edge-name" placeholder="e.g. TRANSFERRED_TO, LIKES, BELONGS_TO" />
+        </div>
+        <div class="form-group">
+          <label>Properties Definition (Optional, name: TYPE, separated by commas)</label>
+          <input type="text" class="form-input" id="new-edge-props" placeholder="e.g. amount: FLOAT64, timestamp: INT64" value="weight: FLOAT64, created_at: INT64" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-create-edge')">Cancel</button>
+        <button class="btn btn-primary btn-sm" style="background:#8957e5;" onclick="submitCreateEdge()">Create Edge Type</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Add Property to Vertex/Edge -->
+  <div class="modal-overlay" id="modal-add-prop">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span id="modal-add-prop-title">➕ Add Property</span>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeModal('modal-add-prop')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="add-prop-target-kind" value="vertex" />
+        <input type="hidden" id="add-prop-target-name" value="" />
+        <div class="form-group">
+          <label>Target Schema</label>
+          <input type="text" class="form-input" id="add-prop-target-display" disabled />
+        </div>
+        <div class="form-group">
+          <label>Property Name</label>
+          <input type="text" class="form-input" id="add-prop-name" placeholder="e.g. email, score, status" />
+        </div>
+        <div class="form-group">
+          <label>Data Type</label>
+          <select class="form-input" id="add-prop-type">
+            <option value="STRING">STRING (Text)</option>
+            <option value="INT64">INT64 (Integer)</option>
+            <option value="FLOAT64">FLOAT64 (Float)</option>
+            <option value="BOOLEAN">BOOLEAN (Bool)</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-add-prop')">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="submitAddProperty()">Add Property</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <div class="footer-left">
+      <span id="footer-version">GDB Studio v0.5.7</span>
+      <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
+      <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
+    </div>
+    <div class="footer-right">
+      <span id="footer-connection">Connected to http://localhost:8847</span>
+    </div>
+  </footer>

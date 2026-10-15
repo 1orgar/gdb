@@ -34,12 +34,22 @@ pub trait RemoteEdgeExpander: Send + Sync {
     }
 }
 
+pub trait RemotePropertyResolver: Send + Sync {
+    fn batch_get_vertex_properties(
+        &self,
+        vids: &[VertexId],
+        label_id: Option<LabelId>,
+        properties: Option<&[String]>,
+    ) -> HashMap<VertexId, HashMap<String, DataValue>>;
+}
+
 pub struct QueryExecutor {
     pub schema: Arc<RwLock<GraphSchema>>,
     pub storage: Arc<PartitionStorageEngine>,
     pub gpu: Option<Arc<gdb_gpu::GpuDispatcher>>,
     pub stats: Arc<RwLock<Option<gdb_storage::GraphStatistics>>>,
     pub remote_expander: Option<Arc<dyn RemoteEdgeExpander>>,
+    pub remote_property_resolver: Option<Arc<dyn RemotePropertyResolver>>,
 }
 
 impl QueryExecutor {
@@ -50,11 +60,17 @@ impl QueryExecutor {
             gpu: None,
             stats: Arc::new(RwLock::new(None)),
             remote_expander: None,
+            remote_property_resolver: None,
         }
     }
 
     pub fn with_remote_expander(mut self, expander: Arc<dyn RemoteEdgeExpander>) -> Self {
         self.remote_expander = Some(expander);
+        self
+    }
+
+    pub fn with_remote_property_resolver(mut self, resolver: Arc<dyn RemotePropertyResolver>) -> Self {
+        self.remote_property_resolver = Some(resolver);
         self
     }
 
@@ -69,6 +85,7 @@ impl QueryExecutor {
             gpu: Some(gpu),
             stats: Arc::new(RwLock::new(None)),
             remote_expander: None,
+            remote_property_resolver: None,
         }
     }
 
@@ -647,6 +664,8 @@ impl QueryExecutor {
             });
         }
 
+        let mut rows = rows;
+        self.populate_labels_and_missing_properties(&mut rows, &query.return_items);
         let batch = self.build_record_batch(&query.return_items, &rows)?;
         let count = batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
 
@@ -786,6 +805,8 @@ impl QueryExecutor {
             });
         }
 
+        let mut with_rows = with_rows;
+        self.populate_labels_and_missing_properties(&mut with_rows, &query.return_items);
         let batch = self.build_record_batch(&query.return_items, &with_rows)?;
         let count = batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
 
@@ -1237,6 +1258,12 @@ impl QueryExecutor {
                 None
             };
 
+            let dst_label = if let Some(ref l) = node_pat.label {
+                schema.get_vertex_schema(l).map(|s| s.label_id)
+            } else {
+                None
+            };
+
             if edge_pat.min_hops == 1 && edge_pat.max_hops == Some(1) {
                 current_plan = PhysicalOperator::ExpandEdges {
                     input: Box::new(current_plan),
@@ -1244,6 +1271,7 @@ impl QueryExecutor {
                     edge_var,
                     dst_var: dst_var.clone(),
                     edge_type,
+                    dst_label,
                 };
             } else {
                 current_plan = PhysicalOperator::VarLengthExpand {
@@ -1252,6 +1280,7 @@ impl QueryExecutor {
                     edge_var,
                     dst_var: dst_var.clone(),
                     edge_type,
+                    dst_label,
                     min_hops: edge_pat.min_hops,
                     max_hops: edge_pat.max_hops,
                 };
@@ -1338,7 +1367,7 @@ impl QueryExecutor {
                 }
                 Ok(rows)
             }
-            PhysicalOperator::ExpandEdges { input, src_var, edge_var, dst_var, edge_type } => {
+            PhysicalOperator::ExpandEdges { input, src_var, edge_var, dst_var, edge_type, dst_label } => {
                 let input_rows = self.execute_plan(input, snapshot)?;
                 let mut output_rows = Vec::new();
 
@@ -1383,7 +1412,10 @@ impl QueryExecutor {
                             if let Some(ev) = edge_var {
                                 new_row.edges.insert(ev.clone(), edge);
                             }
-                            new_row.vertices.insert(dst_var.clone(), (edge.dst, LabelId(1)));
+                            let target_lid = (*dst_label)
+                                .or_else(|| self.storage.get_vertex_label(edge.dst))
+                                .unwrap_or(LabelId(1));
+                            new_row.vertices.insert(dst_var.clone(), (edge.dst, target_lid));
                             output_rows.push(new_row);
                         }
                     }
@@ -1397,6 +1429,7 @@ impl QueryExecutor {
                 edge_var,
                 dst_var,
                 edge_type,
+                dst_label,
                 min_hops,
                 max_hops,
             } => {
@@ -1421,7 +1454,10 @@ impl QueryExecutor {
                                         let d = depth as usize;
                                         if d >= *min_hops && d <= max_depth && reached_vid != start_vid {
                                             let mut new_row = row.clone();
-                                            new_row.vertices.insert(dst_var.clone(), (reached_vid, LabelId(1)));
+                                            let reached_lid = (*dst_label)
+                                                .or_else(|| self.storage.get_vertex_label(reached_vid))
+                                                .unwrap_or(LabelId(1));
+                                            new_row.vertices.insert(dst_var.clone(), (reached_vid, reached_lid));
                                             output_rows.push(new_row);
                                         }
                                     }
@@ -1439,7 +1475,10 @@ impl QueryExecutor {
                                 if let (Some(ev), Some(le)) = (edge_var, last_edge) {
                                     new_row.edges.insert(ev.clone(), le);
                                 }
-                                new_row.vertices.insert(dst_var.clone(), (curr_vid, LabelId(1)));
+                                let curr_lid = (*dst_label)
+                                    .or_else(|| self.storage.get_vertex_label(curr_vid))
+                                    .unwrap_or(LabelId(1));
+                                new_row.vertices.insert(dst_var.clone(), (curr_vid, curr_lid));
                                 output_rows.push(new_row);
                             }
 
@@ -1472,7 +1511,8 @@ impl QueryExecutor {
                 Ok(output_rows)
             }
             PhysicalOperator::Filter { input, predicate } => {
-                let input_rows = self.execute_plan(input, snapshot)?;
+                let mut input_rows = self.execute_plan(input, snapshot)?;
+                self.resolve_missing_properties_for_expr(&mut input_rows, predicate);
                 let mut filtered = Vec::new();
                 for row in input_rows {
                     let res = eval_expr(predicate, &row, &self.storage)?;
@@ -2089,5 +2129,141 @@ impl QueryExecutor {
             }
         }
         Ok(columns)
+    }
+
+    pub fn populate_labels_and_missing_properties(&self, rows: &mut [PathRow], return_items: &[ReturnItem]) {
+        let schema = self.schema.read();
+        for row in rows.iter_mut() {
+            for (var, &(vid, lid)) in &row.vertices {
+                let key = format!("{}.__label", var);
+                if !row.custom_values.contains_key(&key) {
+                    if let Some(s) = schema.get_vertex_schema_by_id(lid) {
+                        row.custom_values.insert(key, DataValue::String(s.label.clone()));
+                    } else if let Some(other_lid) = self.storage.get_vertex_label(vid) {
+                        if let Some(s) = schema.get_vertex_schema_by_id(other_lid) {
+                            row.custom_values.insert(key, DataValue::String(s.label.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut props_to_fetch: Vec<(String, String)> = Vec::new();
+        let mut whole_nodes: Vec<String> = Vec::new();
+
+        for item in return_items {
+            extract_properties_from_expr(&item.expr, &mut props_to_fetch);
+            if let Expr::Variable(var) = &item.expr {
+                whole_nodes.push(var.clone());
+            }
+        }
+
+        if let Some(ref resolver) = self.remote_property_resolver {
+            for (var, prop) in &props_to_fetch {
+                let compound = format!("{}.{}", var, prop);
+                let mut missing_by_label: HashMap<Option<LabelId>, Vec<VertexId>> = HashMap::new();
+
+                for row in rows.iter() {
+                    if row.custom_values.contains_key(&compound) {
+                        continue;
+                    }
+                    if let Some(&(vid, lid)) = row.vertices.get(var) {
+                        if prop == "id" || prop == "_id" || prop == "label" || prop == "_label" {
+                            continue;
+                        }
+                        if self.storage.get_vertex_property(vid, lid, prop).is_none() {
+                            missing_by_label.entry(Some(lid)).or_default().push(vid);
+                        }
+                    }
+                }
+
+                for (lid_opt, mut vids) in missing_by_label {
+                    vids.sort_unstable();
+                    vids.dedup();
+                    let prop_names = vec![prop.clone()];
+                    let remote_res = resolver.batch_get_vertex_properties(&vids, lid_opt, Some(&prop_names));
+                    for row in rows.iter_mut() {
+                        if let Some(&(vid, _)) = row.vertices.get(var) {
+                            if let Some(props) = remote_res.get(&vid) {
+                                if let Some(val) = props.get(prop) {
+                                    row.custom_values.insert(compound.clone(), val.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for var in &whole_nodes {
+                let mut missing_vids: Vec<VertexId> = Vec::new();
+                for row in rows.iter() {
+                    if row.custom_values.contains_key(var) {
+                        continue;
+                    }
+                    if let Some(&(vid, lid)) = row.vertices.get(var) {
+                        if self.storage.get_all_vertex_properties(vid, Some(lid)).is_none() {
+                            missing_vids.push(vid);
+                        }
+                    }
+                }
+
+                if !missing_vids.is_empty() {
+                    missing_vids.sort_unstable();
+                    missing_vids.dedup();
+                    let remote_res = resolver.batch_get_vertex_properties(&missing_vids, None, None);
+                    for row in rows.iter_mut() {
+                        if let Some(&(vid, lid)) = row.vertices.get(var) {
+                            if let Some(props) = remote_res.get(&vid) {
+                                let mut entity = serde_json::Map::new();
+                                entity.insert("id".to_string(), serde_json::json!(vid.as_u64()));
+                                let label_str = schema.get_vertex_schema_by_id(lid)
+                                    .map(|s| s.label.clone())
+                                    .unwrap_or_else(|| format!("Label_{}", lid.0));
+                                entity.insert("label".to_string(), serde_json::json!(label_str));
+                                let mut prop_obj = serde_json::Map::new();
+                                for (k, v) in props {
+                                    if let Ok(jv) = serde_json::to_value(v) {
+                                        prop_obj.insert(k.clone(), jv);
+                                    }
+                                }
+                                entity.insert("properties".to_string(), serde_json::Value::Object(prop_obj));
+                                row.custom_values.insert(var.clone(), DataValue::String(serde_json::Value::Object(entity).to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn resolve_missing_properties_for_expr(&self, rows: &mut [PathRow], expr: &Expr) {
+        let mut props = Vec::new();
+        extract_properties_from_expr(expr, &mut props);
+        let items: Vec<ReturnItem> = props
+            .into_iter()
+            .map(|(variable, property)| ReturnItem {
+                expr: Expr::Property { variable, property },
+                alias: None,
+            })
+            .collect();
+        self.populate_labels_and_missing_properties(rows, &items);
+    }
+}
+
+fn extract_properties_from_expr(expr: &Expr, props: &mut Vec<(String, String)>) {
+    match expr {
+        Expr::Property { variable, property } => {
+            props.push((variable.clone(), property.clone()));
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            extract_properties_from_expr(left, props);
+            extract_properties_from_expr(right, props);
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                extract_properties_from_expr(arg, props);
+            }
+        }
+        _ => {}
     }
 }
