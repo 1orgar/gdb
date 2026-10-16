@@ -49,11 +49,11 @@ jobs:
         run: |
           echo "### 📊 GDB Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          cargo llvm-cov --workspace --summary-only >> $GITHUB_STEP_SUMMARY
+          cargo llvm-cov --no-run --workspace --all-targets --summary-only >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Enforce Minimum 80% Line Coverage Threshold
-        run: cargo llvm-cov --workspace --fail-under-lines 80 --summary-only
+        run: cargo llvm-cov --no-run --workspace --all-targets --fail-under-lines 80 --summary-only
 
       - name: Upload LCOV Coverage Artifact
         uses: actions/upload-artifact@v4

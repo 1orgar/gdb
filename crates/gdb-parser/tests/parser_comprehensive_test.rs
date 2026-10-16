@@ -235,3 +235,132 @@ fn test_keyword_identifiers_and_backticks() {
     assert_eq!(parts[1], "DROP EDGE EDGE");
 }
 
+#[test]
+fn test_parser_advanced_statements() {
+    // 1. ANALYZE GRAPH
+    let stmt = parse("ANALYZE GRAPH;").unwrap();
+    assert_eq!(stmt, Statement::AnalyzeGraph);
+
+    // 2. DELETE EDGE
+    let stmt = parse("DELETE EDGE FOLLOWS FROM 100 TO 200;").unwrap();
+    if let Statement::DeleteEdge { edge_type, src, dst, rank } = stmt {
+        assert_eq!(edge_type, "FOLLOWS");
+        assert_eq!(src.0, 100);
+        assert_eq!(dst.0, 200);
+        assert_eq!(rank, 0);
+    } else {
+        panic!("Expected DeleteEdge");
+    }
+
+    // 3. MERGE VERTEX
+    let stmt = parse("MERGE VERTEX User (id, name) VALUES (55, 'Eve');").unwrap();
+    if let Statement::MergeVertex { label, id, properties } = stmt {
+        assert_eq!(label, "User");
+        assert_eq!(id.0, 55);
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties[0].0, "name");
+    } else {
+        panic!("Expected MergeVertex");
+    }
+
+    // 4. CALL vector.similaritySearch
+    let stmt = parse("CALL vector.similaritySearch({topK: 10, metric: 'cosine'}) YIELD nodeId, score;").unwrap();
+    if let Statement::CallAlgorithm { algorithm, args, yield_items } = stmt {
+        assert_eq!(algorithm, "vector.similaritySearch");
+        assert!(args.contains_key("topK"));
+        assert_eq!(yield_items, vec!["nodeId", "score"]);
+    } else {
+        panic!("Expected CallAlgorithm");
+    }
+
+    // 5. Complex WITH clause query
+    let query_str = "MATCH (a:Person)-[:FRIEND]->(b:Person) WITH DISTINCT a, count(*) AS friend_count WHERE friend_count > 5 ORDER BY friend_count DESC SKIP 2 LIMIT 10 RETURN a.name, friend_count;";
+    let stmt = parse(query_str).unwrap();
+    if let Statement::Query(q) = stmt {
+        assert!(q.with_clause.is_some());
+        let with_c = q.with_clause.unwrap();
+        assert!(with_c.distinct);
+        assert!(with_c.where_clause.is_some());
+        assert_eq!(with_c.skip, Some(2));
+        assert_eq!(with_c.limit, Some(10));
+        assert_eq!(with_c.order_by.len(), 1);
+    } else {
+        panic!("Expected Query with WITH clause");
+    }
+
+    // 6. Multi-statement script with comments
+    let script = r#"
+        // Create vertex
+        CREATE VERTEX Device (mac STRING, ip STRING);
+        /* Insert device */
+        INSERT VERTEX Device (id, mac, ip) VALUES (1, 'AA:BB:CC', '10.0.0.1');
+        SHOW SCHEMA;
+    "#;
+    let statements = parse_script(script).unwrap();
+    assert_eq!(statements.len(), 3);
+}
+
+#[test]
+fn test_parser_full_grammar_sweep() {
+    // 1. All data types in DDL
+    let ddl_types = "CREATE VERTEX FullTypes (i INT64, f FLOAT64, s STRING, b BOOLEAN, dt TIMESTAMP, v VECTOR(128));";
+    let stmt = parse(ddl_types).unwrap();
+    if let Statement::CreateVertexLabel { label, properties } = stmt {
+        assert_eq!(label, "FullTypes");
+        assert_eq!(properties.len(), 6);
+    } else {
+        panic!("Expected CreateVertexLabel");
+    }
+
+    // 2. Patterns: directed multi-hop
+    let q_dir = parse("MATCH (a:Person)-[r:KNOWS]->(b:Person)-[:WORKS_AT]->(c:Company) RETURN a.name, b.name, c.name;").unwrap();
+    assert!(matches!(q_dir, Statement::Query(_)));
+
+    // 3. Variable length paths (*..3 and *2..)
+    let q_vl1 = parse("MATCH (a:Person)-[:KNOWS*..3]->(b:Person) RETURN a.name;").unwrap();
+    assert!(matches!(q_vl1, Statement::Query(_)));
+
+    let q_vl2 = parse("MATCH (a:Person)-[:KNOWS*2..]->(b:Person) RETURN a.name;").unwrap();
+    assert!(matches!(q_vl2, Statement::Query(_)));
+
+    // 4. Boolean logic & comparisons
+    let q_bool = parse("MATCH (p:Person) WHERE NOT (p.age < 18) AND (p.active = true OR p.score >= 100) RETURN p.name;").unwrap();
+    assert!(matches!(q_bool, Statement::Query(_)));
+
+    // 5. All CALL algo procedures
+    let algos = vec![
+        "CALL algo.pageRank() YIELD vertex_id, score;",
+        "CALL algo.wcc() YIELD vertex_id, component_id;",
+        "CALL algo.louvain() YIELD vertex_id, community_id;",
+        "CALL algo.triangleCount() YIELD vertex_id, triangles;",
+        "CALL algo.scc() YIELD vertex_id, component_id;",
+        "CALL algo.lpa() YIELD vertex_id, community_id;",
+        "CALL algo.kcore() YIELD vertex_id, coreness;",
+        "CALL algo.betweenness() YIELD vertex_id, centrality;",
+        "CALL algo.closeness() YIELD vertex_id, centrality;",
+        "CALL algo.degree() YIELD vertex_id, degree;",
+        "CALL algo.sssp({source: 1}) YIELD vertex_id, distance;",
+        "CALL algo.similarity({node1: 1, node2: 2}) YIELD score;",
+        "CALL algo.node2vec({walk_length: 5, walks_per_vertex: 2}) YIELD vertex_id, embedding;",
+    ];
+    for a in algos {
+        assert!(parse(a).is_ok());
+    }
+
+    // 6. Show and Drop statements
+    assert!(matches!(parse("SHOW SCHEMA;").unwrap(), Statement::ShowSchema));
+    assert!(matches!(parse("SHOW VERTICES;").unwrap(), Statement::ShowVertexLabels));
+    assert!(matches!(parse("SHOW EDGES;").unwrap(), Statement::ShowEdgeTypes));
+    assert!(matches!(parse("SHOW TAGS;").unwrap(), Statement::ShowVertexLabels));
+    assert!(matches!(parse("DROP VERTEX Person;").unwrap(), Statement::DropVertexLabel { .. }));
+    assert!(matches!(parse("DROP EDGE KNOWS;").unwrap(), Statement::DropEdgeType { .. }));
+    assert!(matches!(parse("DROP INDEX ON :Person(name);").unwrap(), Statement::DropIndex { .. }));
+
+    // 7. Alter statements
+    assert!(matches!(parse("ALTER VERTEX Person ADD (status STRING);").unwrap(), Statement::AlterVertexLabel { .. }));
+    assert!(matches!(parse("ALTER VERTEX Person DROP (status);").unwrap(), Statement::AlterVertexLabel { .. }));
+    assert!(matches!(parse("ALTER EDGE KNOWS ADD (weight FLOAT64);").unwrap(), Statement::AlterEdgeType { .. }));
+    assert!(matches!(parse("ALTER EDGE KNOWS DROP (weight);").unwrap(), Statement::AlterEdgeType { .. }));
+}
+
+

@@ -18,7 +18,12 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let manager = MultiRaftManager::new(1, 4, tmp_dir.path().to_path_buf());
 
-        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
+        let mut graph_schema = GraphSchema::new("test");
+        graph_schema.register_vertex_label(
+            "User",
+            vec![gdb_core::PropertySpec::new("name", gdb_core::DataType::String, false)],
+        ).unwrap();
+        let schema = Arc::new(RwLock::new(graph_schema));
         let engine_p0 = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
         let engine_p1 = Arc::new(PartitionStorageEngine::new(1, schema.clone()));
 
@@ -48,5 +53,38 @@ mod tests {
         // Verify storage received edges
         assert_eq!(engine_p0.get_out_edges(v0, Some(EdgeType(1)), 100).len(), 1);
         assert_eq!(engine_p1.get_out_edges(v1, Some(EdgeType(1)), 100).len(), 1);
+
+        // DeleteEdge mutation
+        let del_resp = manager.route_mutation(
+            v0,
+            RaftMutation::DeleteEdge {
+                edge: EdgeId::simple(v0, EdgeType(1), VertexId(10)),
+            },
+        ).unwrap();
+        assert!(del_resp.success);
+
+        // InsertVertex mutation
+        let mut props = std::collections::HashMap::new();
+        props.insert("name".to_string(), gdb_core::DataValue::String("Alice".into()));
+        let v_resp = manager.route_mutation(
+            v0,
+            RaftMutation::InsertVertex {
+                label_id: gdb_core::LabelId(1),
+                id: v0,
+                properties: props,
+            },
+        ).unwrap();
+        assert!(v_resp.success);
+
+        // Routing to unhosted partition (Vertex 2 -> partition 2 not registered)
+        let v2 = VertexId(2);
+        let err_resp = manager.route_mutation(
+            v2,
+            RaftMutation::InsertEdge {
+                edge: EdgeId::simple(v2, EdgeType(1), VertexId(30)),
+            },
+        );
+        assert!(err_resp.is_err());
+        assert!(manager.get_group(999).is_none());
     }
 }

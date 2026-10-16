@@ -153,3 +153,186 @@ pub fn eval_binary_op(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdb_core::schema::GraphSchema;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_eval_binary_ops() {
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(5), &BinaryOperator::Eq, &DataValue::Int64(5)).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(5), &BinaryOperator::NotEq, &DataValue::Int64(6)).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(3), &BinaryOperator::Lt, &DataValue::Int64(5)).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(5), &BinaryOperator::LtEq, &DataValue::Int64(5)).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(7), &BinaryOperator::Gt, &DataValue::Int64(5)).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(7), &BinaryOperator::GtEq, &DataValue::Int64(7)).unwrap(),
+            DataValue::Boolean(true)
+        );
+
+        // Boolean And / Or
+        assert_eq!(
+            eval_binary_op(&DataValue::Boolean(true), &BinaryOperator::And, &DataValue::Boolean(false)).unwrap(),
+            DataValue::Boolean(false)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Boolean(true), &BinaryOperator::Or, &DataValue::Boolean(false)).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(1), &BinaryOperator::And, &DataValue::Boolean(true)).unwrap(),
+            DataValue::Boolean(false)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(1), &BinaryOperator::Or, &DataValue::Boolean(true)).unwrap(),
+            DataValue::Boolean(false)
+        );
+
+        // Plus / Minus
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(10), &BinaryOperator::Plus, &DataValue::Int64(20)).unwrap(),
+            DataValue::Int64(30)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Float64(1.5), &BinaryOperator::Plus, &DataValue::Float64(2.5)).unwrap(),
+            DataValue::Float64(4.0)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::String("hello ".into()), &BinaryOperator::Plus, &DataValue::String("world".into())).unwrap(),
+            DataValue::String("hello world".into())
+        );
+        assert!(eval_binary_op(&DataValue::Boolean(true), &BinaryOperator::Plus, &DataValue::Int64(1)).is_err());
+
+        assert_eq!(
+            eval_binary_op(&DataValue::Int64(30), &BinaryOperator::Minus, &DataValue::Int64(10)).unwrap(),
+            DataValue::Int64(20)
+        );
+        assert_eq!(
+            eval_binary_op(&DataValue::Float64(4.5), &BinaryOperator::Minus, &DataValue::Float64(1.5)).unwrap(),
+            DataValue::Float64(3.0)
+        );
+        assert!(eval_binary_op(&DataValue::String("a".into()), &BinaryOperator::Minus, &DataValue::String("b".into())).is_err());
+    }
+
+    #[test]
+    fn test_eval_expressions_and_functions() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
+        let storage = PartitionStorageEngine::new(0, schema.clone());
+        let mut row = PathRow::default();
+
+        row.custom_values.insert("val".to_string(), DataValue::Int64(42));
+        row.vertices.insert("n".to_string(), (VertexId(101), LabelId(1)));
+        row.custom_values.insert("n.__label".to_string(), DataValue::String("User".to_string()));
+
+        // Literal
+        assert_eq!(
+            eval_expr(&Expr::Literal(DataValue::Int64(99)), &row, &storage).unwrap(),
+            DataValue::Int64(99)
+        );
+
+        // Variable from custom_values
+        assert_eq!(
+            eval_expr(&Expr::Variable("val".to_string()), &row, &storage).unwrap(),
+            DataValue::Int64(42)
+        );
+
+        // Variable from vertices (serialized JSON entity)
+        let ent = eval_expr(&Expr::Variable("n".to_string()), &row, &storage).unwrap();
+        if let DataValue::String(s) = ent {
+            assert!(s.contains("\"id\":101"));
+            assert!(s.contains("\"label\":\"User\""));
+        } else {
+            panic!("Expected serialized JSON string entity");
+        }
+
+        // Unbound variable
+        assert!(eval_expr(&Expr::Variable("unbound".to_string()), &row, &storage).is_err());
+
+        // Property id / _id / label / _label
+        assert_eq!(
+            eval_expr(&Expr::Property { variable: "n".into(), property: "id".into() }, &row, &storage).unwrap(),
+            DataValue::Int64(101)
+        );
+        assert_eq!(
+            eval_expr(&Expr::Property { variable: "n".into(), property: "_id".into() }, &row, &storage).unwrap(),
+            DataValue::Int64(101)
+        );
+        assert_eq!(
+            eval_expr(&Expr::Property { variable: "n".into(), property: "label".into() }, &row, &storage).unwrap(),
+            DataValue::String("User".into())
+        );
+        assert_eq!(
+            eval_expr(&Expr::Property { variable: "n".into(), property: "_label".into() }, &row, &storage).unwrap(),
+            DataValue::String("User".into())
+        );
+
+        // Compound property in custom_values
+        row.custom_values.insert("n.custom".into(), DataValue::String("prop_val".into()));
+        assert_eq!(
+            eval_expr(&Expr::Property { variable: "n".into(), property: "custom".into() }, &row, &storage).unwrap(),
+            DataValue::String("prop_val".into())
+        );
+
+        // Missing property in storage
+        assert_eq!(
+            eval_expr(&Expr::Property { variable: "n".into(), property: "non_existent".into() }, &row, &storage).unwrap(),
+            DataValue::Null
+        );
+
+        // Unbound vertex property
+        assert!(eval_expr(&Expr::Property { variable: "unknown".into(), property: "x".into() }, &row, &storage).is_err());
+
+        // BinaryOp in expr
+        let add_expr = Expr::BinaryOp {
+            left: Box::new(Expr::Literal(DataValue::Int64(10))),
+            op: BinaryOperator::Plus,
+            right: Box::new(Expr::Literal(DataValue::Int64(20))),
+        };
+        assert_eq!(eval_expr(&add_expr, &row, &storage).unwrap(), DataValue::Int64(30));
+
+        // CountStar returns error
+        assert!(eval_expr(&Expr::CountStar, &row, &storage).is_err());
+
+        // Functions: id, _id, label, labels
+        assert_eq!(
+            eval_expr(&Expr::FunctionCall { name: "id".into(), args: vec![Expr::Variable("n".into())] }, &row, &storage).unwrap(),
+            DataValue::Int64(101)
+        );
+        assert_eq!(
+            eval_expr(&Expr::FunctionCall { name: "_ID".into(), args: vec![Expr::Variable("n".into())] }, &row, &storage).unwrap(),
+            DataValue::Int64(101)
+        );
+        assert_eq!(
+            eval_expr(&Expr::FunctionCall { name: "label".into(), args: vec![Expr::Variable("n".into())] }, &row, &storage).unwrap(),
+            DataValue::String("User".into())
+        );
+        assert_eq!(
+            eval_expr(&Expr::FunctionCall { name: "labels".into(), args: vec![Expr::Variable("n".into())] }, &row, &storage).unwrap(),
+            DataValue::List(vec![DataValue::String("User".into())])
+        );
+
+        // Unknown function & errors
+        assert!(eval_expr(&Expr::FunctionCall { name: "id".into(), args: vec![] }, &row, &storage).is_err());
+        assert!(eval_expr(&Expr::FunctionCall { name: "label".into(), args: vec![] }, &row, &storage).is_err());
+        assert!(eval_expr(&Expr::FunctionCall { name: "labels".into(), args: vec![] }, &row, &storage).is_err());
+        assert!(eval_expr(&Expr::FunctionCall { name: "unknown_fn".into(), args: vec![] }, &row, &storage).is_err());
+    }
+}

@@ -74,3 +74,89 @@ pub fn calculate_replica_set(key: u64, ring: &[RingNode], rf: u32) -> Vec<RingNo
     }
     replicas
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_peer_host_and_port() {
+        assert_eq!(parse_peer_host_and_port("http://192.168.1.10:9000"), ("192.168.1.10".to_string(), 9000));
+        assert_eq!(parse_peer_host_and_port("https://myhost.domain:8080/"), ("myhost.domain".to_string(), 8080));
+        assert_eq!(parse_peer_host_and_port("10.0.0.1"), ("10.0.0.1".to_string(), 8847));
+        assert_eq!(parse_peer_host_and_port(":7777"), ("127.0.0.1".to_string(), 7777));
+        assert_eq!(parse_peer_host_and_port(""), ("127.0.0.1".to_string(), 8847));
+    }
+
+    #[test]
+    fn test_build_ring_nodes() {
+        let peers = vec![
+            "http://127.0.0.1:8847".to_string(),
+            "http://127.0.0.1:8846".to_string(),
+            "http://127.0.0.1:8845".to_string(),
+            "http://10.0.0.5:9999".to_string(),
+        ];
+        let nodes = build_ring_nodes(1, 8847, "127.0.0.1", 8848, "127.0.0.1", 8860, &peers);
+        assert!(!nodes.is_empty());
+        assert!(nodes.iter().any(|n| n.node_id == 1));
+        assert!(nodes.iter().any(|n| n.node_id == 2));
+        assert!(nodes.iter().any(|n| n.node_id == 3));
+
+        // Ensure sorted and deduped
+        for i in 1..nodes.len() {
+            assert!(nodes[i].node_id > nodes[i - 1].node_id);
+        }
+    }
+
+    #[test]
+    fn test_calculate_replica_set() {
+        let ring = vec![
+            RingNode {
+                node_id: 1,
+                http_url: "http://127.0.0.1:8847".to_string(),
+                flight_address: "127.0.0.1".to_string(),
+                flight_port: 8848,
+                client_flight_address: "127.0.0.1".to_string(),
+                client_flight_port: 8860,
+            },
+            RingNode {
+                node_id: 2,
+                http_url: "http://127.0.0.1:8846".to_string(),
+                flight_address: "127.0.0.1".to_string(),
+                flight_port: 8849,
+                client_flight_address: "127.0.0.1".to_string(),
+                client_flight_port: 8861,
+            },
+            RingNode {
+                node_id: 3,
+                http_url: "http://127.0.0.1:8845".to_string(),
+                flight_address: "127.0.0.1".to_string(),
+                flight_port: 8850,
+                client_flight_address: "127.0.0.1".to_string(),
+                client_flight_port: 8862,
+            },
+        ];
+
+        // Empty ring
+        assert!(calculate_replica_set(10, &[], 2).is_empty());
+
+        // RF = 1
+        let r1 = calculate_replica_set(0, &ring, 1);
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r1[0].node_id, 1);
+
+        let r2 = calculate_replica_set(1, &ring, 1);
+        assert_eq!(r2.len(), 1);
+        assert_eq!(r2[0].node_id, 2);
+
+        // RF = 2 (wraparound)
+        let r_wrap = calculate_replica_set(2, &ring, 2);
+        assert_eq!(r_wrap.len(), 2);
+        assert_eq!(r_wrap[0].node_id, 3);
+        assert_eq!(r_wrap[1].node_id, 1);
+
+        // RF > ring.len()
+        let r_large = calculate_replica_set(0, &ring, 10);
+        assert_eq!(r_large.len(), 3);
+    }
+}

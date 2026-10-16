@@ -2,7 +2,7 @@ use arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::flight_service_client::FlightServiceClient;
-use arrow_flight::{HandshakeRequest, Ticket};
+use arrow_flight::{FlightData, HandshakeRequest, Ticket};
 use futures::StreamExt;
 use gdb_core::schema::GraphSchema;
 use gdb_flight::{GdbClientFlightService, ShufflePartitioner};
@@ -224,4 +224,146 @@ fn test_mpp_shuffle_partitioner_multi_partition() {
         assert_eq!(part_batch.num_rows(), 125);
     }
     assert_eq!(total_count_8, num_rows);
+}
+
+#[tokio::test]
+async fn test_flight_unimplemented_and_error_handling() {
+    let (endpoint, _, _, _) = setup_test_flight_server().await;
+    let mut client = FlightServiceClient::connect(endpoint).await.unwrap();
+
+    // 1. Invalid ticket parse error
+    let err = client.do_get(Ticket { ticket: "INVALID SYNTAX %%%".into() }).await;
+    assert!(err.is_err());
+
+    // 2. list_flights unimplemented
+    let res = client.list_flights(arrow_flight::Criteria::default()).await;
+    assert!(res.is_err());
+
+    // 3. get_flight_info unimplemented
+    let res = client.get_flight_info(arrow_flight::FlightDescriptor::new_cmd("cmd")).await;
+    assert!(res.is_err());
+
+    // 4. poll_flight_info unimplemented
+    let res = client.poll_flight_info(arrow_flight::FlightDescriptor::new_cmd("cmd")).await;
+    assert!(res.is_err());
+
+    // 5. get_schema unimplemented
+    let res = client.get_schema(arrow_flight::FlightDescriptor::new_cmd("cmd")).await;
+    assert!(res.is_err());
+
+    // 6. do_action unimplemented
+    let res = client.do_action(arrow_flight::Action { r#type: "custom".into(), body: bytes::Bytes::new() }).await;
+    assert!(res.is_err());
+
+    // 7. list_actions unimplemented
+    let res = client.list_actions(arrow_flight::Empty {}).await;
+    assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn test_flight_client_service_advanced_ingest_and_errors() {
+    let (endpoint, _schema, _storage, _) = setup_test_flight_server().await;
+    let mut client = FlightServiceClient::connect(endpoint).await.unwrap();
+
+    // 1. Ingest edge with app_metadata descriptor and rank + edge_type columns
+    let e_schema = Arc::new(Schema::new(vec![
+        Field::new("src", DataType::Int64, false),
+        Field::new("dst", DataType::Int64, false),
+        Field::new("rank", DataType::Int64, false),
+        Field::new("edge_type", DataType::Utf8, false),
+        Field::new("weight", DataType::Float64, false),
+    ]));
+    let e_batch = RecordBatch::try_new(
+        e_schema.clone(),
+        vec![
+            Arc::new(arrow::array::Int64Array::from(vec![1001, 1002])) as ArrayRef,
+            Arc::new(arrow::array::Int64Array::from(vec![2001, 2002])) as ArrayRef,
+            Arc::new(arrow::array::Int64Array::from(vec![0, 1])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["FOLLOWS", "BLOCKS"])) as ArrayRef,
+            Arc::new(arrow::array::Float64Array::from(vec![1.5, 2.5])) as ArrayRef,
+        ],
+    ).unwrap();
+
+    let mut fd_vec = FlightDataEncoderBuilder::new()
+        .with_schema(e_schema.clone())
+        .build(futures::stream::once(async move { Ok(e_batch) }))
+        .map(|r| r.unwrap())
+        .collect::<Vec<FlightData>>()
+        .await;
+
+    let desc_json = serde_json::json!({
+        "type": "edge",
+        "edge_type": "FOLLOWS"
+    }).to_string();
+    fd_vec[0].app_metadata = bytes::Bytes::from(desc_json);
+
+    let put_resp = client.do_put(futures::stream::iter(fd_vec)).await.unwrap();
+    let mut put_stream = put_resp.into_inner();
+    while let Some(res) = put_stream.next().await {
+        assert!(res.is_ok());
+    }
+
+    // 2. Ingest edge with missing src column -> fails
+    let bad_schema = Arc::new(Schema::new(vec![
+        Field::new("dst", DataType::UInt64, false),
+    ]));
+    let bad_batch = RecordBatch::try_new(
+        bad_schema.clone(),
+        vec![Arc::new(UInt64Array::from(vec![1])) as ArrayRef],
+    ).unwrap();
+    let mut bad_fd = FlightDataEncoderBuilder::new()
+        .with_schema(bad_schema)
+        .build(futures::stream::once(async move { Ok(bad_batch) }))
+        .map(|r| r.unwrap())
+        .collect::<Vec<FlightData>>()
+        .await;
+    bad_fd[0].flight_descriptor = Some(arrow_flight::FlightDescriptor::new_cmd(r#"{"type":"edge"}"#));
+    let mut put_stream = client.do_put(futures::stream::iter(bad_fd)).await.unwrap().into_inner();
+    let first = put_stream.next().await;
+    assert!(first.is_none() || first.unwrap().is_err());
+
+    // 3. Ingest vertex with string ID and empty batch
+    let v_str_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("label", DataType::Utf8, false),
+    ]));
+    let empty_batch = RecordBatch::new_empty(v_str_schema.clone());
+    let v_str_batch = RecordBatch::try_new(
+        v_str_schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["device_001"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["Device"])) as ArrayRef,
+        ],
+    ).unwrap();
+
+    let mut fd_str = FlightDataEncoderBuilder::new()
+        .with_schema(v_str_schema)
+        .build(futures::stream::iter(vec![Ok(empty_batch), Ok(v_str_batch)]))
+        .map(|r| r.unwrap())
+        .collect::<Vec<FlightData>>()
+        .await;
+    fd_str[0].flight_descriptor = Some(arrow_flight::FlightDescriptor::new_cmd(r#"{"type":"vertex","label":"Device"}"#));
+    let mut put_stream = client.do_put(futures::stream::iter(fd_str)).await.unwrap().into_inner();
+    while let Some(res) = put_stream.next().await {
+        assert!(res.is_ok());
+    }
+
+    // 4. Ingest vertex with missing id column -> fails
+    let no_id_schema = Arc::new(Schema::new(vec![
+        Field::new("val", DataType::Utf8, false),
+    ]));
+    let no_id_batch = RecordBatch::try_new(
+        no_id_schema.clone(),
+        vec![Arc::new(StringArray::from(vec!["hello"])) as ArrayRef],
+    ).unwrap();
+    let mut fd_no_id = FlightDataEncoderBuilder::new()
+        .with_schema(no_id_schema)
+        .build(futures::stream::once(async move { Ok(no_id_batch) }))
+        .map(|r| r.unwrap())
+        .collect::<Vec<FlightData>>()
+        .await;
+    fd_no_id[0].flight_descriptor = Some(arrow_flight::FlightDescriptor::new_cmd(r#"{"type":"vertex"}"#));
+    let mut put_stream = client.do_put(futures::stream::iter(fd_no_id)).await.unwrap().into_inner();
+    let first = put_stream.next().await;
+    assert!(first.is_none() || first.unwrap().is_err());
 }

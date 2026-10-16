@@ -202,6 +202,40 @@ impl Lexer {
                 continue;
             }
 
+            // Line comments: //, --, #
+            if ch == '/' && self.peek_next() == Some('/') {
+                while let Some(c) = self.advance() {
+                    if c == '\n' { break; }
+                }
+                continue;
+            }
+            if ch == '-' && self.peek_next() == Some('-') {
+                self.advance();
+                self.advance();
+                while let Some(c) = self.advance() {
+                    if c == '\n' { break; }
+                }
+                continue;
+            }
+            if ch == '#' {
+                while let Some(c) = self.advance() {
+                    if c == '\n' { break; }
+                }
+                continue;
+            }
+            // Block comments: /* ... */
+            if ch == '/' && self.peek_next() == Some('*') {
+                self.advance();
+                self.advance();
+                while let Some(c) = self.advance() {
+                    if c == '*' && self.peek() == Some('/') {
+                        self.advance();
+                        break;
+                    }
+                }
+                continue;
+            }
+
             match ch {
                 '(' => { self.advance(); tokens.push(Token::LParen); }
                 ')' => { self.advance(); tokens.push(Token::RParen); }
@@ -1175,6 +1209,12 @@ impl Parser {
                 }
             }
 
+            let mut with_where = None;
+            if self.peek() == Some(&Token::Where) {
+                self.advance();
+                with_where = Some(self.parse_expr()?);
+            }
+
             let mut with_order_by = Vec::new();
             if self.peek() == Some(&Token::Order) {
                 self.advance();
@@ -1215,8 +1255,7 @@ impl Parser {
                 }
             }
 
-            let mut with_where = None;
-            if self.peek() == Some(&Token::Where) {
+            if with_where.is_none() && self.peek() == Some(&Token::Where) {
                 self.advance();
                 with_where = Some(self.parse_expr()?);
             }
@@ -1683,6 +1722,12 @@ impl Parser {
 
     fn parse_primary_expr(&mut self) -> GdbResult<Expr> {
         match self.peek() {
+            Some(Token::LParen) => {
+                self.advance();
+                let inner = self.parse_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(inner)
+            }
             Some(Token::Count) => {
                 self.advance();
                 self.expect(&Token::LParen)?;
@@ -1794,6 +1839,7 @@ pub fn split_statements(input: &str) -> Vec<String> {
     let mut in_double_quote = false;
     let mut in_backtick = false;
     let mut in_line_comment = false;
+    let mut in_block_comment = false;
     let mut chars = input.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -1801,6 +1847,14 @@ pub fn split_statements(input: &str) -> Vec<String> {
             if ch == '\n' {
                 in_line_comment = false;
                 current.push(ch);
+            }
+            continue;
+        }
+
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
             }
             continue;
         }
@@ -1841,7 +1895,7 @@ pub fn split_statements(input: &str) -> Vec<String> {
             continue;
         }
 
-        // Check for comment starts: --, //, #
+        // Check for comment starts: --, //, #, /*
         if ch == '#' {
             in_line_comment = true;
             continue;
@@ -1854,6 +1908,11 @@ pub fn split_statements(input: &str) -> Vec<String> {
         if ch == '/' && chars.peek() == Some(&'/') {
             chars.next();
             in_line_comment = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
             continue;
         }
 

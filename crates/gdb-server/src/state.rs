@@ -249,3 +249,58 @@ pub struct AppState {
     pub s3_manager: Option<Arc<S3StorageManager>>,
     pub s3_bucket: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replication_mode_conversions() {
+        assert_eq!(ReplicationMode::Sync.to_string(), "SYNC");
+        assert_eq!(ReplicationMode::Async.to_string(), "ASYNC");
+
+        assert_eq!(ReplicationMode::from_str("sync").unwrap(), ReplicationMode::Sync);
+        assert_eq!(ReplicationMode::from_str("synchronous").unwrap(), ReplicationMode::Sync);
+        assert_eq!(ReplicationMode::from_str("async").unwrap(), ReplicationMode::Async);
+        assert_eq!(ReplicationMode::from_str("asynchronous").unwrap(), ReplicationMode::Async);
+        assert!(ReplicationMode::from_str("invalid_mode").is_err());
+    }
+
+    #[test]
+    fn test_edge_dto_roundtrip() {
+        let edge = EdgeId::new(VertexId(10), EdgeType(2), 100, VertexId(20));
+        let dto: EdgeDto = edge.into();
+        assert_eq!(dto.src, 10);
+        assert_eq!(dto.edge_type, 2);
+        assert_eq!(dto.rank, 100);
+        assert_eq!(dto.dst, 20);
+
+        let roundtrip: EdgeId = dto.into();
+        assert_eq!(roundtrip, edge);
+    }
+
+    #[test]
+    fn test_address_helpers_and_args() {
+        assert_eq!(default_address(), "127.0.0.1");
+        let local_addr = detect_local_address();
+        assert!(!local_addr.is_empty());
+
+        let args = Args::parse_from(&[
+            "gdb-server",
+            "--node-id", "2",
+            "--partitions", "8",
+            "--port", "8855",
+            "--client-flight-port", "8870",
+            "--http-port", "8899",
+            "--replication-factor", "2",
+            "--replication-mode", "async",
+        ]);
+        assert_eq!(args.node_id, 2);
+        assert_eq!(args.partitions, 8);
+        assert_eq!(args.port, 8855);
+        assert_eq!(args.client_flight_port, 8870);
+        assert_eq!(args.http_port, 8899);
+        assert_eq!(args.replication_factor, 2);
+        assert_eq!(args.replication_mode, "async");
+    }
+}

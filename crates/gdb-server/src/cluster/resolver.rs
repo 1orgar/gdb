@@ -261,3 +261,60 @@ impl RemotePropertyResolver for ClusterEdgeExpander {
         fetched_map
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cluster_edge_expander_cache_and_single_node() {
+        let ring_nodes = Arc::new(RwLock::new(vec![
+            RingNode {
+                node_id: 1,
+                http_url: "http://127.0.0.1:8847".to_string(),
+                flight_address: "127.0.0.1".to_string(),
+                flight_port: 8848,
+                client_flight_address: "127.0.0.1".to_string(),
+                client_flight_port: 8860,
+            }
+        ]));
+
+        let mut cache = HashMap::new();
+        let e1 = EdgeId::new(VertexId(10), EdgeType(1), 0, VertexId(20));
+        let e2 = EdgeId::new(VertexId(10), EdgeType(2), 0, VertexId(30));
+        cache.insert(VertexId(10), vec![e1, e2]);
+
+        let expander = ClusterEdgeExpander {
+            ring_nodes: ring_nodes.clone(),
+            node_id: 1,
+            http_client: reqwest::Client::new(),
+            replication_factor: 1,
+            cache: Arc::new(RwLock::new(cache)),
+        };
+
+        // Cache hit without edge_type filter
+        let all_edges = expander.get_out_edges(VertexId(10), None);
+        assert_eq!(all_edges.len(), 2);
+
+        // Cache hit with edge_type filter
+        let filtered = expander.get_out_edges(VertexId(10), Some(EdgeType(1)));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].edge_type, EdgeType(1));
+
+        // Missing vid on single-node ring returns empty without network call
+        let missing = expander.get_out_edges(VertexId(999), None);
+        assert!(missing.is_empty());
+
+        // Batch get on empty
+        let empty_batch = expander.batch_get_out_edges(&[], None);
+        assert!(empty_batch.is_empty());
+
+        // batch_get_vertex_properties on empty vids
+        let empty_props = expander.batch_get_vertex_properties(&[], None, None);
+        assert!(empty_props.is_empty());
+
+        // batch_get_vertex_properties on single node ring
+        let props_single = expander.batch_get_vertex_properties(&[VertexId(999)], None, None);
+        assert!(props_single.is_empty());
+    }
+}

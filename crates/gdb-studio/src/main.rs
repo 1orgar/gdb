@@ -783,5 +783,46 @@ mod tests {
         assert!(html.contains("switchView"));
         assert!(html.contains("switchSidebarTab"));
     }
+
+    #[test]
+    fn test_parse_studio_node() {
+        // 1. Null
+        assert!(parse_studio_node(&serde_json::Value::Null, None).is_none());
+
+        // 2. Empty string
+        assert!(parse_studio_node(&serde_json::json!(""), None).is_none());
+
+        // 3. JSON Object entity
+        let obj_val = serde_json::json!({
+            "id": 42,
+            "label": "User",
+            "properties": { "name": "Alice", "age": 30 }
+        });
+        let node = parse_studio_node(&obj_val, Some("a")).unwrap();
+        assert_eq!(node.id, "42");
+        assert_eq!(node.label, "User");
+        assert_eq!(node.properties["name"], "Alice");
+
+        // 4. JSON String entity
+        let str_entity = serde_json::json!("{\"id\": 100, \"label\": \"Server\", \"properties\": {\"host\": \"localhost\"}}");
+        let node2 = parse_studio_node(&str_entity, None).unwrap();
+        assert_eq!(node2.id, "100");
+        assert_eq!(node2.label, "Server");
+        assert_eq!(node2.properties["host"], "localhost");
+
+        // 5. Scalar with dot column (a.name)
+        let scalar = serde_json::json!("Bob");
+        let node3 = parse_studio_node(&scalar, Some("a.name")).unwrap();
+        assert_eq!(node3.id, "Bob");
+        assert_eq!(node3.label, "a");
+        assert_eq!(node3.properties["name"], "Bob");
+
+        // 6. Scalar with id(a) column
+        let id_scalar = serde_json::json!(500);
+        let node4 = parse_studio_node(&id_scalar, Some("id(a)")).unwrap();
+        assert_eq!(node4.id, "500");
+        assert_eq!(node4.label, "a");
+        assert_eq!(node4.properties["id"], 500);
+    }
 }
 

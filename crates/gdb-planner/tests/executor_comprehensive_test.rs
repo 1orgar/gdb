@@ -390,11 +390,124 @@ fn test_algorithm_edge_and_label_filtering() {
     assert!(err_edge.is_err());
     assert!(err_edge.unwrap_err().to_string().contains("does not exist"));
 
-    // 6. Test error on unknown label
     let err_label = executor.execute(parse(
         "CALL algo.pageRank({label: 'NONEXISTENT'}) YIELD vertex_id, score;"
     ).unwrap());
     assert!(err_label.is_err());
     assert!(err_label.unwrap_err().to_string().contains("does not exist"));
 }
+
+#[test]
+fn test_executor_all_algorithms_and_vectors() {
+    let schema = Arc::new(RwLock::new(GraphSchema::new("test_algo_graph")));
+    let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+    let executor = QueryExecutor::new(schema.clone(), storage.clone());
+
+    // 1. Setup schema & data
+    executor.execute(parse("CREATE VERTEX Node (name STRING);").unwrap()).unwrap();
+    executor.execute(parse("CREATE EDGE LINK ();").unwrap()).unwrap();
+
+    executor.execute(parse("INSERT VERTEX Node (id, name) VALUES (1, 'N1');").unwrap()).unwrap();
+    executor.execute(parse("INSERT VERTEX Node (id, name) VALUES (2, 'N2');").unwrap()).unwrap();
+    executor.execute(parse("INSERT VERTEX Node (id, name) VALUES (3, 'N3');").unwrap()).unwrap();
+
+    executor.execute(parse("INSERT EDGE LINK FROM 1 TO 2;").unwrap()).unwrap();
+    executor.execute(parse("INSERT EDGE LINK FROM 2 TO 3;").unwrap()).unwrap();
+    executor.execute(parse("INSERT EDGE LINK FROM 3 TO 1;").unwrap()).unwrap();
+
+    // 2. Test ANALYZE GRAPH
+    let analyze_res = executor.execute(parse("ANALYZE GRAPH;").unwrap()).unwrap();
+    assert!(analyze_res.message.starts_with("Analyzed graph:"));
+
+    // 3. Test SCC
+    let scc = executor.execute(parse("CALL algo.scc() YIELD vertex_id, component_id;").unwrap()).unwrap();
+    assert!(scc.batch.is_some());
+
+    // 4. Test LPA
+    let lpa = executor.execute(parse("CALL algo.lpa({max_iter: 5}) YIELD vertex_id, community_id;").unwrap()).unwrap();
+    assert!(lpa.batch.is_some());
+
+    // 5. Test KCore
+    let kcore = executor.execute(parse("CALL algo.kcore() YIELD vertex_id, coreness;").unwrap()).unwrap();
+    assert!(kcore.batch.is_some());
+
+    // 6. Test Betweenness
+    let bet = executor.execute(parse("CALL algo.betweenness({normalized: true}) YIELD vertex_id, centrality;").unwrap()).unwrap();
+    assert!(bet.batch.is_some());
+
+    // 7. Test Closeness
+    let cls = executor.execute(parse("CALL algo.closeness() YIELD vertex_id, centrality;").unwrap()).unwrap();
+    assert!(cls.batch.is_some());
+
+    // 8. Test Degree
+    let deg = executor.execute(parse("CALL algo.degree() YIELD vertex_id, degree;").unwrap()).unwrap();
+    assert!(deg.batch.is_some());
+
+    // 9. Test SSSP
+    let sssp = executor.execute(parse("CALL algo.sssp({source: 1}) YIELD vertex_id, distance;").unwrap()).unwrap();
+    assert!(sssp.batch.is_some());
+
+    // 10. Test Similarity (Jaccard)
+    let sim = executor.execute(parse("CALL algo.similarity({node1: 1, node2: 2}) YIELD score;").unwrap()).unwrap();
+    assert!(sim.batch.is_some());
+
+    // 11. Test Vector Similarity Search
+    // First index a vector on Node
+    let vec_query = "CALL vector.similaritySearch({query: [0.1, 0.2, 0.3], topK: 2}) YIELD vertex_id, score;";
+    let vec_res = executor.execute(parse(vec_query).unwrap()).unwrap();
+    assert!(vec_res.batch.is_some());
+}
+
+#[test]
+fn test_executor_cypher_mutations_and_aggregations() {
+    let (executor, storage, _) = setup_executor();
+
+    executor.execute(parse("CREATE VERTEX User (name STRING, score INT64);").unwrap()).unwrap();
+    executor.execute(parse("CREATE EDGE FRIEND (weight FLOAT64);").unwrap()).unwrap();
+
+    // SHOW VERTICES and SHOW EDGES
+    let sv = executor.execute(parse("SHOW VERTICES;").unwrap()).unwrap();
+    assert!(sv.batch.is_some());
+    let se = executor.execute(parse("SHOW EDGES;").unwrap()).unwrap();
+    assert!(se.batch.is_some());
+
+    // Insert vertices
+    executor.execute(parse("INSERT VERTEX User (id, name, score) VALUES (1, 'User1', 10), (2, 'User2', 20), (3, 'User3', 30);").unwrap()).unwrap();
+
+    // Insert edge & Delete edge
+    executor.execute(parse("INSERT EDGE FRIEND FROM 1 TO 2;").unwrap()).unwrap();
+    let del_edge = executor.execute(parse("DELETE EDGE FRIEND FROM 1 TO 2;").unwrap()).unwrap();
+    assert!(del_edge.rows_affected >= 1 || del_edge.message.contains("Deleted"));
+
+    executor.execute(parse("INSERT EDGE FRIEND FROM 1 TO 2;").unwrap()).unwrap();
+    executor.execute(parse("INSERT EDGE FRIEND FROM 2 TO 3;").unwrap()).unwrap();
+    storage.compact();
+
+    // Forward edge matches
+    let fwd = executor.execute(parse("MATCH (a:User)-[:FRIEND]->(b:User) RETURN a.name, b.name;").unwrap()).unwrap();
+    assert!(fwd.batch.is_some());
+
+    // Cypher SET mutation
+    let set_res = executor.execute(parse("MATCH (u:User) WHERE u.id = 1 SET u.score = 50;").unwrap()).unwrap();
+    assert!(set_res.rows_affected > 0 || set_res.message.contains("Query completed"));
+
+    // Cypher Aggregations: sum, avg, min, max, count
+    let agg1 = executor.execute(parse("MATCH (u:User) RETURN sum(u.score), avg(u.score), min(u.score), max(u.score), count(u.score);").unwrap()).unwrap();
+    assert!(agg1.batch.is_some());
+
+    // Cypher Ordering
+    let ord_asc = executor.execute(parse("MATCH (u:User) RETURN u.name ORDER BY u.score ASC;").unwrap()).unwrap();
+    assert!(ord_asc.batch.is_some());
+    let ord_desc = executor.execute(parse("MATCH (u:User) RETURN u.name ORDER BY u.score DESC;").unwrap()).unwrap();
+    assert!(ord_desc.batch.is_some());
+
+    // Cypher DETACH DELETE
+    let detach_del = executor.execute(parse("MATCH (u:User) WHERE u.id = 2 DETACH DELETE u;").unwrap()).unwrap();
+    assert!(detach_del.rows_affected > 0 || detach_del.message.contains("Query completed"));
+
+    // Cypher DELETE vertex
+    let del_v = executor.execute(parse("MATCH (u:User) WHERE u.id = 3 DELETE u;").unwrap()).unwrap();
+    assert!(del_v.rows_affected > 0 || del_v.message.contains("Query completed"));
+}
+
 

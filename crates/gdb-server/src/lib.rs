@@ -125,6 +125,16 @@ pub async fn create_test_server(
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt().try_init();
     let args = Args::parse();
+    run_server_with_shutdown(args, async {
+        let _ = tokio::signal::ctrl_c().await;
+    }).await
+}
+
+pub async fn run_server_with_shutdown<F>(args: Args, shutdown: F) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let _ = tracing_subscriber::fmt().try_init();
 
     println!("\x1b[1;36m");
     println!("  ██████╗ ██████╗ ██████╗ ");
@@ -401,8 +411,121 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     TonicServer::builder()
         .add_service(client_flight_svc.into_server())
-        .serve(client_flight_addr)
+        .serve_with_shutdown(client_flight_addr, shutdown)
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_create_test_server_and_routes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (addr, handle, _state) = create_test_server(tmp.path().to_path_buf()).await.unwrap();
+        let client = reqwest::Client::new();
+        let base = format!("http://{}", addr);
+
+        // 1. Health
+        let res = client.get(format!("{}/health", base)).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 2. Schema
+        let res = client.get(format!("{}/schema", base)).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 3. Cluster
+        let res = client.get(format!("{}/cluster", base)).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 4. Resources
+        let res = client.get(format!("{}/resources?local=true", base)).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 5. GPU
+        let res = client.get(format!("{}/gpu", base)).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 6. Metrics
+        let res = client.get(format!("{}/metrics", base)).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 7. Cluster Join
+        let join_payload = serde_json::json!({
+            "node_id": 99,
+            "http_url": "http://127.0.0.1:9999",
+            "flight_address": "127.0.0.1",
+            "flight_port": 9998,
+            "client_flight_address": "127.0.0.1",
+            "client_flight_port": 9997
+        });
+        let res = client.post(format!("{}/cluster/join", base)).json(&join_payload).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 8. Compact
+        let res = client.post(format!("{}/compact", base)).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+
+        // 9. Query & Batch
+        let q_res = client.post(format!("{}/query", base))
+            .json(&serde_json::json!({ "query": "SHOW SCHEMA;", "local_only": true }))
+            .send().await.unwrap();
+        assert_eq!(q_res.status(), 200);
+
+        let b_res = client.post(format!("{}/batch", base))
+            .json(&serde_json::json!({ "queries": ["SHOW SCHEMA;"], "local_only": true }))
+            .send().await.unwrap();
+        assert_eq!(b_res.status(), 200);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_run_server_with_shutdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let p1 = l1.local_addr().unwrap().port();
+        let l2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let p2 = l2.local_addr().unwrap().port();
+        let l3 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let p3 = l3.local_addr().unwrap().port();
+        drop(l1);
+        drop(l2);
+        drop(l3);
+
+        let args = Args {
+            wal_dir: tmp.path().to_path_buf(),
+            partitions: 1,
+            port: p1,
+            client_flight_port: p2,
+            http_port: p3,
+            flight_address: Some("127.0.0.1".to_string()),
+            client_flight_address: Some("127.0.0.1".to_string()),
+            node_id: 1,
+            peers: Some("http://127.0.0.1:59999".to_string()),
+            replication_factor: 1,
+            replication_mode: "sync".to_string(),
+            enable_gpu: false,
+            gpu_device: 0,
+            gpu_offload_threshold: 1000,
+            gpu_max_vram_mb: 512,
+            s3_bucket: Some("test-bucket".to_string()),
+            s3_endpoint: Some("http://localhost:9000".to_string()),
+            s3_region: "us-east-1".to_string(),
+            cluster_mode: "ring".to_string(),
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = run_server_with_shutdown(args, async move {
+                let _ = rx.await;
+            }).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
 }
