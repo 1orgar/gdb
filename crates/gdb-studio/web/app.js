@@ -371,17 +371,21 @@
       graphNodes = [];
       graphEdges = [];
 
-      for (const n of nodes) {
+      const totalNodes = Math.min(nodes.length, MAX_GRAPH_NODES);
+      for (let idx = 0; idx < nodes.length; idx++) {
         if (graphNodes.length >= MAX_GRAPH_NODES) {
           capped = true;
           break;
         }
+        const n = nodes[idx];
+        const angle = totalNodes > 1 ? (idx / totalNodes) * Math.PI * 2 : 0;
+        const radius = totalNodes > 1 ? (60 + Math.sqrt(idx) * 18) : 0;
         const node = {
           id: n.id,
           label: n.label || String(n.id),
           properties: n.properties || {},
-          x: (Math.random() - 0.5) * 300,
-          y: (Math.random() - 0.5) * 300,
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius,
           vx: 0,
           vy: 0
         };
@@ -400,6 +404,13 @@
             properties: e.properties || {}
           });
         }
+      }
+
+      if (typeof wakeSimulation === 'function') {
+        wakeSimulation(1.0);
+      }
+      if (typeof wakeUnitySimulation === 'function') {
+        wakeUnitySimulation(1.0);
       }
 
       if (capped) {
@@ -586,8 +597,11 @@
     let unity3DPanY = 0;
     let unity3DDragging = false;
     let unity3DDragStart = { x: 0, y: 0 };
-    let unity3DButton = 0;
     let unityPhysicsRunning = true;
+    let unitySimulationAlpha = 1.0;
+    function wakeUnitySimulation(alpha = 0.6) {
+      unitySimulationAlpha = Math.max(unitySimulationAlpha, alpha);
+    }
     let unityAutoRotate = false;
     let unityHoveredNode = null;
 
@@ -684,26 +698,41 @@
 
     function stepUnity3DSimulation() {
       if (!unityPhysicsRunning || unityNodes.length === 0 || currentView !== 'unity') return;
+      if (unitySimulationAlpha < 0.002) return;
 
-      const repulsion = 5500;
+      const alpha = unitySimulationAlpha;
+      const repulsion = 4500;
       const springLength = 100;
       const springStrength = 0.04;
-      const centerGravity = 0.015;
+      const maxRepulsionForce = 12.0;
+      const maxSpringForce = 10.0;
+      const maxSpeed = 7.0;
 
       // 3D Repulsion between nodes
       for (let i = 0; i < unityNodes.length; i++) {
+        const a = unityNodes[i];
         for (let j = i + 1; j < unityNodes.length; j++) {
-          const a = unityNodes[i];
           const b = unityNodes[j];
           let dx = b.x - a.x;
           let dy = b.y - a.y;
           let dz = b.z - a.z;
-          let dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+          let dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+          if (dist < 0.001) {
+            dx = (Math.random() - 0.5) * 2;
+            dy = (Math.random() - 0.5) * 2;
+            dz = (Math.random() - 0.5) * 2;
+            dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+          }
           if (dist > 350) continue;
-          let force = repulsion / (dist * dist);
-          let fx = (dx / dist) * force;
-          let fy = (dy / dist) * force;
-          let fz = (dz / dist) * force;
+
+          const effDist = Math.max(dist, 25);
+          const rawForce = repulsion / (effDist * effDist);
+          const force = Math.min(rawForce, maxRepulsionForce) * alpha;
+
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          const fz = (dz / dist) * force;
           a.vx -= fx;
           a.vy -= fy;
           a.vz -= fz;
@@ -721,11 +750,16 @@
         let dx = b.x - a.x;
         let dy = b.y - a.y;
         let dz = b.z - a.z;
-        let dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-        let force = (dist - springLength) * springStrength;
-        let fx = (dx / dist) * force;
-        let fy = (dy / dist) * force;
-        let fz = (dz / dist) * force;
+        let dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist < 0.001) continue;
+
+        const displacement = dist - springLength;
+        const rawForce = displacement * springStrength;
+        const force = Math.max(-maxSpringForce, Math.min(maxSpringForce, rawForce)) * alpha;
+
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        const fz = (dz / dist) * force;
         a.vx += fx;
         a.vy += fy;
         a.vz += fz;
@@ -736,16 +770,30 @@
 
       // Damping & Center Gravity
       for (const n of unityNodes) {
-        n.vx -= n.x * centerGravity;
-        n.vy -= n.y * centerGravity;
-        n.vz -= n.z * centerGravity;
-        n.vx *= 0.88;
-        n.vy *= 0.88;
-        n.vz *= 0.88;
+        const distCenter = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (distCenter > 40) {
+          const gForce = Math.min((distCenter - 40) * 0.003, 1.2) * alpha;
+          n.vx -= (n.x / distCenter) * gForce;
+          n.vy -= (n.y / distCenter) * gForce;
+          n.vz -= (n.z / distCenter) * gForce;
+        }
+
+        const speed = Math.sqrt(n.vx * n.vx + n.vy * n.vy + n.vz * n.vz);
+        if (speed > maxSpeed) {
+          n.vx = (n.vx / speed) * maxSpeed;
+          n.vy = (n.vy / speed) * maxSpeed;
+          n.vz = (n.vz / speed) * maxSpeed;
+        }
+
+        n.vx *= 0.84;
+        n.vy *= 0.84;
+        n.vz *= 0.84;
         n.x += n.vx;
         n.y += n.vy;
         n.z += n.vz;
       }
+
+      unitySimulationAlpha *= 0.985;
     }
 
     // 3D Perspective Projection
@@ -1053,6 +1101,7 @@
 
     function toggleUnityPhysics() {
       unityPhysicsRunning = !unityPhysicsRunning;
+      if (unityPhysicsRunning) wakeUnitySimulation(1.0);
       const btn = document.getElementById('unity-physics-btn');
       if (btn) btn.textContent = unityPhysicsRunning ? '⏸' : '▶';
     }

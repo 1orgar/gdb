@@ -828,5 +828,105 @@ async fn test_rf_less_than_n_cross_node_property_resolution_and_ddl_drop() {
     assert_eq!(rows_after[0], serde_json::json!(["Carol", "Dave", 35]));
 }
 
+#[tokio::test]
+async fn test_cluster_analyze_graph_and_sharded_batch_insert() {
+    let tdir1 = tempdir().unwrap();
+    let (addr1, _h1, state1) = create_test_server(tdir1.path().to_path_buf()).await.unwrap();
+    let url1 = format!("http://{}", addr1);
+
+    let tdir2 = tempdir().unwrap();
+    let (addr2, _h2, state2) = create_test_server(tdir2.path().to_path_buf()).await.unwrap();
+    let url2 = format!("http://{}", addr2);
+
+    let ring = vec![
+        RingNode {
+            node_id: 1,
+            http_url: url1.clone(),
+            flight_address: "127.0.0.1".into(),
+            flight_port: 0,
+            client_flight_address: "127.0.0.1".into(),
+            client_flight_port: 0,
+        },
+        RingNode {
+            node_id: 2,
+            http_url: url2.clone(),
+            flight_address: "127.0.0.1".into(),
+            flight_port: 0,
+            client_flight_address: "127.0.0.1".into(),
+            client_flight_port: 0,
+        },
+    ];
+
+    *state1.ring_nodes.write() = ring.clone();
+    *state2.ring_nodes.write() = ring;
+
+    let client = Client::new();
+
+    // 1. Create Schema on cluster
+    let ddl_res = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "CREATE VERTEX Person (name STRING, age INT64); CREATE EDGE KNOWS ();"
+        }))
+        .send().await.unwrap();
+    assert_eq!(ddl_res.json::<serde_json::Value>().await.unwrap()["status"], "ok");
+
+    // Replicate schema to node 2 so both have schema
+    client.post(format!("{}/query", url2))
+        .json(&serde_json::json!({
+            "query": "CREATE VERTEX Person (name STRING, age INT64); CREATE EDGE KNOWS ();",
+            "local_only": true
+        }))
+        .send().await.unwrap();
+
+    // 2. Batch insert 4 vertices through coordinator node 1 with RF=1
+    let insert_v = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "INSERT VERTEX Person (id, name, age) VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35), (4, 'Dave', 40);"
+        }))
+        .send().await.unwrap();
+    let insert_v_json: serde_json::Value = insert_v.json().await.unwrap();
+    assert_eq!(insert_v_json["status"], "ok");
+    assert_eq!(insert_v_json["rows_affected"], 4);
+
+    // 3. Verify /resources reports total_vertices = 4 (no duplicates)
+    let res_metrics = client.get(format!("{}/resources", url1)).send().await.unwrap();
+    let metrics_json: serde_json::Value = res_metrics.json().await.unwrap();
+    assert_eq!(metrics_json["cluster_total_vertices"], 4);
+    assert_eq!(metrics_json["total_vertices"], 4);
+
+    // 4. Batch insert 2 edges through coordinator node 1 with RF=1
+    let insert_e = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "INSERT EDGE KNOWS VALUES (1, 2, 0), (2, 3, 0);"
+        }))
+        .send().await.unwrap();
+    let insert_e_json: serde_json::Value = insert_e.json().await.unwrap();
+    assert_eq!(insert_e_json["status"], "ok");
+    assert_eq!(insert_e_json["rows_affected"], 2);
+
+    let res_metrics2 = client.get(format!("{}/resources", url1)).send().await.unwrap();
+    let metrics_json2: serde_json::Value = res_metrics2.json().await.unwrap();
+    assert_eq!(metrics_json2["cluster_total_edges"], 2);
+    assert_eq!(metrics_json2["total_edges"], 2);
+
+    // 5. Run ANALYZE GRAPH on coordinator node 1
+    let analyze_res = client.post(format!("{}/query", url1))
+        .json(&serde_json::json!({
+            "query": "ANALYZE GRAPH;"
+        }))
+        .send().await.unwrap();
+    let analyze_json: serde_json::Value = analyze_res.json().await.unwrap();
+    assert_eq!(analyze_json["status"], "ok");
+    assert!(analyze_json["message"].as_str().unwrap().contains("4 vertices across 1 labels"));
+    assert!(analyze_json["message"].as_str().unwrap().contains("2 edges across 1 types"));
+
+    let stats = &analyze_json["stats"];
+    assert_eq!(stats["total_vertices"], 4);
+    assert_eq!(stats["total_edges"], 2);
+    assert_eq!(stats["vertices_per_label"]["Person"], 4);
+    assert_eq!(stats["edges_per_type"]["KNOWS"], 2);
+}
+
+
 
 

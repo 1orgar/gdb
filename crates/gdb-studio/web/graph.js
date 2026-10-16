@@ -53,28 +53,47 @@ function getNodeColor(label, id) {
 
 let currentView = 'graph';
 let lastLoadedGraphData = null;
+let simulationAlpha = 1.0;
+
+function wakeSimulation(alpha = 0.6) {
+  simulationAlpha = Math.max(simulationAlpha, alpha);
+}
 
 // Force Simulation
 function stepSimulation() {
   if (!physicsRunning || graphNodes.length === 0 || currentView !== 'graph') return;
+  if (simulationAlpha < 0.002) return;
 
-  const repulsion = 4000;
-  const springLength = 80;
-  const springStrength = 0.05;
-  const centerGravity = 0.02;
+  const alpha = simulationAlpha;
+  const repulsion = 3500;
+  const springLength = 90;
+  const springStrength = 0.04;
+  const maxRepulsionForce = 12.0;
+  const maxSpringForce = 10.0;
+  const maxSpeed = 7.0;
 
-  // 1. Repulsion between nodes
+  // 1. Repulsion between nodes (with distance softening to prevent infinite explosion)
   for (let i = 0; i < graphNodes.length; i++) {
+    const a = graphNodes[i];
     for (let j = i + 1; j < graphNodes.length; j++) {
-      const a = graphNodes[i];
       const b = graphNodes[j];
       let dx = b.x - a.x;
       let dy = b.y - a.y;
-      let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      if (dist > 300) continue;
-      let force = repulsion / (dist * dist);
-      let fx = (dx / dist) * force;
-      let fy = (dy / dist) * force;
+      let dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < 0.001) {
+        dx = (Math.random() - 0.5) * 2;
+        dy = (Math.random() - 0.5) * 2;
+        dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      }
+      if (dist > 350) continue;
+
+      const effDist = Math.max(dist, 25);
+      const rawForce = repulsion / (effDist * effDist);
+      const force = Math.min(rawForce, maxRepulsionForce) * alpha;
+
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
       a.vx -= fx;
       a.vy -= fy;
       b.vx += fx;
@@ -82,33 +101,53 @@ function stepSimulation() {
     }
   }
 
-  // 2. Attraction along edges
+  // 2. Attraction along edges (with spring force clamping)
   for (const edge of graphEdges) {
     const a = edge.source;
     const b = edge.target;
     if (!a || !b) continue;
     let dx = b.x - a.x;
     let dy = b.y - a.y;
-    let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    let force = (dist - springLength) * springStrength;
-    let fx = (dx / dist) * force;
-    let fy = (dy / dist) * force;
+    let dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 0.001) continue;
+
+    const displacement = dist - springLength;
+    const rawForce = displacement * springStrength;
+    const force = Math.max(-maxSpringForce, Math.min(maxSpringForce, rawForce)) * alpha;
+
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
     a.vx += fx;
     a.vy += fy;
     b.vx -= fx;
-    b.vy += fy;
+    b.vy -= fy;
   }
 
   // 3. Center gravity & update positions
   for (const n of graphNodes) {
     if (n === draggedNode) continue;
-    n.vx -= n.x * centerGravity;
-    n.vy -= n.y * centerGravity;
-    n.vx *= 0.85; // Damping
-    n.vy *= 0.85;
+
+    const distCenter = Math.hypot(n.x, n.y);
+    if (distCenter > 40) {
+      const gForce = Math.min((distCenter - 40) * 0.003, 1.2) * alpha;
+      n.vx -= (n.x / distCenter) * gForce;
+      n.vy -= (n.y / distCenter) * gForce;
+    }
+
+    const speed = Math.hypot(n.vx, n.vy);
+    if (speed > maxSpeed) {
+      n.vx = (n.vx / speed) * maxSpeed;
+      n.vy = (n.vy / speed) * maxSpeed;
+    }
+
+    n.vx *= 0.82; // Damping
+    n.vy *= 0.82;
     n.x += n.vx;
     n.y += n.vy;
   }
+
+  // Temperature cooling
+  simulationAlpha *= 0.985;
 }
 
 // Render Loop
@@ -250,6 +289,7 @@ if (canvas) {
       draggedNode.y = world.y;
       draggedNode.vx = 0;
       draggedNode.vy = 0;
+      wakeSimulation(0.4);
     } else if (isDragging) {
       cameraX = sx - dragStart.x;
       cameraY = sy - dragStart.y;
@@ -278,6 +318,7 @@ function resetGraphView() {
 }
 function togglePhysics() {
   physicsRunning = !physicsRunning;
+  if (physicsRunning) wakeSimulation(1.0);
   const btn = document.getElementById('physics-btn');
   if (btn) btn.textContent = physicsRunning ? '⏸' : '▶';
 }

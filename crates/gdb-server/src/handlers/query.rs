@@ -3,7 +3,8 @@ use crate::state::{AppState, BatchRequest, QueryRequest, ReplicationMode, RingNo
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
-use gdb_core::DataValue;
+use gdb_core::{DataValue, VertexId};
+use gdb_storage::GraphStatistics;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -217,6 +218,219 @@ pub fn merge_scatter_gather_results(
     })
 }
 
+pub fn data_value_to_literal(val: &DataValue) -> String {
+    match val {
+        DataValue::Null => "null".to_string(),
+        DataValue::Boolean(b) => if *b { "true".to_string() } else { "false".to_string() },
+        DataValue::Int64(i) => i.to_string(),
+        DataValue::Float64(f) => f.to_string(),
+        DataValue::String(s) => {
+            let escaped = s.replace('\'', "''");
+            format!("'{}'", escaped)
+        }
+        DataValue::Date(d) => d.to_string(),
+        DataValue::Timestamp(t) => t.to_string(),
+        DataValue::List(l) => {
+            let items: Vec<String> = l.iter().map(data_value_to_literal).collect();
+            format!("[{}]", items.join(", "))
+        }
+        DataValue::Vector(v) => {
+            let items: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+            format!("[{}]", items.join(", "))
+        }
+    }
+}
+
+pub fn format_insert_vertices_query(
+    label: &str,
+    vertices: &[(VertexId, Vec<(String, DataValue)>)],
+) -> String {
+    if vertices.is_empty() {
+        return String::new();
+    }
+    let mut prop_names: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    for (_, props) in vertices {
+        for (k, _) in props {
+            if seen.insert(k.clone()) {
+                prop_names.push(k.clone());
+            }
+        }
+    }
+
+    let mut q = format!("INSERT VERTEX {} (id", label);
+    for name in &prop_names {
+        q.push_str(", ");
+        q.push_str(name);
+    }
+    q.push_str(") VALUES ");
+
+    for (i, (vid, props)) in vertices.iter().enumerate() {
+        if i > 0 {
+            q.push_str(", ");
+        }
+        q.push_str(&format!("({}", vid.0));
+        let prop_map: HashMap<&str, &DataValue> = props.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        for name in &prop_names {
+            q.push_str(", ");
+            if let Some(val) = prop_map.get(name.as_str()) {
+                q.push_str(&data_value_to_literal(val));
+            } else {
+                q.push_str("null");
+            }
+        }
+        q.push(')');
+    }
+    q.push(';');
+    q
+}
+
+pub fn format_insert_edges_query(
+    edge_type: &str,
+    edges: &[(VertexId, VertexId, i64, Vec<(String, DataValue)>)],
+) -> String {
+    if edges.is_empty() {
+        return String::new();
+    }
+    let mut q = format!("INSERT EDGE {} VALUES ", edge_type);
+    for (i, (src, dst, rank, _props)) in edges.iter().enumerate() {
+        if i > 0 {
+            q.push_str(", ");
+        }
+        q.push_str(&format!("({}, {}, {})", src.0, dst.0, rank));
+    }
+    q.push(';');
+    q
+}
+
+pub fn merge_cluster_analyze_results(
+    state: &AppState,
+    local_val: serde_json::Value,
+    peer_vals: Vec<Result<Option<serde_json::Value>, tokio::task::JoinError>>,
+) -> serde_json::Value {
+    let mut all_stats: Vec<GraphStatistics> = Vec::new();
+    if let Some(st) = local_val.get("stats") {
+        if let Ok(parsed) = serde_json::from_value::<GraphStatistics>(st.clone()) {
+            all_stats.push(parsed);
+        }
+    }
+    for pres in peer_vals {
+        if let Ok(Some(val)) = pres {
+            if let Some(st) = val.get("stats") {
+                if let Ok(parsed) = serde_json::from_value::<GraphStatistics>(st.clone()) {
+                    all_stats.push(parsed);
+                }
+            }
+        }
+    }
+
+    if all_stats.is_empty() {
+        return local_val;
+    }
+
+    let ring_nodes_count = state.ring_nodes.read().len().max(1);
+    let rf = state.replication_factor.max(1);
+
+    let mut sum_vertices = 0usize;
+    let mut sum_edges = 0usize;
+    let mut max_vertices = 0usize;
+    let mut max_edges = 0usize;
+    let mut max_degree = 0usize;
+    let mut vertices_per_label: HashMap<String, usize> = HashMap::new();
+    let mut edges_per_type: HashMap<String, usize> = HashMap::new();
+
+    for s in &all_stats {
+        sum_vertices += s.total_vertices;
+        sum_edges += s.total_edges;
+        max_vertices = max_vertices.max(s.total_vertices);
+        max_edges = max_edges.max(s.total_edges);
+        max_degree = max_degree.max(s.max_degree);
+
+        for (lbl, cnt) in &s.vertices_per_label {
+            if rf == 1 {
+                *vertices_per_label.entry(lbl.clone()).or_insert(0) += *cnt;
+            } else if (rf as usize) >= ring_nodes_count {
+                let e = vertices_per_label.entry(lbl.clone()).or_insert(0);
+                *e = (*e).max(*cnt);
+            } else {
+                *vertices_per_label.entry(lbl.clone()).or_insert(0) += *cnt;
+            }
+        }
+
+        for (et, cnt) in &s.edges_per_type {
+            if rf == 1 {
+                *edges_per_type.entry(et.clone()).or_insert(0) += *cnt;
+            } else if (rf as usize) >= ring_nodes_count {
+                let e = edges_per_type.entry(et.clone()).or_insert(0);
+                *e = (*e).max(*cnt);
+            } else {
+                *edges_per_type.entry(et.clone()).or_insert(0) += *cnt;
+            }
+        }
+    }
+
+    let (cluster_vertices, cluster_edges) = if rf == 1 {
+        (sum_vertices, sum_edges)
+    } else if (rf as usize) >= ring_nodes_count {
+        (max_vertices, max_edges)
+    } else {
+        let rf_f = rf as f64;
+        let v = (sum_vertices as f64 / rf_f).round() as usize;
+        let e = (sum_edges as f64 / rf_f).round() as usize;
+        for cnt in vertices_per_label.values_mut() {
+            *cnt = (*cnt as f64 / rf_f).round() as usize;
+        }
+        for cnt in edges_per_type.values_mut() {
+            *cnt = (*cnt as f64 / rf_f).round() as usize;
+        }
+        (v, e)
+    };
+
+    let avg_degree = if cluster_vertices > 0 {
+        cluster_edges as f64 / cluster_vertices as f64
+    } else {
+        0.0
+    };
+
+    let cluster_stats = GraphStatistics {
+        total_vertices: cluster_vertices,
+        total_edges: cluster_edges,
+        vertices_per_label,
+        edges_per_type,
+        avg_degree,
+        max_degree,
+    };
+
+    *state.executor.stats.write() = Some(cluster_stats.clone());
+
+    let message = format!(
+        "Analyzed cluster graph across {} nodes: {} vertices across {} labels, {} edges across {} types (avg degree: {:.2}, max degree: {})",
+        all_stats.len(),
+        cluster_stats.total_vertices,
+        cluster_stats.vertices_per_label.len(),
+        cluster_stats.total_edges,
+        cluster_stats.edges_per_type.len(),
+        cluster_stats.avg_degree,
+        cluster_stats.max_degree
+    );
+
+    let elapsed = local_val
+        .get("elapsed_us")
+        .and_then(|e| e.as_u64())
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "status": "ok",
+        "message": message,
+        "elapsed_us": elapsed,
+        "num_rows": 0,
+        "rows_affected": 0,
+        "columns": [],
+        "rows": [],
+        "stats": cluster_stats,
+    })
+}
+
 pub fn panic_msg_cleanup(s: &str) -> String {
     s.to_string()
 }
@@ -342,37 +556,33 @@ pub async fn execute_single_query(state: &AppState, trimmed: &str, local_only: b
         }
     }
 
-    if let gdb_parser::ast::Statement::InsertVertices { vertices, .. } = &stmt {
+    if let gdb_parser::ast::Statement::InsertVertices { label, vertices } = &stmt {
         let ring_snapshot = state.ring_nodes.read().clone();
         if !local_only && ring_snapshot.len() > 1 {
-            let mut targets: Vec<RingNode> = Vec::new();
-            for (vid, _) in vertices {
-                for rep in calculate_replica_set(vid.0, &ring_snapshot, state.replication_factor) {
-                    if rep.node_id != state.node_id && !targets.iter().any(|t| t.node_id == rep.node_id) {
-                        targets.push(rep);
+            let mut local_vertices = Vec::new();
+            let mut peer_batches: HashMap<u64, (RingNode, Vec<(VertexId, Vec<(String, DataValue)>)>)> = HashMap::new();
+
+            for (vid, props) in vertices {
+                let reps = calculate_replica_set(vid.0, &ring_snapshot, state.replication_factor);
+                for rep in reps {
+                    if rep.node_id == state.node_id {
+                        local_vertices.push((*vid, props.clone()));
+                    } else {
+                        peer_batches
+                            .entry(rep.node_id)
+                            .or_insert_with(|| (rep.clone(), Vec::new()))
+                            .1
+                            .push((*vid, props.clone()));
                     }
                 }
             }
 
-            match state.executor.execute(stmt) {
-                Ok(res) => {
-                    let elapsed_us = start.elapsed().as_micros();
-                    state.queries_ok.fetch_add(1, Ordering::Relaxed);
-                    state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
-
-                    replicate_to_targets(&state.http_client, &targets, trimmed, state.replication_mode, &state.replications_count).await;
-
-                    return serde_json::json!({
-                        "status": "ok",
-                        "message": res.message,
-                        "elapsed_us": elapsed_us,
-                        "num_rows": 0,
-                        "rows_affected": res.rows_affected,
-                        "columns": [],
-                        "rows": []
-                    });
-                }
-                Err(e) => {
+            if !local_vertices.is_empty() {
+                let local_stmt = gdb_parser::ast::Statement::InsertVertices {
+                    label: label.clone(),
+                    vertices: local_vertices,
+                };
+                if let Err(e) = state.executor.execute(local_stmt) {
                     state.queries_err.fetch_add(1, Ordering::Relaxed);
                     return serde_json::json!({
                         "status": "error",
@@ -381,40 +591,62 @@ pub async fn execute_single_query(state: &AppState, trimmed: &str, local_only: b
                     });
                 }
             }
+
+            for (_node_id, (target, batch_vertices)) in peer_batches {
+                let sub_query = format_insert_vertices_query(label, &batch_vertices);
+                replicate_to_targets(
+                    &state.http_client,
+                    &[target],
+                    &sub_query,
+                    state.replication_mode,
+                    &state.replications_count,
+                )
+                .await;
+            }
+
+            let elapsed_us = start.elapsed().as_micros();
+            state.queries_ok.fetch_add(1, Ordering::Relaxed);
+            state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
+
+            return serde_json::json!({
+                "status": "ok",
+                "message": format!("Inserted {} vertices across cluster", vertices.len()),
+                "elapsed_us": elapsed_us,
+                "num_rows": 0,
+                "rows_affected": vertices.len() as u64,
+                "columns": [],
+                "rows": []
+            });
         }
     }
 
-    if let gdb_parser::ast::Statement::InsertEdges { edges, .. } = &stmt {
+    if let gdb_parser::ast::Statement::InsertEdges { edge_type, edges } = &stmt {
         let ring_snapshot = state.ring_nodes.read().clone();
         if !local_only && ring_snapshot.len() > 1 {
-            let mut targets: Vec<RingNode> = Vec::new();
-            for (src, _, _, _) in edges {
-                for rep in calculate_replica_set(src.0, &ring_snapshot, state.replication_factor) {
-                    if rep.node_id != state.node_id && !targets.iter().any(|t| t.node_id == rep.node_id) {
-                        targets.push(rep);
+            let mut local_edges = Vec::new();
+            let mut peer_batches: HashMap<u64, (RingNode, Vec<(VertexId, VertexId, i64, Vec<(String, DataValue)>)>)> = HashMap::new();
+
+            for edge in edges {
+                let reps = calculate_replica_set(edge.0.0, &ring_snapshot, state.replication_factor);
+                for rep in reps {
+                    if rep.node_id == state.node_id {
+                        local_edges.push(edge.clone());
+                    } else {
+                        peer_batches
+                            .entry(rep.node_id)
+                            .or_insert_with(|| (rep.clone(), Vec::new()))
+                            .1
+                            .push(edge.clone());
                     }
                 }
             }
 
-            match state.executor.execute(stmt) {
-                Ok(res) => {
-                    let elapsed_us = start.elapsed().as_micros();
-                    state.queries_ok.fetch_add(1, Ordering::Relaxed);
-                    state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
-
-                    replicate_to_targets(&state.http_client, &targets, trimmed, state.replication_mode, &state.replications_count).await;
-
-                    return serde_json::json!({
-                        "status": "ok",
-                        "message": res.message,
-                        "elapsed_us": elapsed_us,
-                        "num_rows": 0,
-                        "rows_affected": res.rows_affected,
-                        "columns": [],
-                        "rows": []
-                    });
-                }
-                Err(e) => {
+            if !local_edges.is_empty() {
+                let local_stmt = gdb_parser::ast::Statement::InsertEdges {
+                    edge_type: edge_type.clone(),
+                    edges: local_edges,
+                };
+                if let Err(e) = state.executor.execute(local_stmt) {
                     state.queries_err.fetch_add(1, Ordering::Relaxed);
                     return serde_json::json!({
                         "status": "error",
@@ -423,6 +655,32 @@ pub async fn execute_single_query(state: &AppState, trimmed: &str, local_only: b
                     });
                 }
             }
+
+            for (_node_id, (target, batch_edges)) in peer_batches {
+                let sub_query = format_insert_edges_query(edge_type, &batch_edges);
+                replicate_to_targets(
+                    &state.http_client,
+                    &[target],
+                    &sub_query,
+                    state.replication_mode,
+                    &state.replications_count,
+                )
+                .await;
+            }
+
+            let elapsed_us = start.elapsed().as_micros();
+            state.queries_ok.fetch_add(1, Ordering::Relaxed);
+            state.total_query_duration_us.fetch_add(elapsed_us as u64, Ordering::Relaxed);
+
+            return serde_json::json!({
+                "status": "ok",
+                "message": format!("Inserted {} edges across cluster", edges.len()),
+                "elapsed_us": elapsed_us,
+                "num_rows": 0,
+                "rows_affected": edges.len() as u64,
+                "columns": [],
+                "rows": []
+            });
         }
     }
 
@@ -493,6 +751,40 @@ pub async fn execute_single_query(state: &AppState, trimmed: &str, local_only: b
     let ring_snapshot = state.ring_nodes.read().clone();
     let peers: Vec<RingNode> = ring_snapshot.iter().filter(|n| n.node_id != state.node_id).cloned().collect();
 
+    if matches!(stmt, gdb_parser::ast::Statement::AnalyzeGraph) && !local_only && !peers.is_empty() {
+        let local_val = Box::pin(execute_single_query(state, trimmed, true)).await;
+
+        let client = state.http_client.clone();
+        let payload = serde_json::json!({
+            "query": trimmed,
+            "local_only": true,
+        });
+
+        let mut peer_futs = Vec::new();
+        for peer in peers {
+            let p_url = format!("{}/query", peer.http_url.trim_end_matches('/'));
+            let c = client.clone();
+            let p = payload.clone();
+            peer_futs.push(tokio::spawn(async move {
+                match c.post(&p_url)
+                    .json(&p)
+                    .timeout(std::time::Duration::from_millis(5000))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+                    Err(e) => {
+                        tracing::warn!("Scatter analyze query to peer {} failed: {}", p_url, e);
+                        None
+                    }
+                }
+            }));
+        }
+
+        let peer_vals = futures::future::join_all(peer_futs).await;
+        return merge_cluster_analyze_results(state, local_val, peer_vals);
+    }
+
     if is_read_or_algo && !local_only && !peers.is_empty() {
         let local_val = Box::pin(execute_single_query(state, trimmed, true)).await;
 
@@ -527,6 +819,7 @@ pub async fn execute_single_query(state: &AppState, trimmed: &str, local_only: b
         return merge_scatter_gather_results(&stmt, local_val, peer_vals);
     }
 
+    let is_analyze_graph = matches!(stmt, gdb_parser::ast::Statement::AnalyzeGraph);
     let exec_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state.executor.execute(stmt)
     }));
@@ -564,7 +857,7 @@ pub async fn execute_single_query(state: &AppState, trimmed: &str, local_only: b
                 }
             }
 
-            serde_json::json!({
+            let mut res_json = serde_json::json!({
                 "status": "ok",
                 "message": res.message,
                 "elapsed_us": elapsed_us,
@@ -572,7 +865,13 @@ pub async fn execute_single_query(state: &AppState, trimmed: &str, local_only: b
                 "rows_affected": res.rows_affected,
                 "columns": columns,
                 "rows": rows,
-            })
+            });
+            if is_analyze_graph {
+                if let Some(ref st) = *state.executor.stats.read() {
+                    res_json["stats"] = serde_json::to_value(st).unwrap_or_default();
+                }
+            }
+            res_json
         }
         Ok(Err(e)) => {
             state.queries_err.fetch_add(1, Ordering::Relaxed);
