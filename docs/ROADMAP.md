@@ -4,8 +4,17 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 ---
 
-## 📌 Current Status (Version v0.5.7 — Release)
+## 📌 Current Status (Version v0.5.8 — Release)
 
+- ✅ **Studio Multi-Hop Traversal Chains, Node Deduplication & Table Sorting (v0.5.8)**:
+  - Full N-hop path traversal reconstruction ($v_0 \to v_1 \to \dots \to v_{N-1}$) with automatic edge label inference.
+  - Global vertex and edge deduplication across rows and hops (zero duplicate floating nodes on canvas).
+  - Interactive table column sorting (numeric, locale string, and null-safe).
+  - Table row selection with detailed Inspector metadata, visual traversal path chain, and "Focus in Graph" navigation.
+  - Canvas row entity and edge highlighting with glowing halos.
+  - Collapsible template categories accordion with persistent state in `localStorage`.
+  - Expanded Pattern Matching & Paths library with 12 ready-to-run Cypher templates.
+  - Apple Developer Code Signing and Apple Notarization GitHub Actions release workflow.
 - ✅ **Cluster ANALYZE GRAPH, Sharded DML & Studio Physics Stabilization (v0.5.7)**:
   - Cluster scatter-gather for `ANALYZE GRAPH;` across cluster partitions with replication-factor weighted metrics merging.
   - Sharded batch mutations (`InsertVertices` and `InsertEdges`) partitioned by hash-ring replica set, eliminating data duplication when $RF < N$.
@@ -95,7 +104,7 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 | Release | Codename | Primary Focus | Key Deliverables |
 | :---: | :---: | :--- | :--- |
-| **v0.5.7** | **Grotius** *(Current)* | **Cluster ANALYZE GRAPH, Sharded DML, openCypher Functions & Studio Physics** | 1. Cluster-aware `ANALYZE GRAPH;` scatter-gather and $RF$-weighted metrics.<br>2. Sharded batch DML (`InsertVertices`, `InsertEdges`).<br>3. openCypher built-in functions (`id`, `label`) & JSON entity projection (`RETURN a, b`).<br>4. Stabilized 2D/3D graph physics in Studio.<br>5. 84.8% test coverage across workspace. |
+| **v0.5.8** | **Grotius** *(Current)* | **Studio Multi-Hop Chains, Node Deduplication, Table Sorting & Notarization** | 1. Connected N-hop traversal chains ($v_0 \to \dots \to v_{N-1}$).<br>2. Vertex & edge deduplication across hops and rows.<br>3. Interactive table column sorting & row metadata inspector.<br>4. Collapsible template categories.<br>5. 12 Pattern Matching templates.<br>6. Apple Developer signing & notarization in CI. |
 | **v0.6.0** | **Hals** | **Distributed Pregel/BSP ($RF=1$), Graph Spaces & AI Integrations** | 1. **Distributed Pregel/BSP Analytics**: global PageRank, WCC, Louvain over sharded graphs ($RF=1$) via Arrow Flight Shuffle.<br>2. **Multi-Graph**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (schema & CSR isolation).<br>3. Graph space selectors across GDB Studio, REPL CLI, and Python SDK.<br>4. LangChain & LangGraph connectors (`langchain-gdb`).<br>5. Native HNSW Vector Graph Index and hybrid Graph RAG. |
 | **v0.7.0** | **Steen** | **Distributed ACID Transactions, Advanced Analytics & macOS Notarization** | 1. Distributed multi-partition ACID transactions (2PC, Snapshot Isolation).<br>2. Weighted shortest path algorithms (Dijkstra, A*).<br>3. Real-time topology and GPU telemetry in Studio.<br>4. Official Apple Developer Code Signing and Apple Notarization for macOS release assets. |
 | **v1.0.0** | **Erasmus** | **Enterprise Security & LTS** | 1. TLS/mTLS, JWT authentication, and granular RBAC per graph/label/property.<br>2. Streaming Raft Snapshots over Arrow Flight RPC.<br>3. Long-Term Support (LTS) release with strict API stability guarantees. |

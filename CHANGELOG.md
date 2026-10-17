@@ -4,6 +4,26 @@ All notable changes to **GDB** (Distributed High-Performance In-Memory Graph Dat
 
 ---
 
+## [0.5.8] - 2026-10-17
+
+### 🚀 New Features
+- **Full N-Hop Path Traversal Visualizer:** Multi-hop path pattern queries (e.g. 2-hop, 3-hop, 4-hop `RETURN a.name, b.name, c.name, d.name`) now construct complete, connected sequential edge chains ($v_0 \to v_1 \to \dots \to v_{N-1}$) rather than disjoint pairwise edges. Supports both sequential vertex projection columns and alternating relationship columns (`v0, r1, v1, r2, v2`).
+- **Interactive Table Column Sorting:** Table headers in GDB Studio are fully sortable on click with direction indicators (`▲` ascending, `▼` descending, `⇅` unsorted). Intelligently compares numeric values mathematically, strings alphabetically via `localeCompare`, and sinks null/undefined values to the bottom.
+- **Table Row Selection & Traversal Inspector:** Clicking any row in Table View highlights the row and opens a comprehensive Inspector panel showing the full traversal path chain (`(Node A) ──[FOLLOWS]──▶ (Node B)`), individual vertex entity cards with property inspection, and a `🎯 Focus in Graph` button that smoothly navigates to and selects the node on the canvas.
+- **Canvas Row Highlighting:** Vertices and edges belonging to the currently selected table row are rendered on the canvas with bright cyan glowing halos and accent stroke weights.
+- **Collapsible Template Categories:** Sidebar query templates are organized into collapsible accordions with animated chevrons (`▾` / `▸`), template count badges, quick "Expand All" / "Collapse All" controls, and persistent state in `localStorage`.
+- **Expanded Pattern Matching & Paths Library:** Added 12 ready-to-run Cypher templates including 1..4-hop traversals, full JSON entity returns, variable-length paths (`[:FOLLOWS*1..3]`), bidirectional matching, cyclic 3-triangle detection, mutual recommendation patterns, and degree aggregation.
+- **Apple Developer Code Signing & Notarization CI Workflow:** Integrated Developer ID Application signing with Hardened Runtime and Apple Notary Service submission (`xcrun notarytool`) in release workflows for macOS artifacts (Apple Silicon ARM64 & Intel x86_64).
+
+### 🐛 Bug Fixes
+- **Graph Vertex Deduplication:** Eliminated disjoint identical vertices floating separately on the canvas. Vertices with matching IDs appearing across multiple hops or rows are seamlessly merged with unified property bags and labels.
+- **Edge Deduplication:** Eliminated redundant duplicate parallel edges between identical source and target nodes with the same label.
+- **Cluster ANALYZE GRAPH Scatter-Gather & RF-Weighted Merging:** Merging partition statistics with replication factor weighting to prevent inflated telemetry when $RF < N$.
+- **Sharded DML Batch Ingest:** Sharded `InsertVertices` and `InsertEdges` grouped by hash-ring replica set, eliminating row duplication when $RF < N$.
+- **Physics Stabilization:** Resolved node explosion in 2D and 3D visualizers via distance softening, velocity limits, bounded gravity, and temperature cooling.
+
+---
+
 ## [0.5.7] - 2026-10-15
 
 ### 🚀 New Features
