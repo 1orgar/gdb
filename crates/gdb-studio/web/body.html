@@ -33,94 +33,189 @@
       <div class="sidebar-content">
         <!-- Templates View -->
         <div id="tab-templates">
-          <div class="section-title">🌐 Pattern Matching &amp; Paths</div>
-          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name LIMIT 50;')">
-            <div class="template-title">1-Hop Traversal</div>
-            <div class="template-query">MATCH (a:User)-[:FOLLOWS]->(b:User)...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) RETURN a.name, b.name, c.name LIMIT 25;')">
-            <div class="template-title">2-Hop Traversal</div>
-            <div class="template-query">MATCH (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c)...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)-[:FOLLOWS]->(d:User) RETURN a.name, b.name, c.name, d.name LIMIT 20;')">
-            <div class="template-title">3-Hop Path Traversal</div>
-            <div class="template-query">MATCH (a)->(b)->(c)->(d)...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) WHERE a.age > 25 RETURN a.name, b.name LIMIT 50;')">
-            <div class="template-title">Filtered Traversal (WHERE)</div>
-            <div class="template-query">MATCH ... WHERE a.age &gt; 25...</div>
+          <div class="template-toolbar">
+            <span style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Categories</span>
+            <div style="display:flex; gap:6px;">
+              <button class="btn btn-secondary btn-xs" onclick="expandAllCategories()" title="Expand all categories">Expand All</button>
+              <button class="btn btn-secondary btn-xs" onclick="collapseAllCategories()" title="Collapse all categories">Collapse All</button>
+            </div>
           </div>
 
-          <div class="section-title" style="margin-top: 14px;">🎯 Vector Similarity Search</div>
-          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Document\', \'embedding\', [0.12, 0.45, -0.23, 0.88], 5, \'cosine\') YIELD vertex_id, score;')">
-            <div class="template-title">Vector Cosine Similarity</div>
-            <div class="template-query">CALL vector.similaritySearch(..., 'cosine')...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [1.0, 0.0, 0.0], 5, \'l2\') YIELD vertex_id, score;')">
-            <div class="template-title">Vector L2 Euclidean Search</div>
-            <div class="template-query">CALL vector.similaritySearch(..., 'l2')...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [0.5, 0.5, 0.5], 5, \'dot\') YIELD vertex_id, score;')">
-            <div class="template-title">Vector Dot Product Search</div>
-            <div class="template-query">CALL vector.similaritySearch(..., 'dot')...</div>
+          <!-- Category 1: Pattern Matching & Paths -->
+          <div class="template-category" id="cat-patterns">
+            <div class="category-header" onclick="toggleTemplateCategory('patterns')">
+              <div class="category-title">
+                <span class="category-chevron" id="cat-chevron-patterns">▾</span>
+                <span>🌐 Pattern Matching &amp; Paths</span>
+              </div>
+              <span class="category-count">12</span>
+            </div>
+            <div class="category-body" id="cat-body-patterns">
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, b.name LIMIT 50;')">
+                <div class="template-title">1-Hop Traversal</div>
+                <div class="template-query">MATCH (a:User)-[:FOLLOWS]->(b:User)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a, b LIMIT 25;')">
+                <div class="template-title">Full Entity Return (JSON Entities)</div>
+                <div class="template-query">MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a, b...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN id(a), label(a), id(b), label(b) LIMIT 50;')">
+                <div class="template-title">Entity Identity &amp; Labels</div>
+                <div class="template-query">RETURN id(a), label(a), id(b), label(b)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) RETURN a.name, b.name, c.name LIMIT 25;')">
+                <div class="template-title">2-Hop Traversal</div>
+                <div class="template-query">MATCH (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)-[:FOLLOWS]->(d:User) RETURN a.name, b.name, c.name, d.name LIMIT 20;')">
+                <div class="template-title">3-Hop Path Traversal</div>
+                <div class="template-query">MATCH (a)->(b)->(c)->(d)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)-[:FOLLOWS]->(d:User)-[:FOLLOWS]->(e:User) RETURN a.name, b.name, c.name, d.name, e.name LIMIT 10;')">
+                <div class="template-title">4-Hop Deep Path Traversal</div>
+                <div class="template-query">MATCH (a)->(b)->(c)->(d)->(e)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS*1..3]->(b:User) RETURN a.name, b.name LIMIT 25;')">
+                <div class="template-title">Variable-Length Path (1..3 Hops)</div>
+                <div class="template-query">MATCH (a)-[:FOLLOWS*1..3]->(b)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]-(b:User) RETURN a.name, b.name LIMIT 50;')">
+                <div class="template-title">Bidirectional / Undirected Traversal</div>
+                <div class="template-query">MATCH (a:User)-[:FOLLOWS]-(b:User)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) WHERE a.age >= 20 AND b.age <= 40 RETURN a.name, b.name, c.name LIMIT 25;')">
+                <div class="template-title">Filtered Multi-Hop (WHERE Range)</div>
+                <div class="template-query">MATCH ... WHERE a.age &gt;= 20 AND b.age &lt;= 40...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)-[:FOLLOWS]->(a:User) RETURN a.name, b.name, c.name LIMIT 20;')">
+                <div class="template-title">Cyclic Match (3-Cycle / Triangle)</div>
+                <div class="template-query">MATCH (a)->(b)->(c)->(a)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) WHERE a <> c RETURN a.name, c.name LIMIT 25;')">
+                <div class="template-title">Friend-of-a-Friend (Mutual)</div>
+                <div class="template-query">MATCH (a)->(b)->(c) WHERE a &lt;&gt; c...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a.name, count(b) AS followers ORDER BY followers DESC LIMIT 10;')">
+                <div class="template-title">Degree Aggregation (Top Influencers)</div>
+                <div class="template-query">RETURN a.name, count(b) AS followers...</div>
+              </div>
+            </div>
           </div>
 
-          <div class="section-title" style="margin-top: 14px;">📊 Graph Analytics &amp; Subgraphs</div>
-          <div class="template-item" onclick="setQuery('CALL algo.pageRank() YIELD vertex_id, score;')">
-            <div class="template-title">PageRank (Global)</div>
-            <div class="template-query">CALL algo.pageRank()...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL algo.pageRank({edge_type: \'FOLLOWS\', damping: 0.85}) YIELD vertex_id, score;')">
-            <div class="template-title">PageRank on Subgraph</div>
-            <div class="template-query">CALL algo.pageRank({edge_type: 'FOLLOWS'})...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL algo.louvain() YIELD vertex_id, community;')">
-            <div class="template-title">Louvain Community Detection</div>
-            <div class="template-query">CALL algo.louvain()...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL algo.wcc() YIELD vertex_id, component;')">
-            <div class="template-title">Weakly Connected Components</div>
-            <div class="template-query">CALL algo.wcc()...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL algo.triangleCount() YIELD vertex_id, triangles;')">
-            <div class="template-title">Triangle Count &amp; Clustering</div>
-            <div class="template-query">CALL algo.triangleCount()...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL algo.sssp(1) YIELD vertex_id, distance;')">
-            <div class="template-title">Single Source Shortest Path (SSSP)</div>
-            <div class="template-query">CALL algo.sssp(1)...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CALL algo.bfs(1, 4) YIELD vertex_id, depth;')">
-            <div class="template-title">Breadth-First Search (BFS)</div>
-            <div class="template-query">CALL algo.bfs(1, 4)...</div>
+          <!-- Category 2: Vector Similarity Search -->
+          <div class="template-category" id="cat-vector">
+            <div class="category-header" onclick="toggleTemplateCategory('vector')">
+              <div class="category-title">
+                <span class="category-chevron" id="cat-chevron-vector">▾</span>
+                <span>🎯 Vector Similarity Search</span>
+              </div>
+              <span class="category-count">3</span>
+            </div>
+            <div class="category-body" id="cat-body-vector">
+              <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Document\', \'embedding\', [0.12, 0.45, -0.23, 0.88], 5, \'cosine\') YIELD vertex_id, score;')">
+                <div class="template-title">Vector Cosine Similarity</div>
+                <div class="template-query">CALL vector.similaritySearch(..., 'cosine')...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [1.0, 0.0, 0.0], 5, \'l2\') YIELD vertex_id, score;')">
+                <div class="template-title">Vector L2 Euclidean Search</div>
+                <div class="template-query">CALL vector.similaritySearch(..., 'l2')...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL vector.similaritySearch(\'Item\', \'vec\', [0.5, 0.5, 0.5], 5, \'dot\') YIELD vertex_id, score;')">
+                <div class="template-title">Vector Dot Product Search</div>
+                <div class="template-query">CALL vector.similaritySearch(..., 'dot')...</div>
+              </div>
+            </div>
           </div>
 
-          <div class="section-title" style="margin-top: 14px;">📐 Schema Catalog &amp; DDL</div>
-          <div class="template-item" onclick="setQuery('CREATE VERTEX User (name STRING, age INT64, embedding VECTOR(128));')">
-            <div class="template-title">Create Vertex Tag with Vector</div>
-            <div class="template-query">CREATE VERTEX User (name STRING...)...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CREATE EDGE FOLLOWS (since INT64, weight FLOAT64);')">
-            <div class="template-title">Create Edge Type with Properties</div>
-            <div class="template-query">CREATE EDGE FOLLOWS (since INT64...)...</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CREATE INDEX ON User(name);')">
-            <div class="template-title">Create Property Index</div>
-            <div class="template-query">CREATE INDEX ON User(name);</div>
+          <!-- Category 3: Graph Analytics & Subgraphs -->
+          <div class="template-category" id="cat-analytics">
+            <div class="category-header" onclick="toggleTemplateCategory('analytics')">
+              <div class="category-title">
+                <span class="category-chevron" id="cat-chevron-analytics">▾</span>
+                <span>📊 Graph Analytics &amp; Subgraphs</span>
+              </div>
+              <span class="category-count">7</span>
+            </div>
+            <div class="category-body" id="cat-body-analytics">
+              <div class="template-item" onclick="setQuery('CALL algo.pageRank() YIELD vertex_id, score;')">
+                <div class="template-title">PageRank (Global)</div>
+                <div class="template-query">CALL algo.pageRank()...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL algo.pageRank({edge_type: \'FOLLOWS\', damping: 0.85}) YIELD vertex_id, score;')">
+                <div class="template-title">PageRank on Subgraph</div>
+                <div class="template-query">CALL algo.pageRank({edge_type: 'FOLLOWS'})...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL algo.louvain() YIELD vertex_id, community;')">
+                <div class="template-title">Louvain Community Detection</div>
+                <div class="template-query">CALL algo.louvain()...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL algo.wcc() YIELD vertex_id, component;')">
+                <div class="template-title">Weakly Connected Components</div>
+                <div class="template-query">CALL algo.wcc()...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL algo.triangleCount() YIELD vertex_id, triangles;')">
+                <div class="template-title">Triangle Count &amp; Clustering</div>
+                <div class="template-query">CALL algo.triangleCount()...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL algo.sssp(1) YIELD vertex_id, distance;')">
+                <div class="template-title">Single Source Shortest Path (SSSP)</div>
+                <div class="template-query">CALL algo.sssp(1)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CALL algo.bfs(1, 4) YIELD vertex_id, depth;')">
+                <div class="template-title">Breadth-First Search (BFS)</div>
+                <div class="template-query">CALL algo.bfs(1, 4)...</div>
+              </div>
+            </div>
           </div>
 
-          <div class="section-title" style="margin-top: 14px;">🛠️ Operations &amp; Batch Scripts</div>
-          <div class="template-item" onclick="setQuery('compact;')">
-            <div class="template-title">Force CSR Compaction</div>
-            <div class="template-query">compact;</div>
+          <!-- Category 4: Schema Catalog & DDL -->
+          <div class="template-category" id="cat-schema">
+            <div class="category-header" onclick="toggleTemplateCategory('schema')">
+              <div class="category-title">
+                <span class="category-chevron" id="cat-chevron-schema">▾</span>
+                <span>📐 Schema Catalog &amp; DDL</span>
+              </div>
+              <span class="category-count">3</span>
+            </div>
+            <div class="category-body" id="cat-body-schema">
+              <div class="template-item" onclick="setQuery('CREATE VERTEX User (name STRING, age INT64, embedding VECTOR(128));')">
+                <div class="template-title">Create Vertex Tag with Vector</div>
+                <div class="template-query">CREATE VERTEX User (name STRING...)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CREATE EDGE FOLLOWS (since INT64, weight FLOAT64);')">
+                <div class="template-title">Create Edge Type with Properties</div>
+                <div class="template-query">CREATE EDGE FOLLOWS (since INT64...)...</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CREATE INDEX ON User(name);')">
+                <div class="template-title">Create Property Index</div>
+                <div class="template-query">CREATE INDEX ON User(name);</div>
+              </div>
+            </div>
           </div>
-          <div class="template-item" onclick="setQuery('snapshot;')">
-            <div class="template-title">Commit Parquet S3 Snapshot</div>
-            <div class="template-query">snapshot;</div>
-          </div>
-          <div class="template-item" onclick="setQuery('CREATE VERTEX Person (name STRING);\nCREATE EDGE KNOWS ();\nINSERT VERTEX 1 Person (name=\'Alice\');\nINSERT VERTEX 2 Person (name=\'Bob\');\nINSERT EDGE 1->2 KNOWS ();\nMATCH (a)-[r]->(b) RETURN a.name, b.name;')">
-            <div class="template-title">Multi-Statement Script</div>
-            <div class="template-query">CREATE ... INSERT ... MATCH ...</div>
+
+          <!-- Category 5: Operations & Batch Scripts -->
+          <div class="template-category" id="cat-ops">
+            <div class="category-header" onclick="toggleTemplateCategory('ops')">
+              <div class="category-title">
+                <span class="category-chevron" id="cat-chevron-ops">▾</span>
+                <span>🛠️ Operations &amp; Batch Scripts</span>
+              </div>
+              <span class="category-count">3</span>
+            </div>
+            <div class="category-body" id="cat-body-ops">
+              <div class="template-item" onclick="setQuery('compact;')">
+                <div class="template-title">Force CSR Compaction</div>
+                <div class="template-query">compact;</div>
+              </div>
+              <div class="template-item" onclick="setQuery('snapshot;')">
+                <div class="template-title">Commit Parquet S3 Snapshot</div>
+                <div class="template-query">snapshot;</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CREATE VERTEX Person (name STRING);\nCREATE EDGE KNOWS ();\nINSERT VERTEX 1 Person (name=\'Alice\');\nINSERT VERTEX 2 Person (name=\'Bob\');\nINSERT EDGE 1->2 KNOWS ();\nMATCH (a)-[r]->(b) RETURN a.name, b.name;')">
+                <div class="template-title">Multi-Statement Script</div>
+                <div class="template-query">CREATE ... INSERT ... MATCH ...</div>
+              </div>
+            </div>
           </div>
         </div>
 

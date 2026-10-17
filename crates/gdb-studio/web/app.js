@@ -321,75 +321,289 @@
       });
     }
 
-    // Table Rendering
+    // Table Sorting & Selection State
+    let currentTableData = null;
+    let currentSortCol = null;
+    let currentSortAsc = true;
+    let selectedTableRowIdx = null;
+
+    // Table Rendering with Interactive Sorting & Row Inspection
     function renderTable(data) {
+      currentTableData = data;
+      selectedTableRowIdx = null;
+      if (typeof selectedRowNodeIds !== 'undefined') selectedRowNodeIds.clear();
+      if (typeof selectedRowEdges !== 'undefined') selectedRowEdges.clear();
+
       const thead = document.getElementById('table-header');
-      const tbody = document.getElementById('table-body');
       thead.innerHTML = '';
-      tbody.innerHTML = '';
 
       if (!data.columns || data.columns.length === 0) {
+        const tbody = document.getElementById('table-body');
         thead.innerHTML = '<th>Result</th>';
         tbody.innerHTML = `<tr><td>${data.message || (data.error ? `<span style="color:var(--danger)">${data.error}</span>` : 'Success')}</td></tr>`;
         return;
       }
 
-      for (const col of data.columns) {
+      data.columns.forEach((col, colIdx) => {
         const th = document.createElement('th');
-        th.textContent = col;
-        thead.appendChild(th);
-      }
+        th.className = 'sortable-th';
+        th.title = `Sort by ${col}`;
 
-      if (data.rows) {
-        for (const row of data.rows) {
-          const tr = document.createElement('tr');
-          for (const cell of row) {
-            const td = document.createElement('td');
-            if (Array.isArray(cell)) {
-              if (cell.length <= 8) {
-                td.textContent = `[${cell.map(v => typeof v === 'number' ? Number(v.toFixed(4)) : v).join(', ')}]`;
-              } else {
-                td.textContent = `[${cell.slice(0, 4).map(v => typeof v === 'number' ? Number(v.toFixed(3)) : v).join(', ')}, ... (${cell.length} dims)]`;
-              }
-              td.style.fontFamily = 'monospace';
-              td.style.color = 'var(--cyan)';
-            } else {
-              td.textContent = (typeof cell === 'object' && cell !== null) ? JSON.stringify(cell) : cell;
-            }
-            tr.appendChild(td);
-          }
-          tbody.appendChild(tr);
+        let sortIcon = '⇅';
+        let iconClass = 'sort-icon';
+        if (currentSortCol === col) {
+          sortIcon = currentSortAsc ? '▲' : '▼';
+          iconClass += ' active';
         }
-      }
+
+        th.innerHTML = `<span class="th-content">${col}</span> <span class="${iconClass}">${sortIcon}</span>`;
+        th.onclick = () => sortTableByColumn(colIdx, col);
+        thead.appendChild(th);
+      });
+
+      renderTableBody();
     }
 
-    // Build Graph from Node/Edge Lists
+    function sortTableByColumn(colIdx, colName) {
+      if (!currentTableData || !currentTableData.rows || currentTableData.rows.length === 0) return;
+
+      if (currentSortCol === colName) {
+        currentSortAsc = !currentSortAsc;
+      } else {
+        currentSortCol = colName;
+        currentSortAsc = true;
+      }
+
+      currentTableData.rows.sort((rowA, rowB) => {
+        const valA = rowA[colIdx];
+        const valB = rowB[colIdx];
+
+        if (valA === null || valA === undefined) return 1;
+        if (valB === null || valB === undefined) return -1;
+
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          return currentSortAsc ? valA - valB : valB - valA;
+        }
+
+        const numA = Number(valA);
+        const numB = Number(valB);
+        if (!isNaN(numA) && !isNaN(numB) && typeof valA !== 'boolean' && typeof valB !== 'boolean' && typeof valA !== 'object' && typeof valB !== 'object') {
+          return currentSortAsc ? numA - numB : numB - numA;
+        }
+
+        const strA = typeof valA === 'object' ? JSON.stringify(valA) : String(valA);
+        const strB = typeof valB === 'object' ? JSON.stringify(valB) : String(valB);
+        return currentSortAsc ? strA.localeCompare(strB, undefined, { numeric: true, sensitivity: 'base' })
+                              : strB.localeCompare(strA, undefined, { numeric: true, sensitivity: 'base' });
+      });
+
+      const ths = document.querySelectorAll('#table-header th');
+      ths.forEach((th, idx) => {
+        const col = currentTableData.columns[idx];
+        const iconSpan = th.querySelector('.sort-icon');
+        if (iconSpan) {
+          if (col === currentSortCol) {
+            iconSpan.textContent = currentSortAsc ? '▲' : '▼';
+            iconSpan.className = 'sort-icon active';
+          } else {
+            iconSpan.textContent = '⇅';
+            iconSpan.className = 'sort-icon';
+          }
+        }
+      });
+
+      renderTableBody();
+    }
+
+    function renderTableBody() {
+      const tbody = document.getElementById('table-body');
+      tbody.innerHTML = '';
+      if (!currentTableData || !currentTableData.rows || currentTableData.rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="100%">No rows returned</td></tr>';
+        return;
+      }
+
+      currentTableData.rows.forEach((row, rowIdx) => {
+        const tr = document.createElement('tr');
+        tr.className = 'table-row-item';
+        if (selectedTableRowIdx === rowIdx) tr.classList.add('selected');
+
+        tr.onclick = () => selectTableRow(rowIdx, row, currentTableData.columns);
+
+        for (const cell of row) {
+          const td = document.createElement('td');
+          if (Array.isArray(cell)) {
+            if (cell.length <= 8) {
+              td.textContent = `[${cell.map(v => typeof v === 'number' ? Number(v.toFixed(4)) : v).join(', ')}]`;
+            } else {
+              td.textContent = `[${cell.slice(0, 4).map(v => typeof v === 'number' ? Number(v.toFixed(3)) : v).join(', ')}, ... (${cell.length} dims)]`;
+            }
+            td.style.fontFamily = 'monospace';
+            td.style.color = 'var(--cyan)';
+          } else if (typeof cell === 'object' && cell !== null) {
+            td.textContent = JSON.stringify(cell);
+            td.style.fontFamily = 'monospace';
+          } else {
+            td.textContent = (cell === null || cell === undefined) ? 'null' : cell;
+            if (cell === null || cell === undefined) td.style.color = 'var(--text-muted)';
+          }
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      });
+    }
+
+    function selectTableRow(rowIdx, row, columns) {
+      selectedTableRowIdx = rowIdx;
+      document.querySelectorAll('#table-body tr').forEach((r, idx) => {
+        if (idx === rowIdx) r.classList.add('selected');
+        else r.classList.remove('selected');
+      });
+
+      if (typeof selectedRowNodeIds !== 'undefined') selectedRowNodeIds.clear();
+      if (typeof selectedRowEdges !== 'undefined') selectedRowEdges.clear();
+
+      const verticesInRow = [];
+      const edgesInRow = [];
+
+      columns.forEach((col, idx) => {
+        const val = row[idx];
+        const entity = parseNodeEntity(val, col);
+        if (entity && entity.id && entity.id !== 'null' && entity.id !== 'undefined') {
+          verticesInRow.push({ col, entity, raw: val });
+          if (typeof selectedRowNodeIds !== 'undefined') selectedRowNodeIds.add(String(entity.id));
+        }
+      });
+
+      if (typeof graphEdges !== 'undefined' && typeof selectedRowEdges !== 'undefined') {
+        for (let i = 0; i < verticesInRow.length - 1; i++) {
+          const uId = String(verticesInRow[i].entity.id);
+          const vId = String(verticesInRow[i + 1].entity.id);
+          const e = graphEdges.find(ge => String(ge.source.id) === uId && String(ge.target.id) === vId);
+          if (e) {
+            selectedRowEdges.add(e);
+            edgesInRow.push(e);
+          }
+        }
+      }
+
+      openRowInspector(rowIdx, row, columns, verticesInRow, edgesInRow);
+      if (typeof wakeSimulation === 'function') wakeSimulation(0.3);
+    }
+
+    function openRowInspector(rowIdx, row, columns, vertices, edges) {
+      const panel = document.getElementById('inspector-panel');
+      const title = document.getElementById('inspector-title');
+      const body = document.getElementById('inspector-body');
+      if (!panel || !title || !body) return;
+      panel.classList.remove('closed');
+
+      title.innerHTML = `📋 Row #${rowIdx + 1} Metadata`;
+
+      let html = '';
+
+      if (vertices.length > 1) {
+        html += `<div style="font-size:10px; font-weight:700; color:var(--cyan); text-transform:uppercase; margin-bottom:8px; letter-spacing:0.5px;">Traversal Path Sequence</div>`;
+        html += `<div class="path-chain">`;
+        vertices.forEach((v, idx) => {
+          const lbl = v.entity.label || 'Node';
+          html += `<div class="path-node" onclick="focusNode('${v.entity.id}')" title="Click to center on Node #${v.entity.id} in Graph">
+            <span class="path-node-dot" style="background:${getNodeColor(lbl, v.entity.id)};"></span>
+            <span class="path-node-name">${v.entity.id}</span>
+            <span class="path-node-label">(${lbl})</span>
+          </div>`;
+          if (idx < vertices.length - 1) {
+            const relLabel = (edges[idx] && edges[idx].label) ? edges[idx].label : 'REL';
+            html += `<div class="path-arrow">─[${relLabel}]→</div>`;
+          }
+        });
+        html += `</div>`;
+      }
+
+      html += `<div style="display:flex; gap:6px; margin: 12px 0 10px 0;">
+        <span class="dash-badge blue" style="font-size:10px;">${columns.length} Cols</span>
+        <span class="dash-badge green" style="font-size:10px;">${vertices.length} Vertices</span>
+        <span class="dash-badge purple" style="font-size:10px;">${edges.length} Edges</span>
+      </div>`;
+
+      if (vertices.length > 0) {
+        html += `<div style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin:14px 0 6px 0;">Vertices in Path (${vertices.length})</div>`;
+        vertices.forEach(v => {
+          const color = getNodeColor(v.entity.label, v.entity.id);
+          html += `<div class="entity-card" style="border-left: 3px solid ${color};">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <span style="font-weight:700; color:var(--text-bright); font-size:12px;">Node #${v.entity.id}</span>
+              <span class="dash-badge" style="background:${color}22; color:${color}; font-size:10px;">${v.entity.label}</span>
+            </div>
+            <div style="font-size:10px; color:var(--text-muted); font-family:monospace; margin-bottom:4px;">Column: ${v.col}</div>`;
+
+          if (v.entity.properties && Object.keys(v.entity.properties).length > 0) {
+            html += `<div style="margin-top:4px; font-size:11px;">`;
+            for (const [pk, pv] of Object.entries(v.entity.properties)) {
+              html += `<div style="display:flex; justify-content:space-between; color:var(--text); font-family:monospace; padding:1px 0;">
+                <span style="color:var(--text-muted);">${pk}:</span>
+                <span style="color:var(--text-bright);">${typeof pv === 'object' ? JSON.stringify(pv) : pv}</span>
+              </div>`;
+            }
+            html += `</div>`;
+          }
+          html += `<button class="btn btn-secondary btn-xs" style="margin-top:6px; width:100%; font-size:10px; padding:3px 6px;" onclick="focusNode('${v.entity.id}')">🎯 Focus in Graph</button>`;
+          html += `</div>`;
+        });
+      }
+
+      html += `<div style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin:16px 0 6px 0;">Row Data Properties</div>`;
+      columns.forEach((col, idx) => {
+        const val = row[idx];
+        const valStr = typeof val === 'object' && val !== null ? JSON.stringify(val) : String(val);
+        html += `<div class="prop-row">
+          <div class="prop-key">${col}</div>
+          <div class="prop-val">${valStr}</div>
+        </div>`;
+      });
+
+      body.innerHTML = html;
+    }
+
+    // Build Graph from Node/Edge Lists with Global Deduplication
     function buildGraph(nodes, edges) {
       const MAX_GRAPH_NODES = 250;
       let capped = false;
       const nodeMap = new Map();
+      const edgeSet = new Set();
       graphNodes = [];
       graphEdges = [];
 
-      const totalNodes = Math.min(nodes.length, MAX_GRAPH_NODES);
       for (let idx = 0; idx < nodes.length; idx++) {
         if (graphNodes.length >= MAX_GRAPH_NODES) {
           capped = true;
           break;
         }
         const n = nodes[idx];
-        const angle = totalNodes > 1 ? (idx / totalNodes) * Math.PI * 2 : 0;
-        const radius = totalNodes > 1 ? (60 + Math.sqrt(idx) * 18) : 0;
+        const key = String(n.id);
+        if (nodeMap.has(key)) {
+          const existing = nodeMap.get(key);
+          if (n.label && (!existing.label || existing.label === 'Node' || existing.label === existing.id)) {
+            existing.label = n.label;
+          }
+          if (n.properties) {
+            existing.properties = Object.assign(existing.properties || {}, n.properties);
+          }
+          continue; // Merge into existing, do not duplicate!
+        }
+
+        const angle = (graphNodes.length / Math.max(nodes.length, 1)) * Math.PI * 2;
+        const radius = 60 + Math.sqrt(graphNodes.length) * 18;
         const node = {
-          id: n.id,
-          label: n.label || String(n.id),
+          id: key,
+          label: n.label || key,
           properties: n.properties || {},
           x: Math.cos(angle) * radius,
           y: Math.sin(angle) * radius,
           vx: 0,
           vy: 0
         };
-        nodeMap.set(String(n.id), node);
+        nodeMap.set(key, node);
         graphNodes.push(node);
       }
 
@@ -397,12 +611,16 @@
         const src = nodeMap.get(String(e.source));
         const dst = nodeMap.get(String(e.target));
         if (src && dst) {
-          graphEdges.push({
-            source: src,
-            target: dst,
-            label: e.label || '',
-            properties: e.properties || {}
-          });
+          const edgeKey = `${src.id}->${dst.id}:${e.label || ''}`;
+          if (!edgeSet.has(edgeKey)) {
+            edgeSet.add(edgeKey);
+            graphEdges.push({
+              source: src,
+              target: dst,
+              label: e.label || '',
+              properties: e.properties || {}
+            });
+          }
         }
       }
 
@@ -420,123 +638,57 @@
       }
     }
 
-    // Auto-extract graph from generic rows (e.g. [a.name, b.name] or [vertex_id, score])
-    function extractGraphFromRows(data) {
-      if (!data || !data.columns || !data.rows || data.rows.length === 0) {
-        graphNodes = [];
-        graphEdges = [];
-        selectedEntity = null;
-        closeInspector();
-        document.getElementById('stat-graph').textContent = '0 nodes, 0 edges';
-        if (ctx && canvas) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
-        sync3DGraph();
-        if (currentView === 'unity') renderUnityGraph();
-        return;
+    // Template Categories Accordion Management
+    function toggleTemplateCategory(catId) {
+      const body = document.getElementById(`cat-body-${catId}`);
+      const chevron = document.getElementById(`cat-chevron-${catId}`);
+      if (!body) return;
+      const isCollapsed = body.classList.toggle('collapsed');
+      if (chevron) {
+        chevron.textContent = isCollapsed ? '▸' : '▾';
       }
-
-      const MAX_GRAPH_NODES = 250;
-      let capped = false;
-      const nodeMap = new Map();
-      graphNodes = [];
-      graphEdges = [];
-
-      // Case 1: Multi-column path traversal (e.g. 1-hop, 2-hop, 3-hop: a -> b -> c -> d)
-      if (data.columns.length >= 2 && !data.columns[1].includes('score') && !data.columns[1].includes('distance')) {
-        const isRelTypeMiddle = (data.columns.length === 3 &&
-          (data.columns[1].toLowerCase().includes('type') ||
-           data.columns[1].toLowerCase().includes('rel') ||
-           data.columns[1].toLowerCase().includes('edge')));
-
-        for (const row of data.rows) {
-          if (graphNodes.length >= MAX_GRAPH_NODES) {
-            capped = true;
-            break;
-          }
-
-          if (isRelTypeMiddle) {
-            const uId = String(row[0]);
-            const relType = String(row[1]);
-            const vId = String(row[2]);
-
-            if (!nodeMap.has(uId)) {
-              const u = { id: uId, label: uId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
-              nodeMap.set(uId, u);
-              graphNodes.push(u);
-            }
-            if (!nodeMap.has(vId)) {
-              const v = { id: vId, label: vId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
-              nodeMap.set(vId, v);
-              graphNodes.push(v);
-            }
-            graphEdges.push({
-              source: nodeMap.get(uId),
-              target: nodeMap.get(vId),
-              label: relType
-            });
-          } else {
-            // Consecutive hops along path: row[0] -> row[1] -> row[2] -> row[3] ...
-            for (let step = 0; step < row.length - 1; step++) {
-              const uId = String(row[step]);
-              const vId = String(row[step + 1]);
-              if (!uId || !vId || uId === 'null' || vId === 'null' || uId === 'undefined' || vId === 'undefined') continue;
-
-              if (!nodeMap.has(uId)) {
-                const u = { id: uId, label: uId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
-                nodeMap.set(uId, u);
-                graphNodes.push(u);
-              }
-              if (!nodeMap.has(vId)) {
-                const v = { id: vId, label: vId, properties: {}, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0 };
-                nodeMap.set(vId, v);
-                graphNodes.push(v);
-              }
-
-              const exists = graphEdges.some(e => e.source.id === uId && e.target.id === vId);
-              if (!exists) {
-                graphEdges.push({
-                  source: nodeMap.get(uId),
-                  target: nodeMap.get(vId),
-                  label: ''
-                });
-              }
-            }
-          }
-        }
-      }
-      // Case 2: Analytical single vertex score table (e.g. vertex_id, score/community)
-      else if (data.columns.includes('vertex_id') || data.columns.includes('node')) {
-        const idIdx = data.columns.indexOf('vertex_id') !== -1 ? data.columns.indexOf('vertex_id') : data.columns.indexOf('node');
-        const metricIdx = idIdx === 0 ? 1 : 0;
-        const metricName = data.columns[metricIdx] || 'score';
-
-        for (const row of data.rows) {
-          if (graphNodes.length >= MAX_GRAPH_NODES) {
-            capped = true;
-            break;
-          }
-          const vid = String(row[idIdx]);
-          const metricVal = row[metricIdx];
-          const node = {
-            id: vid,
-            label: `${vid} (${metricVal})`,
-            properties: { [metricName]: metricVal },
-            x: (Math.random() - 0.5) * 250,
-            y: (Math.random() - 0.5) * 250,
-            vx: 0,
-            vy: 0
-          };
-          graphNodes.push(node);
-        }
-      }
-
-      if (capped) {
-        document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes (capped at 250 for 60 FPS), ${graphEdges.length} edges | Full data in Table view`;
-      } else {
-        document.getElementById('stat-graph').textContent = `${graphNodes.length} nodes, ${graphEdges.length} edges`;
-      }
+      try {
+        const saved = JSON.parse(localStorage.getItem('gdb_template_categories') || '{}');
+        saved[catId] = isCollapsed;
+        localStorage.setItem('gdb_template_categories', JSON.stringify(saved));
+      } catch (e) {}
     }
+
+    function expandAllCategories() {
+      document.querySelectorAll('.category-body').forEach(b => b.classList.remove('collapsed'));
+      document.querySelectorAll('.category-chevron').forEach(c => c.textContent = '▾');
+      try {
+        localStorage.setItem('gdb_template_categories', JSON.stringify({}));
+      } catch (e) {}
+    }
+
+    function collapseAllCategories() {
+      const saved = {};
+      document.querySelectorAll('.category-body').forEach(b => {
+        b.classList.add('collapsed');
+        const catId = b.id.replace('cat-body-', '');
+        saved[catId] = true;
+      });
+      document.querySelectorAll('.category-chevron').forEach(c => c.textContent = '▸');
+      try {
+        localStorage.setItem('gdb_template_categories', JSON.stringify(saved));
+      } catch (e) {}
+    }
+
+    function initTemplateCategories() {
+      try {
+        const saved = JSON.parse(localStorage.getItem('gdb_template_categories') || '{}');
+        for (const [catId, isCollapsed] of Object.entries(saved)) {
+          if (isCollapsed) {
+            const body = document.getElementById(`cat-body-${catId}`);
+            const chevron = document.getElementById(`cat-chevron-${catId}`);
+            if (body) body.classList.add('collapsed');
+            if (chevron) chevron.textContent = '▸';
+          }
+        }
+      } catch (e) {}
+    }
+    setTimeout(initTemplateCategories, 50);
 
     // Tabs & Navigation
     function switchView(viewName, el) {

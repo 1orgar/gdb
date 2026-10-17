@@ -285,7 +285,7 @@ fn parse_studio_node(val: &serde_json::Value, col_name: Option<&str>) -> Option<
     }
 
     let raw = val.to_string().trim_matches('"').to_string();
-    if raw.is_empty() {
+    if raw.is_empty() || raw == "null" || raw == "undefined" {
         return None;
     }
 
@@ -366,9 +366,13 @@ async fn handle_query(
                 let mut nodes = Vec::new();
                 let mut edges = Vec::new();
                 let mut node_idx_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                let mut edge_set: std::collections::HashSet<(String, String, String)> = std::collections::HashSet::new();
 
-                let mut add_or_merge_node = |nodes: &mut Vec<GraphNode>, candidate: GraphNode| -> String {
+                let mut add_or_merge_node = |nodes: &mut Vec<GraphNode>, candidate: GraphNode| -> Option<String> {
                     let id = candidate.id.clone();
+                    if id.is_empty() || id == "null" || id == "undefined" {
+                        return None;
+                    }
                     if let Some(&idx) = node_idx_map.get(&id) {
                         if candidate.label != "Node" && (nodes[idx].label == "Node" || nodes[idx].label == nodes[idx].id) {
                             nodes[idx].label = candidate.label;
@@ -382,26 +386,92 @@ async fn handle_query(
                         node_idx_map.insert(id.clone(), nodes.len());
                         nodes.push(candidate);
                     }
-                    id
+                    Some(id)
                 };
 
-                // If columns look like graph traversal (e.g. source, target)
+                // Extract default relationship label from query if available, e.g. -[:FOLLOWS]->
+                let default_rel_label = {
+                    let q = req.query.to_uppercase();
+                    if let Some(pos) = q.find("-[:") {
+                        let rest = &q[pos + 3..];
+                        if let Some(end) = rest.find(']') {
+                            let rel = rest[..end]
+                                .trim()
+                                .trim_start_matches(':')
+                                .split('*')
+                                .next()
+                                .unwrap_or("REL")
+                                .trim();
+                            if !rel.is_empty() {
+                                rel.to_string()
+                            } else {
+                                "REL".to_string()
+                            }
+                        } else {
+                            "REL".to_string()
+                        }
+                    } else {
+                        "REL".to_string()
+                    }
+                };
+
+                // If columns look like graph traversal (e.g. source, target, multi-hop)
                 if columns.len() >= 2 && !columns[1].contains("score") && !columns[1].contains("distance") {
+                    let is_alternating = columns.len() >= 3
+                        && columns.len() % 2 == 1
+                        && (1..columns.len()).step_by(2).all(|idx| {
+                            let col = columns[idx].to_lowercase();
+                            col.starts_with('r') || col.contains("rel") || col.contains("edge") || col.contains("type")
+                        });
+
                     for row in &rows {
-                        if row.len() >= 2 {
-                            let u_cand = parse_studio_node(&row[0], columns.get(0).map(|s| s.as_str()));
-                            let v_cand = parse_studio_node(&row[1], columns.get(1).map(|s| s.as_str()));
+                        if is_alternating {
+                            // Traversal with explicit relationship columns: v0, r1, v1, r2, v2, ...
+                            for step in (0..row.len().saturating_sub(2)).step_by(2) {
+                                let u_cand = parse_studio_node(&row[step], columns.get(step).map(|s| s.as_str()));
+                                let v_cand = parse_studio_node(&row[step + 2], columns.get(step + 2).map(|s| s.as_str()));
+                                let raw_rel = row[step + 1].to_string().trim_matches('"').to_string();
+                                let rel_label = if raw_rel.is_empty() || raw_rel == "null" {
+                                    default_rel_label.clone()
+                                } else {
+                                    raw_rel
+                                };
 
-                            if let (Some(u), Some(v)) = (u_cand, v_cand) {
-                                let u_id = add_or_merge_node(&mut nodes, u);
-                                let v_id = add_or_merge_node(&mut nodes, v);
+                                if let (Some(u), Some(v)) = (u_cand, v_cand) {
+                                    if let (Some(u_id), Some(v_id)) = (add_or_merge_node(&mut nodes, u), add_or_merge_node(&mut nodes, v)) {
+                                        let edge_key = (u_id.clone(), v_id.clone(), rel_label.clone());
+                                        if edge_set.insert(edge_key) {
+                                            edges.push(GraphEdge {
+                                                source: u_id,
+                                                target: v_id,
+                                                label: rel_label,
+                                                properties: serde_json::json!({}),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Sequential vertices path: v0 -> v1 -> v2 -> v3 ... (e.g. 1-hop, 2-hop, 3-hop)
+                            let mut parsed_ids: Vec<Option<String>> = Vec::with_capacity(row.len());
+                            for (col_idx, cell) in row.iter().enumerate() {
+                                let cand = parse_studio_node(cell, columns.get(col_idx).map(|s| s.as_str()));
+                                let id_opt = cand.and_then(|node| add_or_merge_node(&mut nodes, node));
+                                parsed_ids.push(id_opt);
+                            }
 
-                                edges.push(GraphEdge {
-                                    source: u_id,
-                                    target: v_id,
-                                    label: if row.len() > 2 { row[2].to_string().trim_matches('"').to_string() } else { "REL".to_string() },
-                                    properties: serde_json::json!({}),
-                                });
+                            for step in 0..parsed_ids.len().saturating_sub(1) {
+                                if let (Some(u_id), Some(v_id)) = (&parsed_ids[step], &parsed_ids[step + 1]) {
+                                    let edge_key = (u_id.clone(), v_id.clone(), default_rel_label.clone());
+                                    if edge_set.insert(edge_key) {
+                                        edges.push(GraphEdge {
+                                            source: u_id.clone(),
+                                            target: v_id.clone(),
+                                            label: default_rel_label.clone(),
+                                            properties: serde_json::json!({}),
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -413,13 +483,15 @@ async fn handle_query(
                     for row in &rows {
                         if row.len() > id_idx {
                             let vid = row[id_idx].to_string().trim_matches('"').to_string();
-                            let val = if row.len() > val_idx { row[val_idx].clone() } else { serde_json::Value::Null };
+                            if !vid.is_empty() && vid != "null" {
+                                let val = if row.len() > val_idx { row[val_idx].clone() } else { serde_json::Value::Null };
 
-                            nodes.push(GraphNode {
-                                id: vid.clone(),
-                                label: format!("{} ({})", vid, val),
-                                properties: serde_json::json!({ val_name: val }),
-                            });
+                                nodes.push(GraphNode {
+                                    id: vid.clone(),
+                                    label: format!("{} ({})", vid, val),
+                                    properties: serde_json::json!({ val_name: val }),
+                                });
+                            }
                         }
                     }
                 }
@@ -720,11 +792,31 @@ mod tests {
             .unwrap();
         assert!(q_res.status().is_success());
 
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "INSERT VERTEX Person (id, name) VALUES (3, 'Charlie');"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "INSERT EDGE KNOWS FROM 2 TO 3;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
         // Compact storage so graph is indexed into CSR
         let comp_res = client.post(format!("{}/api/compact", base_url)).send().await.unwrap();
         assert!(comp_res.status().is_success());
 
-        // 8. Traversal query producing graph nodes & edges
+        // 8. 1-Hop Traversal query producing graph nodes & edges
         let q_res = client
             .post(format!("{}/api/query", base_url))
             .json(&serde_json::json!({
@@ -736,8 +828,29 @@ mod tests {
         assert!(q_res.status().is_success());
         let body: StudioQueryResponse = q_res.json().await.unwrap();
         assert_eq!(body.status, "ok");
-        assert_eq!(body.graph.nodes.len(), 2);
-        assert_eq!(body.graph.edges.len(), 1);
+        assert_eq!(body.graph.nodes.len(), 3); // Alice, Bob, Charlie (Bob merged, not duplicated!)
+        assert_eq!(body.graph.edges.len(), 2);
+
+        // 8b. 2-Hop Traversal producing 3 nodes and 2 sequential edges
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN a.name, b.name, c.name;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+        let body: StudioQueryResponse = q_res.json().await.unwrap();
+        assert_eq!(body.status, "ok");
+        assert_eq!(body.graph.nodes.len(), 3);
+        assert_eq!(body.graph.edges.len(), 2);
+        assert_eq!(body.graph.edges[0].source, "Alice");
+        assert_eq!(body.graph.edges[0].target, "Bob");
+        assert_eq!(body.graph.edges[0].label, "KNOWS");
+        assert_eq!(body.graph.edges[1].source, "Bob");
+        assert_eq!(body.graph.edges[1].target, "Charlie");
+        assert_eq!(body.graph.edges[1].label, "KNOWS");
 
         // 9. Algorithm query with vertex_id column
         let q_res = client

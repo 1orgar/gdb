@@ -703,3 +703,163 @@ footer {
 .form-input:focus {
   border-color: var(--accent);
 }
+
+/* Template Categories & Accordion */
+.template-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.btn-xs {
+  padding: 2px 7px;
+  font-size: 10px;
+  height: 22px;
+}
+.template-category {
+  margin-bottom: 10px;
+  border: 1px solid rgba(48, 54, 61, 0.6);
+  border-radius: 6px;
+  background: rgba(22, 27, 34, 0.4);
+  overflow: hidden;
+}
+.category-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  cursor: pointer;
+  background: var(--bg-card);
+  user-select: none;
+  transition: background 0.15s ease;
+}
+.category-header:hover {
+  background: #282f3a;
+}
+.category-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.category-chevron {
+  font-size: 11px;
+  color: var(--accent);
+  display: inline-block;
+  width: 12px;
+  transition: transform 0.15s ease;
+}
+.category-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(88, 166, 255, 0.3);
+}
+.category-body {
+  padding: 8px 8px 2px 8px;
+  display: flex;
+  flex-direction: column;
+}
+.category-body.collapsed {
+  display: none;
+}
+
+/* Table Sortable Headers & Row Highlight */
+th.sortable-th {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+}
+th.sortable-th:hover {
+  background: #21262d !important;
+  color: var(--accent);
+}
+.sort-icon {
+  display: inline-block;
+  font-size: 10px;
+  margin-left: 4px;
+  opacity: 0.35;
+  transition: all 0.15s ease;
+}
+.sort-icon.active {
+  opacity: 1;
+  color: var(--accent);
+}
+.table-row-item {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.table-row-item:hover td {
+  background: rgba(88, 166, 255, 0.08) !important;
+}
+.table-row-item.selected td {
+  background: rgba(88, 166, 255, 0.2) !important;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+/* Inspector Path Chain & Entity Cards */
+.path-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-darker);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.path-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+.path-node:hover {
+  border-color: var(--accent);
+  background: #282f3a;
+}
+.path-node-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.path-node-name {
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.path-node-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.path-arrow {
+  font-size: 10px;
+  font-family: monospace;
+  color: var(--accent);
+}
+.entity-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+

@@ -3,6 +3,8 @@ let queryHistory = [];
 let graphNodes = [];
 let graphEdges = [];
 let selectedEntity = null;
+let selectedRowNodeIds = new Set();
+let selectedRowEdges = new Set();
 let physicsRunning = true;
 
 // Canvas & Camera State
@@ -166,8 +168,9 @@ function renderGraph() {
     const b = edge.target;
     if (!a || !b) continue;
 
-    ctx.strokeStyle = (selectedEntity === edge) ? '#58a6ff' : 'rgba(88, 166, 255, 0.35)';
-    ctx.lineWidth = (selectedEntity === edge) ? 2.5 : 1.5;
+    const isRowEdge = selectedRowEdges && selectedRowEdges.has(edge);
+    ctx.strokeStyle = (selectedEntity === edge) ? '#58a6ff' : (isRowEdge ? '#39c5bb' : 'rgba(88, 166, 255, 0.35)');
+    ctx.lineWidth = (selectedEntity === edge) ? 2.5 : (isRowEdge ? 2.5 : 1.5);
 
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
@@ -192,8 +195,8 @@ function renderGraph() {
     if (edge.label) {
       const midX = (a.x + b.x) / 2;
       const midY = (a.y + b.y) / 2;
-      ctx.fillStyle = '#8b949e';
-      ctx.font = '10px monospace';
+      ctx.fillStyle = isRowEdge ? '#7ee787' : '#8b949e';
+      ctx.font = isRowEdge ? 'bold 10px monospace' : '10px monospace';
       ctx.fillText(edge.label, midX + 4, midY - 4);
     }
   }
@@ -202,13 +205,14 @@ function renderGraph() {
   for (const n of graphNodes) {
     const isHovered = (n === hoveredNode);
     const isSelected = (n === selectedEntity);
+    const isRowHighlighted = selectedRowNodeIds && selectedRowNodeIds.has(String(n.id));
     const color = getNodeColor(n.label, n.id);
 
-    // Glow halo on select/hover
-    if (isSelected || isHovered) {
+    // Glow halo on select/hover/row highlight
+    if (isSelected || isHovered || isRowHighlighted) {
       ctx.beginPath();
-      ctx.arc(n.x, n.y, 24, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected ? 'rgba(88, 166, 255, 0.3)' : 'rgba(255, 255, 255, 0.15)';
+      ctx.arc(n.x, n.y, isRowHighlighted ? 26 : 24, 0, Math.PI * 2);
+      ctx.fillStyle = isSelected ? 'rgba(88, 166, 255, 0.35)' : (isRowHighlighted ? 'rgba(57, 197, 187, 0.35)' : 'rgba(255, 255, 255, 0.15)');
       ctx.fill();
     }
 
@@ -217,8 +221,8 @@ function renderGraph() {
     ctx.arc(n.x, n.y, 18, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
-    ctx.lineWidth = isSelected ? 3 : 1.5;
-    ctx.strokeStyle = isSelected ? '#ffffff' : '#0d1117';
+    ctx.lineWidth = (isSelected || isRowHighlighted) ? 3 : 1.5;
+    ctx.strokeStyle = isSelected ? '#ffffff' : (isRowHighlighted ? '#39c5bb' : '#0d1117');
     ctx.stroke();
 
     // Node Label
@@ -458,17 +462,34 @@ function closeInspector() {
   selectedEntity = null;
 }
 
+function focusNode(nodeId) {
+  const targetId = String(nodeId);
+  const node = graphNodes.find(n => String(n.id) === targetId);
+  if (node) {
+    cameraX = -node.x;
+    cameraY = -node.y;
+    selectedEntity = node;
+    openInspector(node);
+    wakeSimulation(0.5);
+    if (typeof switchView === 'function') {
+      switchView('graph', document.getElementById('tab-btn-graph'));
+    }
+  }
+}
+
 // Helper to parse entity from JSON string, object, or property scalar
 function parseNodeEntity(rawVal, colName) {
   if (rawVal === null || rawVal === undefined) return null;
+  const rawStr = String(rawVal).trim();
+  if (rawStr === '' || rawStr === 'null' || rawStr === 'undefined') return null;
+
   let parsed = null;
   if (typeof rawVal === 'object' && rawVal !== null) {
     parsed = rawVal;
   } else if (typeof rawVal === 'string') {
-    const trimmed = rawVal.trim();
-    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    if (rawStr.startsWith('{') && rawStr.endsWith('}')) {
       try {
-        parsed = JSON.parse(trimmed);
+        parsed = JSON.parse(rawStr);
       } catch (e) {
         parsed = null;
       }
@@ -482,11 +503,11 @@ function parseNodeEntity(rawVal, colName) {
     if (!id && Object.keys(properties).length > 0) {
       id = properties.id !== undefined ? String(properties.id) : null;
     }
-    if (!id) id = String(rawVal);
+    if (!id) id = rawStr;
     return { id, label, properties };
   }
 
-  let id = String(rawVal);
+  let id = rawStr;
   let label = 'Node';
   let properties = {};
   if (colName) {
@@ -499,7 +520,7 @@ function parseNodeEntity(rawVal, colName) {
       label = varName || 'Node';
       properties['id'] = rawVal;
     } else if (colName.toLowerCase().startsWith('label(') || colName.toLowerCase().startsWith('labels(')) {
-      label = String(rawVal);
+      label = rawStr;
     } else {
       label = colName;
     }
@@ -509,7 +530,9 @@ function parseNodeEntity(rawVal, colName) {
 
 function getOrAddNode(nodeMap, candidate) {
   if (!candidate || !candidate.id) return null;
-  const key = candidate.id;
+  const key = String(candidate.id);
+  if (key === '' || key === 'null' || key === 'undefined') return null;
+
   if (nodeMap.has(key)) {
     const existing = nodeMap.get(key);
     if (candidate.label && (!existing.label || existing.label === 'Node' || existing.label === existing.id)) {
@@ -521,8 +544,8 @@ function getOrAddNode(nodeMap, candidate) {
     return existing;
   }
   const node = {
-    id: candidate.id,
-    label: candidate.label || candidate.id,
+    id: key,
+    label: candidate.label || key,
     properties: candidate.properties || {},
     x: (Math.random() - 0.5) * 200,
     y: (Math.random() - 0.5) * 200,
@@ -554,15 +577,14 @@ function extractGraphFromRows(data) {
   const MAX_GRAPH_NODES = 250;
   let capped = false;
   const nodeMap = new Map();
+  const edgeSet = new Set();
   graphNodes = [];
   graphEdges = [];
 
   // Case 1: Multi-column path traversal (e.g. 1-hop, 2-hop, 3-hop: a -> b -> c -> d)
   if (data.columns.length >= 2 && !data.columns[1].includes('score') && !data.columns[1].includes('distance')) {
-    const isRelTypeMiddle = (data.columns.length === 3 &&
-      (data.columns[1].toLowerCase().includes('type') ||
-       data.columns[1].toLowerCase().includes('rel') ||
-       data.columns[1].toLowerCase().includes('edge')));
+    const isAlternating = (data.columns.length >= 3 && data.columns.length % 2 === 1 &&
+      data.columns.slice(1).some((c, i) => i % 2 === 0 && (c.toLowerCase().includes('type') || c.toLowerCase().includes('rel') || c.toLowerCase().includes('edge'))));
 
     for (const row of data.rows) {
       if (graphNodes.length >= MAX_GRAPH_NODES) {
@@ -570,17 +592,23 @@ function extractGraphFromRows(data) {
         break;
       }
 
-      if (isRelTypeMiddle) {
-        const uNode = getOrAddNode(nodeMap, parseNodeEntity(row[0], data.columns[0]));
-        const relType = String(row[1]);
-        const vNode = getOrAddNode(nodeMap, parseNodeEntity(row[2], data.columns[2]));
+      if (isAlternating) {
+        for (let step = 0; step < row.length - 2; step += 2) {
+          const uNode = getOrAddNode(nodeMap, parseNodeEntity(row[step], data.columns[step]));
+          const relType = String(row[step + 1] || '');
+          const vNode = getOrAddNode(nodeMap, parseNodeEntity(row[step + 2], data.columns[step + 2]));
 
-        if (uNode && vNode) {
-          graphEdges.push({
-            source: uNode,
-            target: vNode,
-            label: relType
-          });
+          if (uNode && vNode) {
+            const edgeKey = `${uNode.id}->${vNode.id}:${relType}`;
+            if (!edgeSet.has(edgeKey)) {
+              edgeSet.add(edgeKey);
+              graphEdges.push({
+                source: uNode,
+                target: vNode,
+                label: (relType === 'null' || !relType) ? 'REL' : relType
+              });
+            }
+          }
         }
       } else {
         // Consecutive hops along path: row[0] -> row[1] -> row[2] -> row[3] ...
@@ -589,12 +617,13 @@ function extractGraphFromRows(data) {
           const vNode = getOrAddNode(nodeMap, parseNodeEntity(row[step + 1], data.columns[step + 1]));
 
           if (uNode && vNode) {
-            const exists = graphEdges.some(e => e.source.id === uNode.id && e.target.id === vNode.id);
-            if (!exists) {
+            const edgeKey = `${uNode.id}->${vNode.id}:REL`;
+            if (!edgeSet.has(edgeKey)) {
+              edgeSet.add(edgeKey);
               graphEdges.push({
                 source: uNode,
                 target: vNode,
-                label: ''
+                label: 'REL'
               });
             }
           }
@@ -614,6 +643,8 @@ function extractGraphFromRows(data) {
         break;
       }
       const vid = String(row[idIdx]);
+      if (!vid || vid === 'null') continue;
+
       const metricVal = row[metricIdx];
       const node = {
         id: vid,
@@ -624,6 +655,7 @@ function extractGraphFromRows(data) {
         vx: 0,
         vy: 0
       };
+      nodeMap.set(vid, node);
       graphNodes.push(node);
     }
   }
