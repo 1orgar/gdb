@@ -122,6 +122,104 @@ jobs:
             --bin gdb-cli \
             --bin gdb-studio
 
+      - name: Setup macOS Keychain & Code Signing
+        if: matrix.os == 'macos'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          if [ -z "${MACOS_CERTIFICATE}" ]; then
+            echo "::warning ::Apple Developer certificate secret (MACOS_CERTIFICATE) is not set. Skipping macOS code signing."
+            exit 0
+          fi
+
+          echo "Setting up temporary keychain for Apple Code Signing..."
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 20)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          echo "$MACOS_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 \
+            -k $KEYCHAIN_PATH \
+            -P "$MACOS_CERTIFICATE_PWD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          rm -f $RUNNER_TEMP/certificate.p12
+
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Add to user keychain search list
+          security list-keychains -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | tr -d '"')
+
+          # Discover the Developer ID identity
+          IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application:" | head -n 1 | awk -F'"' '{print $2}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error ::No 'Developer ID Application' certificate found in imported keychain!"
+            exit 1
+          fi
+          echo "Using Code Signing Identity: ${IDENTITY}"
+          echo "MACOS_CODESIGN_IDENTITY=${IDENTITY}" >> $GITHUB_ENV
+          echo "MACOS_KEYCHAIN_PATH=${KEYCHAIN_PATH}" >> $GITHUB_ENV
+
+      - name: Sign macOS Binaries
+        if: matrix.os == 'macos' && env.MACOS_CODESIGN_IDENTITY != ''
+        shell: bash
+        run: |
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          for bin in gdb-server gdb-cli gdb-studio; do
+            echo "Signing ${bin} with Hardened Runtime and Timestamp..."
+            codesign --force --options runtime --timestamp \
+              --sign "${MACOS_CODESIGN_IDENTITY}" \
+              --keychain "${MACOS_KEYCHAIN_PATH}" \
+              "${TARGET_DIR}/${bin}"
+
+            echo "Verifying signature for ${bin}..."
+            codesign --verify --deep --strict --verbose=2 "${TARGET_DIR}/${bin}"
+          done
+
+      - name: Notarize macOS Binaries with Apple Notary Service
+        if: matrix.os == 'macos' && env.MACOS_CODESIGN_IDENTITY != ''
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "${APPLE_ID}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD}" ] || [ -z "${APPLE_TEAM_ID}" ]; then
+            echo "::warning ::Apple Notarization credentials (APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID) are not set. Skipping Apple Notarization."
+            exit 0
+          fi
+
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          NOTARIZE_ZIP="${RUNNER_TEMP}/notarize-${{ matrix.target }}.zip"
+
+          zip -j "${NOTARIZE_ZIP}" \
+            "${TARGET_DIR}/gdb-server" \
+            "${TARGET_DIR}/gdb-cli" \
+            "${TARGET_DIR}/gdb-studio"
+
+          echo "Submitting macOS binaries to Apple Notary Service via notarytool..."
+          xcrun notarytool submit "${NOTARIZE_ZIP}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+
+          echo "Apple Notarization completed successfully!"
+          rm -f "${NOTARIZE_ZIP}"
+
+      - name: Cleanup macOS Keychain
+        if: always() && matrix.os == 'macos' && env.MACOS_KEYCHAIN_PATH != ''
+        shell: bash
+        run: |
+          security delete-keychain "${MACOS_KEYCHAIN_PATH}" || true
+
       - name: Package Release Assets
         shell: bash
         run: |
