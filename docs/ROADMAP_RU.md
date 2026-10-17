@@ -4,19 +4,23 @@
 
 ---
 
-## 📌 Текущий статус (Версия v0.5.6 — Релиз)
+## 📌 Текущий статус (Версия v0.5.7 — Релиз)
 
+- ✅ **Кластерный ANALYZE GRAPH, шардинг DML & Стабилизация физики Studio (v0.5.7)**:
+  - Распределенный scatter-gather для `ANALYZE GRAPH;` по партициям кластера со взвешенным слиянием метрик по фактору репликации ($RF$).
+  - Шардирование батчевых мутаций (`InsertVertices` и `InsertEdges`) по реплика-сетам кольца, исключающее дублирование данных при $RF < N$.
+  - Встроенные функции openCypher: `id()`, `_id()`, `label()`, `labels()`, доступ к свойствам (`n.id`, `n.label`) и сериализация структурированных JSON-сущностей вершин (`RETURN a, b`).
+  - Динамическая панель Inspector в GDB Studio и стабилизированная 2D/3D симуляция физики графа (смягчение дистанции, ограничение скорости, мягкая гравитация, охлаждение alpha).
+  - Межшардовый резолвинг свойств граничных вершин (`RemotePropertyResolver`, `POST /storage/vertex_properties`) при $RF < N$.
+  - Толерантность схемы к единственному и множественному числу в именах меток и связей (`User` $\leftrightarrow$ `Users`, `FOLLOW` $\leftrightarrow$ `FOLLOWS`).
 - ✅ **Межшардовые Multi-Hop обходы и поддержка $RF=1$ (v0.5.6)**:
   - Введен интерфейс `RemoteEdgeExpander` в `gdb-planner` с пакетным подтягиванием связей граничных вершин (`batch_get_out_edges`).
   - Добавлен высокопроизводительный внутренний HTTP эндпоинт `POST /storage/out_edges` и `ClusterEdgeExpander` в `gdb-server`.
   - Полноценная поддержка чистого шардирования ($RF=1$, 0% дублирования данных в RAM) для многошаговых путей (`MATCH (a)-[:REL*1..k]->(b)`).
   - Агрегация кластерной телеметрии в `/resources`: корректный расчет `cluster_total_edges` (сумма при $RF=1$, максимум при $RF \ge N$) и `cluster_total_vertices`.
-- ✅ **Python SDK (`gdb-client` v0.5.6 на PyPI)**:
+- ✅ **Python SDK (`gdb-client` v0.5.7 на PyPI)**:
   - `scatter_ingest_edges` и `scatter_ingest_vertices` строго соблюдают `replication_factor` (при $RF=1$ данные направляются ровно на 1 целевой узел $src \pmod N$).
   - Добавлен метод `target_replica_nodes_for_key` в `ClusterTopology`.
-- ✅ **GDB Studio UI (v0.5.6)**:
-  - Устранена перекрывающая размытая панель в Unity 3D Spatial Canvas, возвращено интерактивное управление сценой мыши.
-  - Отображение суммарных показателей кластера и разбивки локального шардового узла.
 - ✅ **Кластерный MPP Scatter-Gather & Векторный поиск (v0.5.5)**:
   - Распараллеливание открытых Cypher-запросов и аналитических процедур по узлам с объединением потоков.
   - Распределенный поиск векторного сходства `CALL vector.similaritySearch` с глобальным слиянием Top-K по метрикам `cosine`, `dot`, `l2`.
@@ -50,6 +54,8 @@
   * Двухфазный коммит (2PC) и Snapshot Isolation для многопартиционных записей (`BEGIN`, `COMMIT`, `ROLLBACK`).
 * **[v0.7.0] Расширенные графовые алгоритмы**:
   * Взвешенные кратчайшие пути (Dijkstra, A*), междуузловая близость и k-hop окрестности.
+* **[v0.7.0] Официальная кодовая подпись Apple Developer и нотаризация бинарников macOS**:
+  * Нативная подпись Developer ID Application с Hardened Runtime и автоматическая нотаризация в Apple Notary Service для релизных артефактов macOS (Apple Silicon ARM64 и Intel x86_64) для запуска без предупреждений Gatekeeper и карантина.
 * **[v1.0.0] Корпоративная безопасность & Multi-Raft Snapshotting**:
   * Шифрование TLS / mTLS, JWT-аутентификация, RBAC на уровне пространств графов, меток и свойств.
   * Потоковый `InstallSnapshot` через Arrow Flight RPC в Multi-Raft.
@@ -89,7 +95,7 @@
 
 | Релиз | Кодовое имя | Главный фокус | Ключевые возможности |
 | :---: | :---: | :--- | :--- |
-| **v0.5.6** | **Huygens+** *(Текущий)* | **Межшардовые Multi-Hop обходы (RF=1), Агрегация телеметрии, Фикс Studio UI** | 1. Обходы 2/3-hop при чистом шардировании ($RF=1$) через `RemoteEdgeExpander`.<br>2. Агрегация кластерных метрик в `/resources`.<br>3. Учет $RF$ в `scatter_ingest` Python SDK.<br>4. Фикс панели Unity 3D Spatial Canvas. |
+| **v0.5.7** | **Grotius** *(Текущий)* | **Кластерный ANALYZE GRAPH, шардинг DML, openCypher функции & Физика Studio** | 1. Кластерный `ANALYZE GRAPH;` (scatter-gather и $RF$-взвешенные метрики).<br>2. Шардирование батчевых мутаций (`InsertVertices`, `InsertEdges`).<br>3. openCypher функции (`id`, `label`) и возврат сущностей (`RETURN a, b`).<br>4. Стабилизированная физика 2D/3D в Studio.<br>5. 84.8% покрытие тестами. |
 | **v0.6.0** | **Hals** | **Распределенный Pregel/BSP ($RF=1$), Graph Spaces & AI Интеграции** | 1. **Distributed Pregel/BSP Analytics**: глобальные PageRank, WCC, Louvain на шардированном графе ($RF=1$) через сетевой Arrow Flight Shuffle.<br>2. **Мультиграф**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (изоляция схем и CSR).<br>3. Селектор пространств в GDB Studio, REPL CLI и Python SDK.<br>4. Коннекторы LangChain & LangGraph (`langchain-gdb`).<br>5. Векторный граф-индекс HNSW и гибридный Graph RAG. |
-| **v0.7.0** | **Steen** | **Распределенные ACID-транзакции & Продвинутая аналитика** | 1. Распределенные многопартиционные ACID-транзакции (2PC, Snapshot Isolation).<br>2. Алгоритмы взвешенных путей (Dijkstra, A*).<br>3. Мониторинг топологии и GPU в Studio. |
+| **v0.7.0** | **Steen** | **Распределенные ACID-транзакции, Продвинутая аналитика & Нотаризация macOS** | 1. Распределенные многопартиционные ACID-транзакции (2PC, Snapshot Isolation).<br>2. Алгоритмы взвешенных путей (Dijkstra, A*).<br>3. Мониторинг топологии и GPU в Studio.<br>4. Официальная подпись Apple Developer и нотаризация релизных ассетов для macOS. |
 | **v1.0.0** | **Erasmus** | **Корпоративная безопасность & LTS** | 1. TLS/mTLS, JWT-аутентификация и гранулярный RBAC по графам и меткам.<br>2. Streaming Raft Snapshots через Arrow Flight RPC.<br>3. Долгосрочная поддержка (LTS) и строгая гарантия обратной совместимости API. |

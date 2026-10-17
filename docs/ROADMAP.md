@@ -4,19 +4,23 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 ---
 
-## 📌 Current Status (Version v0.5.6 — Release)
+## 📌 Current Status (Version v0.5.7 — Release)
 
+- ✅ **Cluster ANALYZE GRAPH, Sharded DML & Studio Physics Stabilization (v0.5.7)**:
+  - Cluster scatter-gather for `ANALYZE GRAPH;` across cluster partitions with replication-factor weighted metrics merging.
+  - Sharded batch mutations (`InsertVertices` and `InsertEdges`) partitioned by hash-ring replica set, eliminating data duplication when $RF < N$.
+  - openCypher built-in functions: `id()`, `_id()`, `label()`, `labels()`, property access (`n.id`, `n.label`), and structured vertex entity JSON serialization (`RETURN a, b`).
+  - GDB Studio dynamic Entity Inspector drawer and stabilized 2D/3D physics simulation (distance softening, velocity capping, bounded gravity, alpha decay).
+  - Cross-node boundary property resolution (`RemotePropertyResolver`, `POST /storage/vertex_properties`) for $RF < N$.
+  - Schema tolerance to plural/singular label and edge names (`User` $\leftrightarrow$ `Users`, `FOLLOW` $\leftrightarrow$ `FOLLOWS`).
 - ✅ **Cross-Node Multi-Hop Traversal & Sharded $RF=1$ Support (v0.5.6)**:
   - Introduced `RemoteEdgeExpander` trait in `gdb-planner` with batch pre-fetching of boundary vertex edges (`batch_get_out_edges`).
   - Added high-throughput internal HTTP endpoint `POST /storage/out_edges` and `ClusterEdgeExpander` in `gdb-server`.
   - Full support for pure distributed sharding ($RF=1$, 0% RAM duplication) for multi-hop paths (`MATCH (a)-[:REL*1..k]->(b)`).
   - Cluster telemetry aggregation in `/resources`: accurate `cluster_total_edges` (sum for $RF=1$, max for $RF \ge N$) and `cluster_total_vertices`.
-- ✅ **Python SDK (`gdb-client` v0.5.6 on PyPI)**:
+- ✅ **Python SDK (`gdb-client` v0.5.7 on PyPI)**:
   - `scatter_ingest_edges` and `scatter_ingest_vertices` strictly respect `replication_factor` (streams to exactly 1 primary node $src \pmod N$ when $RF=1$).
   - Added `target_replica_nodes_for_key` helper to `ClusterTopology`.
-- ✅ **GDB Studio UI (v0.5.6)**:
-  - Fixed blocking semi-transparent blur overlay in Unity 3D Spatial Canvas, restoring interactive mouse controls.
-  - Display cluster totals and local sharded node breakdown.
 - ✅ **Cluster-Wide MPP Scatter-Gather & Vector Search (v0.5.5)**:
   - Scatter-gather execution of Cypher read queries and analytical procedures with stream merging.
   - Distributed `CALL vector.similaritySearch` with global Top-K merging across `cosine`, `dot`, and `l2` metrics.
@@ -50,6 +54,8 @@ This document outlines strategic milestones, architectural priorities, and futur
   * Two-Phase Commit (2PC) and Snapshot Isolation for distributed writes (`BEGIN`, `COMMIT`, `ROLLBACK`).
 * **[v0.7.0] Advanced Graph Analytics Kernels**:
   * Weighted shortest paths (Dijkstra, A*), K-hop neighborhood analytics, and closeness expansion.
+* **[v0.7.0] Official Apple Developer Code Signing & Notarization**:
+  * Native Developer ID Application code signing with Hardened Runtime and automated Apple Notary Service submission for macOS release assets (Apple Silicon ARM64 & Intel x86_64), ensuring seamless Gatekeeper execution without quarantine warnings.
 * **[v1.0.0] Enterprise Security & Multi-Raft Streaming Snapshots**:
   * TLS / mTLS transport encryption, JWT authentication, and RBAC at graph, label, and property granularity.
   * Streaming `InstallSnapshot` over Arrow Flight RPC in Multi-Raft.
@@ -89,7 +95,7 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 | Release | Codename | Primary Focus | Key Deliverables |
 | :---: | :---: | :--- | :--- |
-| **v0.5.6** | **Huygens+** *(Current)* | **Cross-Node Multi-Hop Traversal (RF=1), Telemetry Aggregation, Studio UI Fix** | 1. 2/3-hop traversals over pure sharding ($RF=1$) via `RemoteEdgeExpander`.<br>2. Cluster telemetry aggregation in `/resources`.<br>3. $RF$-aware `scatter_ingest` in Python SDK.<br>4. Fixed Unity 3D Spatial Canvas overlay. |
+| **v0.5.7** | **Grotius** *(Current)* | **Cluster ANALYZE GRAPH, Sharded DML, openCypher Functions & Studio Physics** | 1. Cluster-aware `ANALYZE GRAPH;` scatter-gather and $RF$-weighted metrics.<br>2. Sharded batch DML (`InsertVertices`, `InsertEdges`).<br>3. openCypher built-in functions (`id`, `label`) & JSON entity projection (`RETURN a, b`).<br>4. Stabilized 2D/3D graph physics in Studio.<br>5. 84.8% test coverage across workspace. |
 | **v0.6.0** | **Hals** | **Distributed Pregel/BSP ($RF=1$), Graph Spaces & AI Integrations** | 1. **Distributed Pregel/BSP Analytics**: global PageRank, WCC, Louvain over sharded graphs ($RF=1$) via Arrow Flight Shuffle.<br>2. **Multi-Graph**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (schema & CSR isolation).<br>3. Graph space selectors across GDB Studio, REPL CLI, and Python SDK.<br>4. LangChain & LangGraph connectors (`langchain-gdb`).<br>5. Native HNSW Vector Graph Index and hybrid Graph RAG. |
-| **v0.7.0** | **Steen** | **Distributed ACID Transactions & Advanced Analytics** | 1. Distributed multi-partition ACID transactions (2PC, Snapshot Isolation).<br>2. Weighted shortest path algorithms (Dijkstra, A*).<br>3. Real-time topology and GPU telemetry in Studio. |
+| **v0.7.0** | **Steen** | **Distributed ACID Transactions, Advanced Analytics & macOS Notarization** | 1. Distributed multi-partition ACID transactions (2PC, Snapshot Isolation).<br>2. Weighted shortest path algorithms (Dijkstra, A*).<br>3. Real-time topology and GPU telemetry in Studio.<br>4. Official Apple Developer Code Signing and Apple Notarization for macOS release assets. |
 | **v1.0.0** | **Erasmus** | **Enterprise Security & LTS** | 1. TLS/mTLS, JWT authentication, and granular RBAC per graph/label/property.<br>2. Streaming Raft Snapshots over Arrow Flight RPC.<br>3. Long-Term Support (LTS) release with strict API stability guarantees. |
