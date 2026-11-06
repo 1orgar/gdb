@@ -43,14 +43,35 @@ if (window.ResizeObserver && canvas && canvas.parentElement) {
 }
 setTimeout(resizeCanvas, 50);
 
-// Color Palette
+// Color Palette & Analytics Overlay
 const COLORS = ['#58a6ff', '#bc8cff', '#3fb950', '#f0883e', '#39c5bb', '#f778ba', '#d29922', '#79c0ff'];
+let nodeColorOverrides = new Map();
+let nodeSizeOverrides = new Map();
+let nodeBadgeOverrides = new Map();
+
+function clearAnalyticsOverlay() {
+  nodeColorOverrides.clear();
+  nodeSizeOverrides.clear();
+  nodeBadgeOverrides.clear();
+  wakeSimulation(0.2);
+}
+
 function getNodeColor(label, id) {
+  if (nodeColorOverrides && nodeColorOverrides.has(String(id))) {
+    return nodeColorOverrides.get(String(id));
+  }
   if (typeof id === 'number') return COLORS[Math.abs(id) % COLORS.length];
   let hash = 0;
   const str = String(label || id);
   for (let i = 0; i < str.length; i++) hash = (hash << 5) - hash + str.charCodeAt(i);
   return COLORS[Math.abs(hash) % COLORS.length];
+}
+
+function getNodeRadius(id, baseRadius = 18) {
+  if (nodeSizeOverrides && nodeSizeOverrides.has(String(id))) {
+    return nodeSizeOverrides.get(String(id));
+  }
+  return baseRadius;
 }
 
 let currentView = 'graph';
@@ -207,18 +228,19 @@ function renderGraph() {
     const isSelected = (n === selectedEntity);
     const isRowHighlighted = selectedRowNodeIds && selectedRowNodeIds.has(String(n.id));
     const color = getNodeColor(n.label, n.id);
+    const nr = getNodeRadius(n.id, 18);
 
     // Glow halo on select/hover/row highlight
     if (isSelected || isHovered || isRowHighlighted) {
       ctx.beginPath();
-      ctx.arc(n.x, n.y, isRowHighlighted ? 26 : 24, 0, Math.PI * 2);
+      ctx.arc(n.x, n.y, nr + (isRowHighlighted ? 8 : 6), 0, Math.PI * 2);
       ctx.fillStyle = isSelected ? 'rgba(88, 166, 255, 0.35)' : (isRowHighlighted ? 'rgba(57, 197, 187, 0.35)' : 'rgba(255, 255, 255, 0.15)');
       ctx.fill();
     }
 
     // Node Circle
     ctx.beginPath();
-    ctx.arc(n.x, n.y, 18, 0, Math.PI * 2);
+    ctx.arc(n.x, n.y, nr, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
     ctx.lineWidth = (isSelected || isRowHighlighted) ? 3 : 1.5;
@@ -233,10 +255,13 @@ function renderGraph() {
     const displayLabel = String(n.label || n.id).substring(0, 5);
     ctx.fillText(displayLabel, n.x, n.y);
 
-    // Subtext / ID below node
+    // Subtext / ID or Analytics Metric below node
     ctx.fillStyle = '#8b949e';
     ctx.font = '10px monospace';
-    ctx.fillText(String(n.id), n.x, n.y + 28);
+    const badgeStr = (nodeBadgeOverrides && nodeBadgeOverrides.has(String(n.id)))
+      ? `${n.id} [${nodeBadgeOverrides.get(String(n.id))}]`
+      : String(n.id);
+    ctx.fillText(badgeStr, n.x, n.y + nr + 10);
   }
 
   ctx.restore();

@@ -12,6 +12,10 @@ pub struct ChunkedCsr {
     pub offsets: Vec<u32>,
     /// Contiguous array of destination vertex IDs.
     pub targets: Vec<u64>,
+    /// Contiguous array of dense destination vertex indices (`0..num_vertices`).
+    /// Precomputed during CSR construction for O(1) array indexing and direct GPU kernel execution.
+    #[serde(default)]
+    pub target_indices: Vec<u32>,
     /// Contiguous array of edge types.
     pub edge_types: Vec<u32>,
     /// Contiguous array of edge ranks.
@@ -27,6 +31,7 @@ impl ChunkedCsr {
         Self {
             offsets: vec![0],
             targets: Vec::new(),
+            target_indices: Vec::new(),
             edge_types: Vec::new(),
             ranks: Vec::new(),
             vertex_map: HashMap::new(),
@@ -102,9 +107,10 @@ impl ChunkedCsr {
         let num_edges = edges.len();
 
         let mut offsets = vec![0u32; num_vertices + 1];
-        let mut targets = Vec::with_capacity(num_edges);
-        let mut edge_types = Vec::with_capacity(num_edges);
-        let mut ranks = Vec::with_capacity(num_edges);
+        let mut targets = vec![0u64; num_edges];
+        let mut target_indices = vec![0u32; num_edges];
+        let mut edge_types = vec![0u32; num_edges];
+        let mut ranks = vec![0i64; num_edges];
 
         // Count degree per vertex
         for edge in &edges {
@@ -117,20 +123,17 @@ impl ChunkedCsr {
             offsets[i + 1] += offsets[i];
         }
 
-        // Fill CSR targets, edge_types, ranks
+        // Fill CSR targets, target_indices, edge_types, ranks
         let mut current_offset = offsets.clone();
         for edge in edges {
             let src_idx = vertex_map[&edge.src.as_u64()] as usize;
+            let dst_raw = edge.dst.as_u64();
+            let dst_idx = vertex_map[&dst_raw];
             let pos = current_offset[src_idx] as usize;
             current_offset[src_idx] += 1;
 
-            if pos >= targets.len() {
-                targets.resize(pos + 1, 0);
-                edge_types.resize(pos + 1, 0);
-                ranks.resize(pos + 1, 0);
-            }
-
-            targets[pos] = edge.dst.as_u64();
+            targets[pos] = dst_raw;
+            target_indices[pos] = dst_idx;
             edge_types[pos] = edge.edge_type.0;
             ranks[pos] = edge.rank;
         }
@@ -138,6 +141,7 @@ impl ChunkedCsr {
         Self {
             offsets,
             targets,
+            target_indices,
             edge_types,
             ranks,
             vertex_map,
@@ -196,6 +200,7 @@ impl ChunkedCsr {
             return Self {
                 offsets: vec![0; num_vertices + 1],
                 targets: Vec::new(),
+                target_indices: Vec::new(),
                 edge_types: Vec::new(),
                 ranks: Vec::new(),
                 vertex_map: self.vertex_map.clone(),
@@ -225,6 +230,7 @@ impl ChunkedCsr {
 
         let total_matching_edges = new_offsets[num_vertices] as usize;
         let mut new_targets = Vec::with_capacity(total_matching_edges);
+        let mut new_target_indices = Vec::with_capacity(total_matching_edges);
         let mut new_edge_types = Vec::with_capacity(total_matching_edges);
         let mut new_ranks = Vec::with_capacity(total_matching_edges);
 
@@ -234,7 +240,14 @@ impl ChunkedCsr {
             let end = (self.offsets[u + 1] as usize).min(self.targets.len());
             for off in start..end {
                 if self.edge_types[off] == edge_type {
-                    new_targets.push(self.targets[off]);
+                    let target_raw = self.targets[off];
+                    new_targets.push(target_raw);
+                    let dst_idx = if off < self.target_indices.len() {
+                        self.target_indices[off]
+                    } else {
+                        self.vertex_map.get(&target_raw).copied().unwrap_or(0)
+                    };
+                    new_target_indices.push(dst_idx);
                     new_edge_types.push(self.edge_types[off]);
                     new_ranks.push(self.ranks[off]);
                 }
@@ -244,11 +257,69 @@ impl ChunkedCsr {
         Self {
             offsets: new_offsets,
             targets: new_targets,
+            target_indices: new_target_indices,
             edge_types: new_edge_types,
             ranks: new_ranks,
             vertex_map: self.vertex_map.clone(),
             reverse_map: self.reverse_map.clone(),
         }
+    }
+
+    /// Resolves the dense destination vertex index (`0..num_vertices`) for edge offset `off` in O(1).
+    #[inline(always)]
+    pub fn dense_target_at(&self, off: usize) -> Option<usize> {
+        if off < self.target_indices.len() {
+            let idx = self.target_indices[off] as usize;
+            if idx < self.reverse_map.len() {
+                return Some(idx);
+            }
+        }
+        let target_raw = *self.targets.get(off)?;
+        self.vertex_map.get(&target_raw).map(|&idx| idx as usize)
+    }
+
+    /// Builds an undirected simple adjacency list (sorted, deduplicated, without self-loops)
+    /// over dense vertex indices `0..num_vertices`.
+    pub fn build_undirected_adj(&self) -> Vec<Vec<u32>> {
+        let num_v = self.vertex_count();
+        let mut adj: Vec<Vec<u32>> = vec![Vec::new(); num_v];
+        for u in 0..num_v {
+            let start = self.offsets[u] as usize;
+            let end = (self.offsets[u + 1] as usize).min(self.targets.len());
+            for off in start..end {
+                if let Some(v) = self.dense_target_at(off) {
+                    if u != v {
+                        adj[u].push(v as u32);
+                        adj[v].push(u as u32);
+                    }
+                }
+            }
+        }
+        for neighbors in &mut adj {
+            neighbors.sort_unstable();
+            neighbors.dedup();
+        }
+        adj
+    }
+
+    /// Extracts all edges stored in this CSR.
+    pub fn all_edges(&self) -> Vec<EdgeId> {
+        let num_v = self.vertex_count();
+        let mut edges = Vec::with_capacity(self.targets.len());
+        for u in 0..num_v {
+            let src = VertexId(self.reverse_map[u]);
+            let start = self.offsets[u] as usize;
+            let end = (self.offsets[u + 1] as usize).min(self.targets.len());
+            for off in start..end {
+                edges.push(EdgeId::new(
+                    src,
+                    EdgeType(self.edge_types[off]),
+                    self.ranks[off],
+                    VertexId(self.targets[off]),
+                ));
+            }
+        }
+        edges
     }
 }
 

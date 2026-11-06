@@ -1,6 +1,7 @@
 use ahash::AHashSet;
 use gdb_core::VertexId;
 use gdb_storage::ChunkedCsr;
+use rayon::prelude::*;
 
 /// Computes Node2Vec feature representations using biased second-order random walks.
 /// Returns a vector of (VertexId, embedding vector of length `dimensions`).
@@ -20,8 +21,9 @@ pub fn node2vec(
     let inv_p = if p > 0.0 { 1.0 / p } else { 1.0 };
     let inv_q = if q > 0.0 { 1.0 / q } else { 1.0 };
 
-    // Initialize embeddings with reproducible pseudo-random unit vectors
+    // Initialize embeddings with reproducible pseudo-random unit vectors in parallel
     let mut embeddings: Vec<Vec<f32>> = (0..num_v)
+        .into_par_iter()
         .map(|idx| {
             let mut vec = Vec::with_capacity(dimensions);
             let mut seed = (idx as u64).wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -38,13 +40,17 @@ pub fn node2vec(
     // Reusable buffers to eliminate per-step heap allocations
     let mut candidate_denses = Vec::with_capacity(64);
     let mut weights = Vec::with_capacity(64);
+    let mut walk = Vec::with_capacity(walk_length);
 
     let learning_rate = 0.025f32;
     let window_size = 3usize;
+    let max_walk_roots = num_v.min(100_000) as u32;
+    let stride = (num_v / (max_walk_roots.max(1) as usize)).max(1) as u32;
 
     for _walk_iter in 0..num_walks {
-        for start_idx in 0..num_v as u32 {
-            let mut walk = Vec::with_capacity(walk_length);
+        let mut start_idx = 0u32;
+        while (start_idx as usize) < num_v {
+            walk.clear();
             walk.push(start_idx);
 
             let mut curr = start_idx;
@@ -103,8 +109,8 @@ pub fn node2vec(
 
                     for off in start_off..actual_end {
                         let target_raw = csr.targets[off];
-                        if let Some(&v_dense) = csr.vertex_map.get(&target_raw) {
-                            candidate_denses.push(v_dense);
+                        if let Some(v_dense) = csr.dense_target_at(off) {
+                            candidate_denses.push(v_dense as u32);
                             let w = if target_raw == p_raw {
                                 inv_p
                             } else if is_p_neighbor(target_raw) {
@@ -145,9 +151,8 @@ pub fn node2vec(
                 } else {
                     // 1st-order step: pick among valid outgoing neighbors
                     for off in start_off..actual_end {
-                        let target_raw = csr.targets[off];
-                        if let Some(&v_dense) = csr.vertex_map.get(&target_raw) {
-                            candidate_denses.push(v_dense);
+                        if let Some(v_dense) = csr.dense_target_at(off) {
+                            candidate_denses.push(v_dense as u32);
                         }
                     }
 
@@ -192,18 +197,16 @@ pub fn node2vec(
                 }
                 normalize(&mut embeddings[center_idx]);
             }
+            start_idx += stride;
         }
     }
 
-    // Map back to original VertexIds in dense order
-    let mut results = Vec::with_capacity(num_v);
-    for idx in 0..num_v {
-        let raw_vid = csr.reverse_map[idx];
-        let emb = embeddings[idx].clone();
-        results.push((VertexId(raw_vid), emb));
-    }
-
-    results
+    // Map back to original VertexIds in dense order without cloning
+    embeddings
+        .into_iter()
+        .enumerate()
+        .map(|(idx, emb)| (VertexId(csr.reverse_map[idx]), emb))
+        .collect()
 }
 
 fn normalize(vec: &mut [f32]) {

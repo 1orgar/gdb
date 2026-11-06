@@ -28,13 +28,24 @@ struct IngestDescriptor {
     label: Option<String>,
     #[serde(default)]
     edge_type: Option<String>,
+    #[serde(default)]
+    graph: Option<String>,
 }
+
+pub type FlightSpaceTuple = (
+    Arc<PartitionStorageEngine>,
+    Arc<RwLock<GraphSchema>>,
+    Arc<QueryExecutor>,
+);
+
+pub type SpaceResolverFn = dyn Fn(&str) -> Option<FlightSpaceTuple> + Send + Sync;
 
 /// External Client Arrow Flight Service for fast streaming ingestion and queries.
 pub struct GdbClientFlightService {
     storage: Arc<PartitionStorageEngine>,
     schema: Arc<RwLock<GraphSchema>>,
     executor: Arc<QueryExecutor>,
+    space_resolver: Option<Arc<SpaceResolverFn>>,
 }
 
 impl GdbClientFlightService {
@@ -47,7 +58,28 @@ impl GdbClientFlightService {
             storage,
             schema,
             executor,
+            space_resolver: None,
         }
+    }
+
+    pub fn with_space_resolver(mut self, resolver: Arc<SpaceResolverFn>) -> Self {
+        self.space_resolver = Some(resolver);
+        self
+    }
+
+    fn resolve_space(&self, graph_opt: Option<&str>) -> FlightSpaceTuple {
+        if let (Some(g), Some(ref resolver)) = (graph_opt, &self.space_resolver) {
+            if !g.is_empty() {
+                if let Some(tuple) = resolver(g) {
+                    return tuple;
+                }
+            }
+        }
+        (
+            self.storage.clone(),
+            self.schema.clone(),
+            self.executor.clone(),
+        )
     }
 
     pub fn into_server(self) -> FlightServiceServer<Self> {
@@ -112,13 +144,28 @@ impl FlightService for GdbClientFlightService {
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = request.into_inner();
-        let query_str = String::from_utf8(ticket.ticket.to_vec())
+        let raw_ticket = String::from_utf8(ticket.ticket.to_vec())
             .map_err(|e| Status::invalid_argument(format!("Invalid ticket UTF-8: {}", e)))?;
 
-        let parsed = gdb_parser::parse(&query_str)
+        // Support `gdb://<graph>/<query>` ticket prefix for Graph Spaces
+        let (target_graph, query_str) = if let Some(rest) = raw_ticket.strip_prefix("gdb://") {
+            if let Some(slash_idx) = rest.find('/') {
+                let g = &rest[..slash_idx];
+                let q = &rest[slash_idx + 1..];
+                (Some(g), q)
+            } else {
+                (None, raw_ticket.as_str())
+            }
+        } else {
+            (None, raw_ticket.as_str())
+        };
+
+        let (_, _, executor) = self.resolve_space(target_graph);
+
+        let parsed = gdb_parser::parse(query_str)
             .map_err(|e| Status::invalid_argument(format!("Query parse error: {}", e)))?;
 
-        let query_result = self.executor.execute(parsed)
+        let query_result = executor.execute(parsed)
             .map_err(|e| Status::internal(format!("Query execution error: {}", e)))?;
 
         if let Some(batch) = query_result.batch {
@@ -139,53 +186,76 @@ impl FlightService for GdbClientFlightService {
         request: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoPutStream>, Status> {
         let in_stream = request.into_inner();
-        let storage = self.storage.clone();
-        let schema = self.schema.clone();
+        let default_storage = self.storage.clone();
+        let default_schema = self.schema.clone();
+        let space_resolver = self.space_resolver.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(4);
 
         tokio::spawn(async move {
             let mut in_stream = in_stream;
-            let (first_data, is_edge_from_desc, label_or_type_from_desc) = match in_stream.next().await {
+            let (first_data, is_edge_from_desc, label_or_type_from_desc, graph_from_desc) = match in_stream.next().await {
                 Some(Ok(fd)) => {
-                    let parse_desc = |bytes: &[u8]| -> (Option<bool>, Option<String>) {
+                    let parse_desc = |bytes: &[u8]| -> (Option<bool>, Option<String>, Option<String>) {
                         if let Ok(desc) = serde_json::from_slice::<IngestDescriptor>(bytes) {
+                            let mut g = desc.graph;
+                            if let Some(ref gs) = g {
+                                if let Some(stripped) = gs.strip_prefix("gdb://") {
+                                    g = Some(stripped.trim_end_matches('/').to_string());
+                                }
+                            }
                             if !desc.r#type.is_empty() {
                                 if desc.r#type.eq_ignore_ascii_case("edge") {
-                                    return (Some(true), desc.edge_type);
+                                    return (Some(true), desc.edge_type, g);
                                 } else {
-                                    return (Some(false), desc.label);
+                                    return (Some(false), desc.label, g);
                                 }
                             }
                         }
-                        (None, None)
+                        (None, None, None)
                     };
 
-                    let (mut is_e, mut lt) = if let Some(ref d) = fd.flight_descriptor {
+                    let (mut is_e, mut lt, mut gr) = if let Some(ref d) = fd.flight_descriptor {
                         if !d.cmd.is_empty() {
                             parse_desc(&d.cmd)
+                        } else if let Some(first_p) = d.path.first() {
+                            let g = first_p.strip_prefix("gdb://").map(|s| s.trim_end_matches('/').to_string());
+                            (None, None, g)
                         } else {
-                            (None, None)
+                            (None, None, None)
                         }
                     } else {
-                        (None, None)
+                        (None, None, None)
                     };
 
                     if is_e.is_none() && !fd.app_metadata.is_empty() {
-                        let (ie, l) = parse_desc(&fd.app_metadata);
+                        let (ie, l, g) = parse_desc(&fd.app_metadata);
                         if ie.is_some() {
                             is_e = ie;
                             lt = l;
                         }
+                        if gr.is_none() {
+                            gr = g;
+                        }
                     }
 
-                    (Some(fd), is_e, lt)
+                    (Some(fd), is_e, lt, gr)
                 }
                 Some(Err(e)) => {
                     let _ = tx.send(Err(Status::internal(format!("Flight stream error: {}", e)))).await;
                     return;
                 }
-                None => (None, None, None),
+                None => (None, None, None, None),
+            };
+
+            let (storage, schema) = if let (Some(ref g), Some(ref resolver)) = (&graph_from_desc, &space_resolver) {
+                if let Some((st, sc, _)) = resolver(g) {
+                    (st, sc)
+                } else {
+                    (default_storage, default_schema)
+                }
+            } else {
+                (default_storage, default_schema)
             };
 
             let stream_to_decode = match first_data {

@@ -1,3 +1,4 @@
+use crate::hnsw::HnswIndex;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::SchemaRef;
 use dashmap::DashMap;
@@ -16,6 +17,8 @@ pub struct VertexPropertyTable {
     row_cache: DashMap<u64, HashMap<String, DataValue>, ahash::RandomState>,
     /// Secondary property indexes: PropertyName -> (DataValue -> Vec<VertexId>)
     indexes: DashMap<String, DashMap<DataValue, Vec<VertexId>, ahash::RandomState>, ahash::RandomState>,
+    /// Native HNSW vector graph indexes: PropertyName -> Arc<RwLock<HnswIndex>>
+    hnsw_indexes: DashMap<String, Arc<RwLock<HnswIndex>>, ahash::RandomState>,
     /// Columnar Arrow RecordBatches for vectorized analytical scans (OLAP)
     batches: RwLock<Vec<RecordBatch>>,
 }
@@ -23,17 +26,49 @@ pub struct VertexPropertyTable {
 impl VertexPropertyTable {
     pub fn new(schema_def: &VertexSchema) -> Self {
         let arrow_schema = schema_def.to_arrow_schema();
+        let hnsw_indexes = DashMap::with_hasher(ahash::RandomState::new());
+        for prop in &schema_def.properties {
+            if let gdb_core::schema::DataType::Vector(dim) = prop.data_type {
+                hnsw_indexes.insert(
+                    prop.name.clone(),
+                    Arc::new(RwLock::new(HnswIndex::with_defaults(dim))),
+                );
+            }
+        }
         Self {
             label_id: schema_def.label_id,
             schema: arrow_schema,
             row_cache: DashMap::with_hasher(ahash::RandomState::new()),
             indexes: DashMap::with_hasher(ahash::RandomState::new()),
+            hnsw_indexes,
             batches: RwLock::new(Vec::new()),
         }
     }
 
-    /// Creates a secondary index on a vertex property.
+    /// Creates a secondary index (or HNSW vector index if vector property) on a vertex property.
     pub fn create_index(&self, property_name: &str) {
+        let mut is_vector = false;
+        let mut vector_dim = 0usize;
+        for entry in self.row_cache.iter() {
+            if let Some(DataValue::Vector(v)) = entry.value().get(property_name) {
+                is_vector = true;
+                vector_dim = v.len();
+                break;
+            }
+        }
+
+        if is_vector {
+            let mut hnsw = HnswIndex::with_defaults(vector_dim);
+            for entry in self.row_cache.iter() {
+                let vid = VertexId(*entry.key());
+                if let Some(DataValue::Vector(v)) = entry.value().get(property_name) {
+                    hnsw.insert(vid, v.clone());
+                }
+            }
+            self.hnsw_indexes
+                .insert(property_name.to_string(), Arc::new(RwLock::new(hnsw)));
+        }
+
         let index_map = DashMap::with_hasher(ahash::RandomState::new());
         for entry in self.row_cache.iter() {
             let vid = VertexId(*entry.key());
@@ -46,12 +81,18 @@ impl VertexPropertyTable {
 
     /// Drops a secondary index on a vertex property.
     pub fn drop_index(&self, property_name: &str) -> bool {
-        self.indexes.remove(property_name).is_some()
+        let removed_hnsw = self.hnsw_indexes.remove(property_name).is_some();
+        self.indexes.remove(property_name).is_some() || removed_hnsw
     }
 
-    /// Checks if a secondary index exists on a vertex property.
+    /// Checks if an explicit secondary or vector index exists on a vertex property.
     pub fn has_index(&self, property_name: &str) -> bool {
         self.indexes.contains_key(property_name)
+    }
+
+    /// Checks if an HNSW vector index exists on a vertex property.
+    pub fn has_hnsw_index(&self, property_name: &str) -> bool {
+        self.hnsw_indexes.contains_key(property_name)
     }
 
     /// Looks up vertices matching a property value via secondary index.
@@ -67,7 +108,7 @@ impl VertexPropertyTable {
         })
     }
 
-    /// Fast OLTP insertion of vertex properties, updating indexes if present.
+    /// Fast OLTP insertion of vertex properties, updating secondary and HNSW indexes if present.
     pub fn set_properties(&self, vid: VertexId, props: HashMap<String, DataValue>) {
         if let Some(old) = self.row_cache.get(&vid.as_u64()) {
             for idx_entry in self.indexes.iter() {
@@ -89,12 +130,35 @@ impl VertexPropertyTable {
             }
         }
 
+        for (prop_name, val) in &props {
+            if let DataValue::Vector(vec) = val {
+                if !vec.is_empty() {
+                    let hnsw_arc = self
+                        .hnsw_indexes
+                        .entry(prop_name.clone())
+                        .or_insert_with(|| Arc::new(RwLock::new(HnswIndex::with_defaults(vec.len()))))
+                        .clone();
+                    hnsw_arc.write().insert(vid, vec.clone());
+                }
+            }
+        }
+
         self.row_cache.insert(vid.as_u64(), props);
     }
 
     /// Updates a single property on a vertex.
     pub fn update_property(&self, vid: VertexId, prop_name: &str, new_val: DataValue) {
         if let Some(mut map) = self.row_cache.get_mut(&vid.as_u64()) {
+            if let DataValue::Vector(ref vec) = new_val {
+                if !vec.is_empty() {
+                    let hnsw_arc = self
+                        .hnsw_indexes
+                        .entry(prop_name.to_string())
+                        .or_insert_with(|| Arc::new(RwLock::new(HnswIndex::with_defaults(vec.len()))))
+                        .clone();
+                    hnsw_arc.write().insert(vid, vec.clone());
+                }
+            }
             let old_val = map.insert(prop_name.to_string(), new_val.clone());
             if let Some(idx_map) = self.indexes.get(prop_name) {
                 if let Some(ref old) = old_val {
@@ -119,6 +183,9 @@ impl VertexPropertyTable {
                     }
                 }
             }
+            for hnsw_entry in self.hnsw_indexes.iter() {
+                hnsw_entry.value().write().remove(vid);
+            }
             true
         } else {
             false
@@ -128,6 +195,7 @@ impl VertexPropertyTable {
     /// Drops a property column from all stored vertices and removes its index.
     pub fn drop_property(&self, prop_name: &str) {
         self.indexes.remove(prop_name);
+        self.hnsw_indexes.remove(prop_name);
         for mut entry in self.row_cache.iter_mut() {
             entry.value_mut().remove(prop_name);
         }
@@ -212,7 +280,26 @@ impl VertexPropertyTable {
         self.batches.read().clone()
     }
 
-    /// Performs vector similarity search (cosine, dot, or euclidean L2) against stored Vector properties.
+    /// Extracts contiguous flat f32 vector buffer and corresponding VertexIds for GPU/SIMD search.
+    pub fn extract_vectors(&self, property_name: &str, dim: usize) -> (Vec<VertexId>, Vec<f32>) {
+        if dim == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let mut vids = Vec::with_capacity(self.row_cache.len());
+        let mut flat = Vec::with_capacity(self.row_cache.len() * dim);
+        for entry in self.row_cache.iter() {
+            if let Some(DataValue::Vector(v)) = entry.value().get(property_name) {
+                if v.len() == dim {
+                    vids.push(VertexId(*entry.key()));
+                    flat.extend_from_slice(v);
+                }
+            }
+        }
+        (vids, flat)
+    }
+
+    /// Performs vector similarity search (cosine, dot, or euclidean L2) against stored Vector properties,
+    /// leveraging the built-in HNSW vector graph index when populated.
     pub fn vector_similarity_search(
         &self,
         property_name: &str,
@@ -220,6 +307,13 @@ impl VertexPropertyTable {
         k: usize,
         metric: &str,
     ) -> Vec<(VertexId, f32)> {
+        if let Some(hnsw_ref) = self.hnsw_indexes.get(property_name) {
+            let hnsw = hnsw_ref.read();
+            if !hnsw.is_empty() && hnsw.dim == query.len() {
+                return hnsw.search(query, k, metric);
+            }
+        }
+
         let mut candidates = Vec::new();
         let query_norm = if metric.eq_ignore_ascii_case("cosine") {
             let sum_sq: f32 = query.iter().map(|x| x * x).sum();

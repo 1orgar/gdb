@@ -40,12 +40,14 @@ struct AppState {
 #[derive(Debug, Deserialize)]
 struct EndpointParam {
     endpoint: Option<String>,
+    graph: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct QueryRequest {
     query: String,
     endpoint: Option<String>,
+    graph: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,6 +85,10 @@ struct StudioQueryResponse {
     graph: GraphData,
     #[serde(skip_serializing_if = "Option::is_none")]
     plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_graph: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pregel: Option<serde_json::Value>,
 }
 
 async fn handle_index() -> impl IntoResponse {
@@ -163,8 +169,19 @@ async fn handle_proxy_resources(
     Query(params): Query<EndpointParam>,
 ) -> impl IntoResponse {
     let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
-    let url = format!("{}/resources", target.trim_end_matches('/'));
-    match state.http_client.get(&url).send().await {
+    let mut url = format!("{}/resources", target.trim_end_matches('/'));
+    if let Some(ref g) = params.graph {
+        if !g.is_empty() {
+            url = format!("{}?graph={}", url, g);
+        }
+    }
+    let mut req = state.http_client.get(&url);
+    if let Some(ref g) = params.graph {
+        if !g.is_empty() {
+            req = req.header("X-GDB-Graph", g);
+        }
+    }
+    match req.send().await {
         Ok(res) => {
             let status = res.status().as_u16();
             let json: serde_json::Value = res.json().await.unwrap_or_default();
@@ -207,8 +224,19 @@ async fn handle_proxy_compact(
     Query(params): Query<EndpointParam>,
 ) -> impl IntoResponse {
     let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
-    let url = format!("{}/compact", target.trim_end_matches('/'));
-    match state.http_client.post(&url).send().await {
+    let mut url = format!("{}/compact", target.trim_end_matches('/'));
+    if let Some(ref g) = params.graph {
+        if !g.is_empty() {
+            url = format!("{}?graph={}", url, g);
+        }
+    }
+    let mut req = state.http_client.post(&url);
+    if let Some(ref g) = params.graph {
+        if !g.is_empty() {
+            req = req.header("X-GDB-Graph", g);
+        }
+    }
+    match req.send().await {
         Ok(res) => {
             let status = res.status().as_u16();
             let json: serde_json::Value = res.json().await.unwrap_or_default();
@@ -229,8 +257,19 @@ async fn handle_proxy_schema(
     Query(params): Query<EndpointParam>,
 ) -> impl IntoResponse {
     let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
-    let url = format!("{}/schema", target.trim_end_matches('/'));
-    match state.http_client.get(&url).send().await {
+    let mut url = format!("{}/schema", target.trim_end_matches('/'));
+    if let Some(ref g) = params.graph {
+        if !g.is_empty() {
+            url = format!("{}?graph={}", url, g);
+        }
+    }
+    let mut req = state.http_client.get(&url);
+    if let Some(ref g) = params.graph {
+        if !g.is_empty() {
+            req = req.header("X-GDB-Graph", g);
+        }
+    }
+    match req.send().await {
         Ok(res) => {
             let status = res.status().as_u16();
             let json: serde_json::Value = res.json().await.unwrap_or_default();
@@ -242,6 +281,50 @@ async fn handle_proxy_schema(
         Err(e) => (
             axum::http::StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "error": format!("Failed to fetch schema from {}: {}", url, e) })),
+        ),
+    }
+}
+
+async fn handle_proxy_graphs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let url = format!("{}/graphs", target.trim_end_matches('/'));
+    match state.http_client.get(&url).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+                Json(json),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Failed to fetch graph spaces from {}: {}", url, e) })),
+        ),
+    }
+}
+
+async fn handle_proxy_pregel(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<EndpointParam>,
+) -> impl IntoResponse {
+    let target = params.endpoint.unwrap_or_else(|| state.default_cluster_url.clone());
+    let url = format!("{}/pregel/status", target.trim_end_matches('/'));
+    match state.http_client.get(&url).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK),
+                Json(json),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Failed to fetch pregel telemetry from {}: {}", url, e) })),
         ),
     }
 }
@@ -326,11 +409,26 @@ async fn handle_query(
     let start = std::time::Instant::now();
 
     // Relay to GDB cluster
-    let cluster_res = state
+    let mut req_builder = state
         .http_client
         .post(&cluster_query_url)
-        .header("Content-Type", "application/json")
-        .body(serde_json::json!({ "query": req.query }).to_string())
+        .header("Content-Type", "application/json");
+    if let Some(ref g) = req.graph {
+        if !g.is_empty() {
+            req_builder = req_builder.header("X-GDB-Graph", g);
+        }
+    }
+    let payload = if let Some(ref g) = req.graph {
+        if !g.is_empty() {
+            serde_json::json!({ "query": req.query, "graph": g })
+        } else {
+            serde_json::json!({ "query": req.query })
+        }
+    } else {
+        serde_json::json!({ "query": req.query })
+    };
+    let cluster_res = req_builder
+        .body(payload.to_string())
         .send()
         .await;
 
@@ -512,6 +610,12 @@ async fn handle_query(
                     None
                 };
 
+                let active_graph = json_val["active_graph"]
+                    .as_str()
+                    .map(String::from)
+                    .or_else(|| req.graph.clone());
+                let pregel = json_val.get("pregel").cloned();
+
                 Json(StudioQueryResponse {
                     status,
                     message,
@@ -522,6 +626,8 @@ async fn handle_query(
                     rows,
                     graph: GraphData { nodes, edges },
                     plan,
+                    active_graph,
+                    pregel,
                 })
             } else {
                 Json(StudioQueryResponse {
@@ -534,6 +640,8 @@ async fn handle_query(
                     rows: vec![],
                     graph: GraphData { nodes: vec![], edges: vec![] },
                     plan: None,
+                    active_graph: req.graph.clone(),
+                    pregel: None,
                 })
             }
         }
@@ -547,6 +655,8 @@ async fn handle_query(
             rows: vec![],
             graph: GraphData { nodes: vec![], edges: vec![] },
             plan: None,
+            active_graph: req.graph.clone(),
+            pregel: None,
         }),
     }
 }
@@ -602,6 +712,8 @@ fn create_studio_app(state: Arc<AppState>) -> Router {
         .route("/api/cluster", get(handle_proxy_cluster))
         .route("/api/resources", get(handle_proxy_resources))
         .route("/api/schema", get(handle_proxy_schema))
+        .route("/api/graphs", get(handle_proxy_graphs))
+        .route("/api/pregel", get(handle_proxy_pregel))
         .route("/api/gpu", get(handle_proxy_gpu))
         .route("/api/compact", post(handle_proxy_compact))
         .layer(CorsLayer::permissive())
@@ -879,6 +991,48 @@ mod tests {
         let body: StudioQueryResponse = q_res.json().await.unwrap();
         assert_eq!(body.status, "ok");
         assert!(body.plan.is_some());
+
+        // 11. Pregel BSP telemetry via PageRank & GET /api/pregel
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "CALL algo.pageRank() YIELD vertex_id, score;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+        let body: StudioQueryResponse = q_res.json().await.unwrap();
+        assert_eq!(body.status, "ok");
+        assert!(body.pregel.is_some());
+
+        let pregel_res = client.get(format!("{}/api/pregel", base_url)).send().await.unwrap();
+        assert!(pregel_res.status().is_success());
+        let pregel_json: serde_json::Value = pregel_res.json().await.unwrap();
+        assert_eq!(pregel_json["status"], "completed");
+
+        // 12. Graph Spaces via Studio (/api/graphs, CREATE GRAPH, USE GRAPH)
+        let q_res = client
+            .post(format!("{}/api/query", base_url))
+            .json(&serde_json::json!({
+                "query": "CREATE GRAPH IF NOT EXISTS finance;"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(q_res.status().is_success());
+
+        let graphs_res = client.get(format!("{}/api/graphs", base_url)).send().await.unwrap();
+        assert!(graphs_res.status().is_success());
+        let graphs_json: serde_json::Value = graphs_res.json().await.unwrap();
+        let names: Vec<&str> = graphs_json["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g["name"].as_str())
+            .collect();
+        assert!(names.contains(&"default"));
+        assert!(names.contains(&"finance"));
     }
 
     #[test]

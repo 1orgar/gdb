@@ -4,8 +4,15 @@
 
 ---
 
-## 📌 Текущий статус (Версия v0.5.8 — Релиз)
+## 📌 Текущий статус (Версия v0.6.0 — Релиз «Hals»)
 
+- ✅ **Распределенный Pregel / BSP, Мультиграф (Graph Spaces), HNSW индекс & AI-интеграции (v0.6.0 «Hals»)**:
+  - **Distributed Pregel / BSP Analytics ($RF < N$ и $RF=1$)**: выполнение глобальных алгоритмов (`PageRank`, `WCC`, `Louvain`, `LPA`, `K-Core`, `SSSP`, `Betweenness`, `TriangleCount`) над шардированным графом со сбором телеметрии супершагов (`GET /pregel/status`, `SuperstepRecord`).
+  - **Graph Spaces / Namespaces (Мультиграф и Мультитенантность)**: полная поддержка DDL `CREATE GRAPH [IF NOT EXISTS] <name>;`, `SHOW GRAPHS;`, `USE GRAPH <name>;`, `DROP GRAPH [IF EXISTS] <name>;`, физическая и логическая изоляция `GraphSchema`, `PartitionStorageEngine`, CSR-кэша и маршрутизация через `X-GDB-Graph`, `"graph"` и `gdb://<graph>/...` Arrow Flight тикеты.
+  - **Нативный многослойный HNSW индекс (`HnswIndex`)**: субмиллисекундный приближенный поиск ближайших соседей (ANN) с поддержкой `CREATE VECTOR INDEX ON :Label(prop);` и `CALL vector.similaritySearch(...)` по метрикам `cosine`, `dot`, `l2`.
+  - **GDB Studio v0.6.0**: селектор Graph Spaces в верхней панели, вкладка `🧠 Analytics & Pregel` с запуском алгоритмов в 1 клик, авто-раскраской сообществ/центральности на 2D/3D холсте и трекером супершагов BSP, а также интерактивный обозреватель схемы мультиграфа с ER-диаграммой и живыми счетчиками вершин.
+  - **GDB CLI v0.6.0**: контекст сессии `gdb (<active_graph>)> `, флаг `--graph`, команды `USE GRAPH` и умное автодополнение (`Tab`) ключевых слов Cypher, процедур `CALL algo.*` и пространств.
+  - **Python SDK (`gdb-client` v0.6.0)**: методы управления графами (`list_graphs`, `create_graph`, `use_graph`, `drop_graph`, `pregel_status`) и официальные AI-интеграции `langchain-gdb` (`GdbVectorStore`, `GdbGraphStore`, `GdbGraphQAChain`) и `langgraph-gdb` (`GdbCheckpointSaver`, `GdbGraphRAGToolkit`).
 - ✅ **Связные N-Hop цепочки обходов, слияние вершин и сортировка в Studio (v0.5.8)**:
   - Реконструкция полных связных цепочек ребер ($v_0 \to v_1 \to \dots \to v_{N-1}$) для произвольной глубины обхода с автовыводом типа связи.
   - Глобальное слияние и дедупликация вершин по ID (устранение разрозненных одинаковых узлов на холсте).
@@ -104,7 +111,7 @@
 
 | Релиз | Кодовое имя | Главный фокус | Ключевые возможности |
 | :---: | :---: | :--- | :--- |
-| **v0.5.8** | **Grotius** *(Текущий)* | **Связные N-Hop обходы в Studio, слияние узлов, сортировка & Нотаризация** | 1. Связные цепочки обходов ($v_0 \to \dots \to v_{N-1}$).<br>2. Слияние и дедупликация вершин/ребер.<br>3. Сортировка таблицы и инспектор строки.<br>4. Сворачиваемые категории шаблонов.<br>5. 12 шаблонов Pattern Matching.<br>6. Подпись и нотаризация macOS в CI. |
-| **v0.6.0** | **Hals** | **Распределенный Pregel/BSP ($RF=1$), Graph Spaces & AI Интеграции** | 1. **Distributed Pregel/BSP Analytics**: глобальные PageRank, WCC, Louvain на шардированном графе ($RF=1$) через сетевой Arrow Flight Shuffle.<br>2. **Мультиграф**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (изоляция схем и CSR).<br>3. Селектор пространств в GDB Studio, REPL CLI и Python SDK.<br>4. Коннекторы LangChain & LangGraph (`langchain-gdb`).<br>5. Векторный граф-индекс HNSW и гибридный Graph RAG. |
+| **v0.5.8** | **Grotius** | **Связные N-Hop обходы в Studio, слияние узлов, сортировка & Нотаризация** | 1. Связные цепочки обходов ($v_0 \to \dots \to v_{N-1}$).<br>2. Слияние и дедупликация вершин/ребер.<br>3. Сортировка таблицы и инспектор строки.<br>4. Сворачиваемые категории шаблонов.<br>5. 12 шаблонов Pattern Matching.<br>6. Подпись и нотаризация macOS в CI. |
+| **v0.6.0** | **Hals** *(Текущий)* | **Распределенный Pregel/BSP ($RF=1$), Graph Spaces & AI Интеграции** | 1. **Distributed Pregel/BSP Analytics**: глобальные PageRank, WCC, Louvain на шардированном графом ($RF=1$) через сетевой Arrow Flight Shuffle.<br>2. **Мультиграф**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (изоляция схем и CSR).<br>3. Селектор пространств в GDB Studio, REPL CLI и Python SDK.<br>4. Коннекторы LangChain & LangGraph (`langchain-gdb`).<br>5. Векторный граф-индекс HNSW и гибридный Graph RAG. |
 | **v0.7.0** | **Steen** | **Распределенные ACID-транзакции, Продвинутая аналитика & Нотаризация macOS** | 1. Распределенные многопартиционные ACID-транзакции (2PC, Snapshot Isolation).<br>2. Алгоритмы взвешенных путей (Dijkstra, A*).<br>3. Мониторинг топологии и GPU в Studio.<br>4. Официальная подпись Apple Developer и нотаризация релизных ассетов для macOS. |
 | **v1.0.0** | **Erasmus** | **Корпоративная безопасность & LTS** | 1. TLS/mTLS, JWT-аутентификация и гранулярный RBAC по графам и меткам.<br>2. Streaming Raft Snapshots через Arrow Flight RPC.<br>3. Долгосрочная поддержка (LTS) и строгая гарантия обратной совместимости API. |

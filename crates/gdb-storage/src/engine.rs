@@ -1,6 +1,7 @@
 use crate::csr::ChunkedCsr;
 use crate::delta::DeltaMemTable;
 use crate::properties::VertexPropertyTable;
+use dashmap::DashMap;
 use gdb_core::schema::GraphSchema;
 use gdb_core::{DataValue, EdgeId, EdgeType, GdbError, GdbResult, LabelId, VertexId};
 use parking_lot::RwLock;
@@ -19,6 +20,8 @@ pub struct PartitionStorageEngine {
     delta: Arc<DeltaMemTable>,
     /// Property tables indexed by vertex LabelId
     vertex_properties: RwLock<HashMap<LabelId, Arc<VertexPropertyTable>>>,
+    /// Concurrent edge property store indexed by EdgeId
+    edge_properties: DashMap<EdgeId, HashMap<String, DataValue>>,
 }
 
 impl PartitionStorageEngine {
@@ -29,6 +32,7 @@ impl PartitionStorageEngine {
             csr: RwLock::new(Arc::new(ChunkedCsr::new())),
             delta: Arc::new(DeltaMemTable::new()),
             vertex_properties: RwLock::new(HashMap::new()),
+            edge_properties: DashMap::new(),
         }
     }
 
@@ -47,9 +51,42 @@ impl PartitionStorageEngine {
         self.delta.insert_edge(edge, version);
     }
 
+    /// Inserts or updates an edge along with its properties.
+    pub fn insert_edge_with_properties(
+        &self,
+        edge: EdgeId,
+        version: u64,
+        props: HashMap<String, DataValue>,
+    ) {
+        self.delta.insert_edge(edge, version);
+        if !props.is_empty() {
+            self.edge_properties.insert(edge, props);
+        }
+    }
+
+    /// Sets or updates properties for an edge.
+    pub fn set_edge_properties(&self, edge: EdgeId, props: HashMap<String, DataValue>) {
+        if !props.is_empty() {
+            self.edge_properties.insert(edge, props);
+        }
+    }
+
+    /// Reads a single property on an edge.
+    pub fn get_edge_property(&self, edge: &EdgeId, prop_name: &str) -> Option<DataValue> {
+        self.edge_properties
+            .get(edge)
+            .and_then(|map| map.get(prop_name).cloned())
+    }
+
+    /// Reads all properties on an edge.
+    pub fn get_all_edge_properties(&self, edge: &EdgeId) -> Option<HashMap<String, DataValue>> {
+        self.edge_properties.get(edge).map(|r| r.value().clone())
+    }
+
     /// Deletes an edge (tombstone) at given commit version.
     pub fn delete_edge(&self, edge: EdgeId, version: u64) {
         self.delta.delete_edge(edge, version);
+        self.edge_properties.remove(&edge);
     }
 
     /// Sets properties for a vertex under a given label.
@@ -199,6 +236,7 @@ impl PartitionStorageEngine {
     /// Drops all edges of a given edge type from both Delta MemTable and CSR.
     pub fn drop_edge_type(&self, edge_type: EdgeType) {
         self.delta.drop_edge_type(edge_type);
+        self.edge_properties.retain(|k, _| k.edge_type != edge_type);
         let current_csr = self.csr.read().clone();
         let mut remaining_edges = Vec::new();
         for &src_raw in &current_csr.reverse_map {
@@ -427,6 +465,28 @@ impl PartitionStorageEngine {
         } else {
             Vec::new()
         }
+    }
+
+    /// Extracts flat contiguous vector buffers for GPU-accelerated vector similarity search.
+    pub fn extract_vectors_for_label(
+        &self,
+        label_id: LabelId,
+        property_name: &str,
+        dim: usize,
+    ) -> (Vec<VertexId>, Vec<f32>) {
+        if let Some(table) = self.vertex_properties.read().get(&label_id) {
+            table.extract_vectors(property_name, dim)
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    }
+
+    /// Returns all active edges in this partition (compacting delta if needed).
+    pub fn get_all_active_edges(&self) -> Vec<EdgeId> {
+        if self.delta_edges() > 0 {
+            self.compact();
+        }
+        self.current_csr().all_edges()
     }
 
     /// Computes full graph statistics (vertex counts, degree distribution, edges) for CBO optimization.

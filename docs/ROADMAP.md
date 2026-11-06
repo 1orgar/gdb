@@ -4,8 +4,15 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 ---
 
-## 📌 Current Status (Version v0.5.8 — Release)
+## 📌 Current Status (Version v0.6.0 — Release "Hals")
 
+- ✅ **Distributed Pregel / BSP, Multi-Graph Spaces, Native HNSW Index & AI Integrations (v0.6.0 "Hals")**:
+  - **Distributed Pregel / BSP Analytics ($RF < N$ & $RF=1$)**: global graph analytics (`PageRank`, `WCC`, `Louvain`, `LPA`, `K-Core`, `SSSP`, `Betweenness`, `TriangleCount`) over sharded graphs with real-time superstep telemetry (`GET /pregel/status`, `SuperstepRecord`).
+  - **Graph Spaces / Namespaces (Multi-Tenancy & Multi-Graph)**: full DDL support (`CREATE GRAPH [IF NOT EXISTS] <name>;`, `SHOW GRAPHS;`, `USE GRAPH <name>;`, `DROP GRAPH [IF EXISTS] <name>;`), physical & logical isolation of `GraphSchema`, `PartitionStorageEngine`, and CSR caches, plus routing via `X-GDB-Graph`, `"graph"`, and `gdb://<graph>/...` Arrow Flight tickets.
+  - **Native Multi-Layer HNSW Vector Index (`HnswIndex`)**: sub-millisecond ANN vector similarity search with `CREATE VECTOR INDEX ON :Label(prop);` and `CALL vector.similaritySearch(...)` supporting `cosine`, `dot`, and `l2` metrics.
+  - **GDB Studio v0.6.0**: top-bar Graph Spaces Switcher, `🧠 Analytics & Pregel` workspace with one-click algorithm execution, automatic community/centrality node coloring on 2D/3D canvas, live BSP superstep progress tracker, and Interactive Multi-Graph Schema Explorer with visual ER diagram and live vertex counters.
+  - **GDB CLI v0.6.0**: session graph context prompt `gdb (<active_graph>)> `, `--graph` flag, `USE GRAPH` switching, and interactive `Tab` completion for Cypher keywords, `CALL algo.*` procedures, and graph spaces.
+  - **Python SDK (`gdb-client` v0.6.0)**: Graph Spaces lifecycle API (`list_graphs`, `create_graph`, `use_graph`, `drop_graph`, `pregel_status`) and official AI integrations `langchain-gdb` (`GdbVectorStore`, `GdbGraphStore`, `GdbGraphQAChain`) and `langgraph-gdb` (`GdbCheckpointSaver`, `GdbGraphRAGToolkit`).
 - ✅ **Studio Multi-Hop Traversal Chains, Node Deduplication & Table Sorting (v0.5.8)**:
   - Full N-hop path traversal reconstruction ($v_0 \to v_1 \to \dots \to v_{N-1}$) with automatic edge label inference.
   - Global vertex and edge deduplication across rows and hops (zero duplicate floating nodes on canvas).
@@ -104,7 +111,7 @@ This document outlines strategic milestones, architectural priorities, and futur
 
 | Release | Codename | Primary Focus | Key Deliverables |
 | :---: | :---: | :--- | :--- |
-| **v0.5.8** | **Grotius** *(Current)* | **Studio Multi-Hop Chains, Node Deduplication, Table Sorting & Notarization** | 1. Connected N-hop traversal chains ($v_0 \to \dots \to v_{N-1}$).<br>2. Vertex & edge deduplication across hops and rows.<br>3. Interactive table column sorting & row metadata inspector.<br>4. Collapsible template categories.<br>5. 12 Pattern Matching templates.<br>6. Apple Developer signing & notarization in CI. |
-| **v0.6.0** | **Hals** | **Distributed Pregel/BSP ($RF=1$), Graph Spaces & AI Integrations** | 1. **Distributed Pregel/BSP Analytics**: global PageRank, WCC, Louvain over sharded graphs ($RF=1$) via Arrow Flight Shuffle.<br>2. **Multi-Graph**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (schema & CSR isolation).<br>3. Graph space selectors across GDB Studio, REPL CLI, and Python SDK.<br>4. LangChain & LangGraph connectors (`langchain-gdb`).<br>5. Native HNSW Vector Graph Index and hybrid Graph RAG. |
+| **v0.5.8** | **Grotius** | **Studio Multi-Hop Chains, Node Deduplication, Table Sorting & Notarization** | 1. Connected N-hop traversal chains ($v_0 \to \dots \to v_{N-1}$).<br>2. Vertex & edge deduplication across hops and rows.<br>3. Interactive table column sorting & row metadata inspector.<br>4. Collapsible template categories.<br>5. 12 Pattern Matching templates.<br>6. Apple Developer signing & notarization in CI. |
+| **v0.6.0** | **Hals** *(Current)* | **Distributed Pregel/BSP ($RF=1$), Graph Spaces & AI Integrations** | 1. **Distributed Pregel/BSP Analytics**: global PageRank, WCC, Louvain over sharded graphs ($RF=1$) via Arrow Flight Shuffle.<br>2. **Multi-Graph**: `CREATE GRAPH` / `USE GRAPH` / `SHOW GRAPHS` (schema & CSR isolation).<br>3. Graph space selectors across GDB Studio, REPL CLI, and Python SDK.<br>4. LangChain & LangGraph connectors (`langchain-gdb`).<br>5. Native HNSW Vector Graph Index and hybrid Graph RAG. |
 | **v0.7.0** | **Steen** | **Distributed ACID Transactions, Advanced Analytics & macOS Notarization** | 1. Distributed multi-partition ACID transactions (2PC, Snapshot Isolation).<br>2. Weighted shortest path algorithms (Dijkstra, A*).<br>3. Real-time topology and GPU telemetry in Studio.<br>4. Official Apple Developer Code Signing and Apple Notarization for macOS release assets. |
 | **v1.0.0** | **Erasmus** | **Enterprise Security & LTS** | 1. TLS/mTLS, JWT authentication, and granular RBAC per graph/label/property.<br>2. Streaming Raft Snapshots over Arrow Flight RPC.<br>3. Long-Term Support (LTS) release with strict API stability guarantees. |

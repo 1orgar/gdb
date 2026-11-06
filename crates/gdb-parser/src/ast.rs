@@ -38,6 +38,18 @@ pub enum Statement {
     ShowSchema,
     ShowVertexLabels,
     ShowEdgeTypes,
+    CreateGraph {
+        name: String,
+        if_not_exists: bool,
+    },
+    DropGraph {
+        name: String,
+        if_exists: bool,
+    },
+    UseGraph {
+        name: String,
+    },
+    ShowGraphs,
     InsertVertex {
         label: String,
         id: VertexId,

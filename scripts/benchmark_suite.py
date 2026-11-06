@@ -144,9 +144,16 @@ def main():
         analytics_algorithms = [
             ("PageRank (20 iters)", "CALL algo.pageRank({max_iter: 20}) YIELD vertex_id, score;"),
             ("Weakly Connected Components", "CALL algo.wcc() YIELD vertex_id, component_id;"),
+            ("Strongly Connected Components", "CALL algo.scc() YIELD vertex_id, component_id;"),
             ("Louvain Communities", "CALL algo.louvain({max_iter: 10}) YIELD vertex_id, community_id;"),
-            ("Triangle Counting & LCC", "CALL algo.triangleCount() YIELD vertex_id, triangles;"),
+            ("Label Propagation (LPA)", "CALL algo.lpa({max_iter: 10}) YIELD vertex_id, community_id;"),
+            ("Triangle Counting & LCC", "CALL algo.triangleCount() YIELD vertex_id, triangles, clustering_coefficient;"),
+            ("K-Core Decomposition", "CALL algo.kcore() YIELD vertex_id, coreness;"),
+            ("Degree Centrality", "CALL algo.degree() YIELD vertex_id, in_degree, out_degree, total_degree;"),
             ("Single Source Shortest Path", "CALL algo.sssp(1) YIELD vertex_id, distance;"),
+            ("Betweenness Centrality", "CALL algo.betweenness({normalized: true}) YIELD vertex_id, betweenness;"),
+            ("Harmonic Closeness Centrality", "CALL algo.closeness() YIELD vertex_id, closeness;"),
+            ("Jaccard/Cosine Similarity", "CALL algo.similarity({node1: 1, node2: 2}) YIELD node1, node2, jaccard, cosine, common_neighbors;"),
             ("Node2Vec Embeddings", "CALL algo.node2vec({walk_length: 5, walks_per_vertex: 2, dimensions: 16}) YIELD vertex_id, embedding;"),
         ]
 

@@ -1,8 +1,9 @@
 use gdb_core::VertexId;
 use gdb_storage::ChunkedCsr;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
-/// High-precision PageRank algorithm with convergence check.
+/// High-precision PageRank algorithm with convergence check and O(1) dense CSR indexing.
 pub fn pagerank(
     csr: &ChunkedCsr,
     damping: f64,
@@ -22,42 +23,40 @@ pub fn pagerank(
     let mut out_degrees = vec![0u32; num_v];
     for u in 0..num_v {
         let start = csr.offsets[u] as usize;
-        let end = csr.offsets[u + 1] as usize;
+        let end = (csr.offsets[u + 1] as usize).min(csr.targets.len());
         out_degrees[u] = end.saturating_sub(start) as u32;
     }
 
     for _ in 0..max_iter {
-        let base = (1.0 - damping) / n;
-        new_rank.fill(base);
-
         let mut dangling_sum = 0.0f64;
         for u in 0..num_v {
             if out_degrees[u] == 0 {
                 dangling_sum += rank[u];
             }
         }
-        let dangling_contrib = (damping * dangling_sum) / n;
-        for val in new_rank.iter_mut() {
-            *val += dangling_contrib;
-        }
+        let base = (1.0 - damping) / n + (damping * dangling_sum) / n;
+        new_rank.fill(base);
 
         for u in 0..num_v {
             let deg = out_degrees[u];
             if deg > 0 {
                 let contrib = damping * (rank[u] / deg as f64);
                 let start = csr.offsets[u] as usize;
-                let end = csr.offsets[u + 1] as usize;
+                let end = (csr.offsets[u + 1] as usize).min(csr.targets.len());
                 for off in start..end {
-                    let target_raw = csr.targets[off];
-                    if let Some(&target_idx) = csr.vertex_map.get(&target_raw) {
-                        new_rank[target_idx as usize] += contrib;
+                    if let Some(target_idx) = csr.dense_target_at(off) {
+                        new_rank[target_idx] += contrib;
                     }
                 }
             }
         }
 
         // Check L1 convergence norm: sum(|r_new - r_old|) < tolerance
-        let diff: f64 = rank.iter().zip(new_rank.iter()).map(|(a, b)| (a - b).abs()).sum();
+        let diff: f64 = rank
+            .par_iter()
+            .zip(new_rank.par_iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
         std::mem::swap(&mut rank, &mut new_rank);
 
         if diff < tolerance {

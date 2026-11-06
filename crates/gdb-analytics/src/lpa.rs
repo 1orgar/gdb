@@ -2,52 +2,71 @@ use gdb_core::VertexId;
 use gdb_storage::ChunkedCsr;
 use std::collections::HashMap;
 
-/// Label Propagation Algorithm (LPA) for fast community detection.
+#[inline]
+fn sorted_intersection_len(a: &[u32], b: &[u32]) -> u32 {
+    let mut i = 0;
+    let mut j = 0;
+    let mut count = 0u32;
+    while i < a.len() && j < b.len() {
+        if a[i] < b[j] {
+            i += 1;
+        } else if a[i] > b[j] {
+            j += 1;
+        } else {
+            count += 1;
+            i += 1;
+            j += 1;
+        }
+    }
+    count
+}
+
+/// Label Propagation Algorithm (LPA) for fast community detection over undirected topology.
+/// Uses triangle-structural support weighting (`1 + |N(u) ∩ N(v)|`) to prevent bridge-edge
+/// label leakage across communities on initial iterations.
 pub fn label_propagation(csr: &ChunkedCsr, max_iter: usize) -> HashMap<VertexId, u64> {
     let num_v = csr.vertex_count();
     if num_v == 0 {
         return HashMap::new();
     }
 
-    // Initialize: each vertex has its own label (its dense index as u64)
-    let mut labels: Vec<u64> = (0..num_v as u64).collect();
-    let mut new_labels = labels.clone();
+    let adj = csr.build_undirected_adj();
+    let mut labels: Vec<u64> = (0..num_v).map(|i| csr.reverse_map[i]).collect();
+
+    let mut label_counts: Vec<(u64, u32)> = Vec::with_capacity(32);
 
     for _ in 0..max_iter {
         let mut changed = false;
 
         for u in 0..num_v {
-            let start = csr.offsets[u] as usize;
-            let end = csr.offsets[u + 1] as usize;
-            let actual_end = end.min(csr.targets.len());
-
-            if start >= actual_end {
+            let neighbors = &adj[u];
+            if neighbors.is_empty() {
                 continue;
             }
 
-            // Count frequency of labels among outgoing neighbors
-            let mut label_counts: HashMap<u64, u32> = HashMap::new();
-            for off in start..actual_end {
-                let target_raw = csr.targets[off];
-                if let Some(&v_idx) = csr.vertex_map.get(&target_raw) {
-                    let v_label = labels[v_idx as usize];
-                    *label_counts.entry(v_label).or_insert(0) += 1;
+            label_counts.clear();
+            for &v_u32 in neighbors {
+                let v = v_u32 as usize;
+                let v_label = labels[v];
+                let support = 1 + sorted_intersection_len(neighbors, &adj[v]);
+                if let Some(entry) = label_counts.iter_mut().find(|(lbl, _)| *lbl == v_label) {
+                    entry.1 += support;
+                } else {
+                    label_counts.push((v_label, support));
                 }
             }
 
-            // Pick the most frequent label (with smallest label as deterministic tie-breaker)
-            if let Some((&best_label, _)) = label_counts
+            if let Some(&(best_label, _)) = label_counts
                 .iter()
                 .max_by(|(l1, c1), (l2, c2)| c1.cmp(c2).then_with(|| l2.cmp(l1)))
             {
                 if best_label != labels[u] {
-                    new_labels[u] = best_label;
+                    labels[u] = best_label;
                     changed = true;
                 }
             }
         }
 
-        labels.copy_from_slice(&new_labels);
         if !changed {
             break;
         }

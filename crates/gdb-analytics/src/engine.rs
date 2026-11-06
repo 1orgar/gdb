@@ -4,20 +4,22 @@ use crate::degree::degree_centrality;
 use crate::kcore::k_core_decomposition;
 use crate::louvain::louvain;
 use crate::lpa::label_propagation;
-use crate::pagerank::pagerank;
-use crate::scc::strongly_connected_components;
-use crate::similarity::{common_neighbors, cosine_similarity, jaccard_similarity};
 use crate::node2vec::node2vec;
+use crate::pagerank::pagerank;
+use crate::scc::strongly_connected_components_vec;
+use crate::similarity::{common_neighbors, cosine_similarity, jaccard_similarity};
 use crate::sssp::single_source_shortest_path;
 use crate::triangles::triangle_count;
 use crate::wcc::weakly_connected_components;
 use arrow::array::{ArrayRef, Float64Array, RecordBatch, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use gdb_core::{GdbResult, VertexId};
+use gdb_gpu::GpuDispatcher;
 use gdb_storage::ChunkedCsr;
 use std::sync::Arc;
 
-/// Enterprise Graph Analytics Engine (Nebula Enterprise Analytics suite).
+/// Enterprise Graph Analytics Engine (Nebula Enterprise Analytics suite)
+/// with seamless hardware GPU acceleration via `GpuDispatcher`.
 pub struct AnalyticsEngine;
 
 impl AnalyticsEngine {
@@ -28,15 +30,40 @@ impl AnalyticsEngine {
         max_iter: usize,
         tolerance: f64,
     ) -> GdbResult<RecordBatch> {
-        let scores = pagerank(csr, damping, max_iter, tolerance);
+        Self::run_pagerank_with_gpu(csr, damping, max_iter, tolerance, None)
+    }
 
-        let mut vids = Vec::with_capacity(scores.len());
-        let mut score_vals = Vec::with_capacity(scores.len());
+    pub fn run_pagerank_with_gpu(
+        csr: &ChunkedCsr,
+        damping: f64,
+        max_iter: usize,
+        tolerance: f64,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, f64)> = if let Some(disp) = gpu {
+            if disp.enabled {
+                disp.pagerank(csr, damping as f32, max_iter)?
+                    .into_iter()
+                    .map(|(vid, s)| (vid.as_u64(), s as f64))
+                    .collect()
+            } else {
+                disp.pagerank_f64(csr, damping, max_iter, tolerance)?
+                    .into_iter()
+                    .map(|(vid, s)| (vid.as_u64(), s))
+                    .collect()
+            }
+        } else {
+            pagerank(csr, damping, max_iter, tolerance)
+                .into_iter()
+                .map(|(vid, s)| (vid.as_u64(), s))
+                .collect()
+        };
 
-        for (vid, score) in scores {
-            vids.push(vid.as_u64());
-            score_vals.push(score);
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let score_vals: Vec<f64> = pairs.iter().map(|(_, s)| *s).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -53,15 +80,30 @@ impl AnalyticsEngine {
 
     /// Executes Weakly Connected Components (WCC).
     pub fn run_wcc(csr: &ChunkedCsr) -> GdbResult<RecordBatch> {
-        let components = weakly_connected_components(csr);
+        Self::run_wcc_with_gpu(csr, None)
+    }
 
-        let mut vids = Vec::with_capacity(components.len());
-        let mut comp_ids = Vec::with_capacity(components.len());
+    pub fn run_wcc_with_gpu(
+        csr: &ChunkedCsr,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, u64)> = if let Some(disp) = gpu {
+            disp.wcc(csr)?
+                .into_iter()
+                .map(|(vid, comp)| (vid.as_u64(), comp))
+                .collect()
+        } else {
+            weakly_connected_components(csr)
+                .into_iter()
+                .map(|(vid, comp)| (vid.as_u64(), comp.as_u64()))
+                .collect()
+        };
 
-        for (vid, comp) in components {
-            vids.push(vid.as_u64());
-            comp_ids.push(comp.as_u64());
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let comp_ids: Vec<u64> = pairs.iter().map(|(_, c)| *c).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -78,15 +120,10 @@ impl AnalyticsEngine {
 
     /// Executes Strongly Connected Components (SCC).
     pub fn run_scc(csr: &ChunkedCsr) -> GdbResult<RecordBatch> {
-        let components = strongly_connected_components(csr);
+        let pairs = strongly_connected_components_vec(csr);
 
-        let mut vids = Vec::with_capacity(components.len());
-        let mut comp_ids = Vec::with_capacity(components.len());
-
-        for (vid, comp) in components {
-            vids.push(vid.as_u64());
-            comp_ids.push(comp.as_u64());
-        }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let comp_ids: Vec<u64> = pairs.iter().map(|(_, c)| *c).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -103,15 +140,31 @@ impl AnalyticsEngine {
 
     /// Executes Louvain Community Detection.
     pub fn run_louvain(csr: &ChunkedCsr, max_iter: usize) -> GdbResult<RecordBatch> {
-        let comms = louvain(csr, max_iter);
+        Self::run_louvain_with_gpu(csr, max_iter, None)
+    }
 
-        let mut vids = Vec::with_capacity(comms.len());
-        let mut comm_ids = Vec::with_capacity(comms.len());
+    pub fn run_louvain_with_gpu(
+        csr: &ChunkedCsr,
+        max_iter: usize,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, u64)> = if let Some(disp) = gpu {
+            disp.louvain(csr, max_iter)?
+                .into_iter()
+                .map(|(vid, c)| (vid.as_u64(), c))
+                .collect()
+        } else {
+            louvain(csr, max_iter)
+                .into_iter()
+                .map(|(vid, c)| (vid.as_u64(), c))
+                .collect()
+        };
 
-        for (vid, c) in comms {
-            vids.push(vid.as_u64());
-            comm_ids.push(c);
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let comm_ids: Vec<u64> = pairs.iter().map(|(_, c)| *c).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -128,15 +181,31 @@ impl AnalyticsEngine {
 
     /// Executes Label Propagation Algorithm (LPA).
     pub fn run_lpa(csr: &ChunkedCsr, max_iter: usize) -> GdbResult<RecordBatch> {
-        let labels = label_propagation(csr, max_iter);
+        Self::run_lpa_with_gpu(csr, max_iter, None)
+    }
 
-        let mut vids = Vec::with_capacity(labels.len());
-        let mut label_ids = Vec::with_capacity(labels.len());
+    pub fn run_lpa_with_gpu(
+        csr: &ChunkedCsr,
+        max_iter: usize,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, u64)> = if let Some(disp) = gpu {
+            disp.lpa(csr, max_iter)?
+                .into_iter()
+                .map(|(vid, l)| (vid.as_u64(), l))
+                .collect()
+        } else {
+            label_propagation(csr, max_iter)
+                .into_iter()
+                .map(|(vid, l)| (vid.as_u64(), l))
+                .collect()
+        };
 
-        for (vid, l) in labels {
-            vids.push(vid.as_u64());
-            label_ids.push(l);
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let label_ids: Vec<u64> = pairs.iter().map(|(_, l)| *l).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -153,15 +222,30 @@ impl AnalyticsEngine {
 
     /// Executes K-Core Decomposition.
     pub fn run_kcore(csr: &ChunkedCsr) -> GdbResult<RecordBatch> {
-        let cores = k_core_decomposition(csr);
+        Self::run_kcore_with_gpu(csr, None)
+    }
 
-        let mut vids = Vec::with_capacity(cores.len());
-        let mut core_nums = Vec::with_capacity(cores.len());
+    pub fn run_kcore_with_gpu(
+        csr: &ChunkedCsr,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, u32)> = if let Some(disp) = gpu {
+            disp.kcore(csr)?
+                .into_iter()
+                .map(|(vid, k)| (vid.as_u64(), k))
+                .collect()
+        } else {
+            k_core_decomposition(csr)
+                .into_iter()
+                .map(|(vid, k)| (vid.as_u64(), k))
+                .collect()
+        };
 
-        for (vid, k) in cores {
-            vids.push(vid.as_u64());
-            core_nums.push(k);
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let core_nums: Vec<u32> = pairs.iter().map(|(_, k)| *k).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -178,17 +262,31 @@ impl AnalyticsEngine {
 
     /// Executes Triangle Count & Clustering Coefficient.
     pub fn run_triangle_count(csr: &ChunkedCsr) -> GdbResult<RecordBatch> {
-        let metrics = triangle_count(csr);
+        Self::run_triangle_count_with_gpu(csr, None)
+    }
 
-        let mut vids = Vec::with_capacity(metrics.len());
-        let mut triangles = Vec::with_capacity(metrics.len());
-        let mut coeffs = Vec::with_capacity(metrics.len());
+    pub fn run_triangle_count_with_gpu(
+        csr: &ChunkedCsr,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut rows: Vec<(u64, u64, f64)> = if let Some(disp) = gpu {
+            disp.triangle_count_with_lcc(csr)?
+                .into_iter()
+                .map(|(vid, t, lcc)| (vid.as_u64(), t, lcc))
+                .collect()
+        } else {
+            triangle_count(csr)
+                .into_iter()
+                .map(|(vid, m)| (vid.as_u64(), m.triangles, m.clustering_coefficient))
+                .collect()
+        };
 
-        for (vid, m) in metrics {
-            vids.push(vid.as_u64());
-            triangles.push(m.triangles);
-            coeffs.push(m.clustering_coefficient);
+        if !rows.windows(2).all(|w| w[0].0 <= w[1].0) {
+            rows.sort_unstable_by_key(|(vid, _, _)| *vid);
         }
+        let vids: Vec<u64> = rows.iter().map(|(v, _, _)| *v).collect();
+        let triangles: Vec<u64> = rows.iter().map(|(_, t, _)| *t).collect();
+        let coeffs: Vec<f64> = rows.iter().map(|(_, _, c)| *c).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -207,15 +305,31 @@ impl AnalyticsEngine {
 
     /// Executes Betweenness Centrality.
     pub fn run_betweenness(csr: &ChunkedCsr, normalized: bool) -> GdbResult<RecordBatch> {
-        let metrics = betweenness_centrality(csr, normalized);
+        Self::run_betweenness_with_gpu(csr, normalized, None)
+    }
 
-        let mut vids = Vec::with_capacity(metrics.len());
-        let mut scores = Vec::with_capacity(metrics.len());
+    pub fn run_betweenness_with_gpu(
+        csr: &ChunkedCsr,
+        normalized: bool,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, f64)> = if let Some(disp) = gpu {
+            disp.betweenness(csr, normalized)?
+                .into_iter()
+                .map(|(vid, b)| (vid.as_u64(), b))
+                .collect()
+        } else {
+            betweenness_centrality(csr, normalized)
+                .into_iter()
+                .map(|(vid, b)| (vid.as_u64(), b))
+                .collect()
+        };
 
-        for (vid, b) in metrics {
-            vids.push(vid.as_u64());
-            scores.push(b);
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let scores: Vec<f64> = pairs.iter().map(|(_, b)| *b).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -232,15 +346,30 @@ impl AnalyticsEngine {
 
     /// Executes Closeness Centrality.
     pub fn run_closeness(csr: &ChunkedCsr) -> GdbResult<RecordBatch> {
-        let metrics = closeness_centrality(csr);
+        Self::run_closeness_with_gpu(csr, None)
+    }
 
-        let mut vids = Vec::with_capacity(metrics.len());
-        let mut scores = Vec::with_capacity(metrics.len());
+    pub fn run_closeness_with_gpu(
+        csr: &ChunkedCsr,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, f64)> = if let Some(disp) = gpu {
+            disp.closeness(csr)?
+                .into_iter()
+                .map(|(vid, c)| (vid.as_u64(), c))
+                .collect()
+        } else {
+            closeness_centrality(csr)
+                .into_iter()
+                .map(|(vid, c)| (vid.as_u64(), c))
+                .collect()
+        };
 
-        for (vid, c) in metrics {
-            vids.push(vid.as_u64());
-            scores.push(c);
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let scores: Vec<f64> = pairs.iter().map(|(_, c)| *c).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -257,19 +386,32 @@ impl AnalyticsEngine {
 
     /// Executes Degree Centrality.
     pub fn run_degree(csr: &ChunkedCsr) -> GdbResult<RecordBatch> {
-        let metrics = degree_centrality(csr);
+        Self::run_degree_with_gpu(csr, None)
+    }
 
-        let mut vids = Vec::with_capacity(metrics.len());
-        let mut in_degs = Vec::with_capacity(metrics.len());
-        let mut out_degs = Vec::with_capacity(metrics.len());
-        let mut tot_degs = Vec::with_capacity(metrics.len());
+    pub fn run_degree_with_gpu(
+        csr: &ChunkedCsr,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut rows: Vec<(u64, u32, u32, u32)> = if let Some(disp) = gpu {
+            disp.degree(csr)?
+                .into_iter()
+                .map(|(vid, i, o, t)| (vid.as_u64(), i, o, t))
+                .collect()
+        } else {
+            degree_centrality(csr)
+                .into_iter()
+                .map(|(vid, m)| (vid.as_u64(), m.in_degree, m.out_degree, m.total_degree))
+                .collect()
+        };
 
-        for (vid, m) in metrics {
-            vids.push(vid.as_u64());
-            in_degs.push(m.in_degree);
-            out_degs.push(m.out_degree);
-            tot_degs.push(m.total_degree);
+        if !rows.windows(2).all(|w| w[0].0 <= w[1].0) {
+            rows.sort_unstable_by_key(|(vid, _, _, _)| *vid);
         }
+        let vids: Vec<u64> = rows.iter().map(|(v, _, _, _)| *v).collect();
+        let in_degs: Vec<u32> = rows.iter().map(|(_, i, _, _)| *i).collect();
+        let out_degs: Vec<u32> = rows.iter().map(|(_, _, o, _)| *o).collect();
+        let tot_degs: Vec<u32> = rows.iter().map(|(_, _, _, t)| *t).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -290,15 +432,31 @@ impl AnalyticsEngine {
 
     /// Executes Single-Source Shortest Path (SSSP).
     pub fn run_sssp(csr: &ChunkedCsr, source: VertexId) -> GdbResult<RecordBatch> {
-        let dists = single_source_shortest_path(csr, source);
+        Self::run_sssp_with_gpu(csr, source, None)
+    }
 
-        let mut vids = Vec::with_capacity(dists.len());
-        let mut distances = Vec::with_capacity(dists.len());
+    pub fn run_sssp_with_gpu(
+        csr: &ChunkedCsr,
+        source: VertexId,
+        gpu: Option<&GpuDispatcher>,
+    ) -> GdbResult<RecordBatch> {
+        let mut pairs: Vec<(u64, u32)> = if let Some(disp) = gpu {
+            disp.sssp(csr, source)?
+                .into_iter()
+                .map(|(vid, d)| (vid.as_u64(), d))
+                .collect()
+        } else {
+            single_source_shortest_path(csr, source)
+                .into_iter()
+                .map(|(vid, d)| (vid.as_u64(), d))
+                .collect()
+        };
 
-        for (vid, d) in dists {
-            vids.push(vid.as_u64());
-            distances.push(d);
+        if !pairs.windows(2).all(|w| w[0].0 <= w[1].0) {
+            pairs.sort_unstable_by_key(|(vid, _)| *vid);
         }
+        let vids: Vec<u64> = pairs.iter().map(|(v, _)| *v).collect();
+        let distances: Vec<u32> = pairs.iter().map(|(_, d)| *d).collect();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("vertex_id", DataType::UInt64, false),
@@ -314,7 +472,11 @@ impl AnalyticsEngine {
     }
 
     /// Executes Similarity metrics between two nodes.
-    pub fn run_similarity(csr: &ChunkedCsr, node1: VertexId, node2: VertexId) -> GdbResult<RecordBatch> {
+    pub fn run_similarity(
+        csr: &ChunkedCsr,
+        node1: VertexId,
+        node2: VertexId,
+    ) -> GdbResult<RecordBatch> {
         let jaccard = jaccard_similarity(csr, node1, node2);
         let cosine = cosine_similarity(csr, node1, node2);
         let common = common_neighbors(csr, node1, node2) as u64;
@@ -350,12 +512,22 @@ impl AnalyticsEngine {
         let results = node2vec(csr, dimensions, walk_length, num_walks, p, q);
 
         let mut vids = Vec::with_capacity(results.len());
-        let mut string_embeddings = Vec::with_capacity(results.len());
+        let mut str_builder =
+            arrow::array::StringBuilder::with_capacity(results.len(), results.len() * (dimensions * 8 + 4));
+        let mut buf = String::with_capacity(dimensions * 10 + 4);
 
         for (vid, emb) in results {
             vids.push(vid.as_u64());
-            let s = format!("[{}]", emb.iter().map(|x| format!("{:.4}", x)).collect::<Vec<_>>().join(", "));
-            string_embeddings.push(s);
+            buf.clear();
+            buf.push('[');
+            for (idx, &x) in emb.iter().enumerate() {
+                if idx > 0 {
+                    buf.push_str(", ");
+                }
+                let _ = std::fmt::Write::write_fmt(&mut buf, format_args!("{:.4}", x));
+            }
+            buf.push(']');
+            str_builder.append_value(&buf);
         }
 
         let schema = Arc::new(Schema::new(vec![
@@ -365,7 +537,7 @@ impl AnalyticsEngine {
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(UInt64Array::from(vids)),
-            Arc::new(arrow::array::StringArray::from(string_embeddings)),
+            Arc::new(str_builder.finish()),
         ];
 
         Ok(RecordBatch::try_new(schema, columns)?)

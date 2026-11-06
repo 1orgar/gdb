@@ -30,6 +30,8 @@ pub fn create_router(app_state: AppState) -> Router {
     Router::new()
         .route("/health", get(handle_health))
         .route("/schema", get(handle_schema))
+        .route("/graphs", get(handle_graphs))
+        .route("/pregel/status", get(handle_pregel_status))
         .route("/cluster", get(handle_cluster))
         .route("/cluster/join", post(handle_cluster_join))
         .route("/resources", get(handle_resources))
@@ -40,6 +42,8 @@ pub fn create_router(app_state: AppState) -> Router {
         .route("/query", post(handle_query))
         .route("/batch", post(handle_batch))
         .route("/storage/out_edges", post(handle_storage_out_edges))
+        .route("/storage/all_edges", get(handle_storage_all_edges))
+        .route("/storage/all_edges_bin", get(handle_storage_all_edges_bin))
         .route("/storage/vertex_properties", post(handle_storage_vertex_properties))
         .route("/replicate", post(handle_replicate))
         .route("/raft/replicate", post(handle_replicate))
@@ -49,7 +53,7 @@ pub fn create_router(app_state: AppState) -> Router {
 pub async fn create_test_server(
     wal_dir: PathBuf,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>, AppState), Box<dyn std::error::Error + Send + Sync>> {
-    let schema = Arc::new(RwLock::new(GraphSchema::new("test_graph")));
+    let schema = Arc::new(RwLock::new(GraphSchema::new("default")));
     let raft_manager = Arc::new(MultiRaftManager::new(1, 1, wal_dir));
     let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
     raft_manager.register_partition(0, storage.clone(), vec![])?;
@@ -78,6 +82,17 @@ pub async fn create_test_server(
             .with_remote_expander(remote_expander.clone())
             .with_remote_property_resolver(remote_expander),
     );
+
+    let global_csr_cache = Arc::new(RwLock::new(None));
+    let default_space = Arc::new(GraphSpace {
+        name: "default".to_string(),
+        schema: schema.clone(),
+        storage: storage.clone(),
+        executor: executor.clone(),
+        global_csr_cache: global_csr_cache.clone(),
+    });
+    let mut initial_spaces = HashMap::new();
+    initial_spaces.insert("default".to_string(), default_space);
 
     let app_state = AppState {
         node_id: 1,
@@ -110,6 +125,10 @@ pub async fn create_test_server(
         gpu_max_vram_mb: 2048,
         s3_manager: None,
         s3_bucket: None,
+        global_csr_cache,
+        spaces: Arc::new(RwLock::new(initial_spaces)),
+        active_space: Arc::new(RwLock::new("default".to_string())),
+        pregel_status: Arc::new(RwLock::new(PregelTelemetry::default())),
     };
 
     let app = create_router(app_state.clone());
@@ -298,6 +317,18 @@ where
         args.node_id
     );
 
+    let global_csr_cache = Arc::new(RwLock::new(None));
+    let default_space = Arc::new(GraphSpace {
+        name: "default".to_string(),
+        schema: schema.clone(),
+        storage: storage_p0.clone(),
+        executor: executor.clone(),
+        global_csr_cache: global_csr_cache.clone(),
+    });
+    let mut initial_spaces = HashMap::new();
+    initial_spaces.insert("default".to_string(), default_space);
+    let spaces_arc = Arc::new(RwLock::new(initial_spaces));
+
     let app_state = AppState {
         node_id: args.node_id,
         partitions: args.partitions,
@@ -315,7 +346,7 @@ where
         replication_factor: args.replication_factor,
         replication_mode,
         http_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(60))
             .build()?,
         queries_ok: Arc::new(AtomicU64::new(0)),
         queries_err: Arc::new(AtomicU64::new(0)),
@@ -329,6 +360,10 @@ where
         gpu_max_vram_mb: args.gpu_max_vram_mb,
         s3_manager,
         s3_bucket: args.s3_bucket.clone(),
+        global_csr_cache,
+        spaces: spaces_arc.clone(),
+        active_space: Arc::new(RwLock::new("default".to_string())),
+        pregel_status: Arc::new(RwLock::new(PregelTelemetry::default())),
     };
 
     if !peers.is_empty() {
@@ -404,7 +439,15 @@ where
 
     // 3. Start Dedicated Client Arrow Flight Server (for external fast ingestion & queries)
     let client_flight_addr: SocketAddr = format!("0.0.0.0:{}", args.client_flight_port).parse()?;
-    let client_flight_svc = GdbClientFlightService::new(storage_p0.clone(), schema.clone(), executor.clone());
+    let resolver_spaces = spaces_arc.clone();
+    let space_resolver = Arc::new(move |graph_name: &str| {
+        let norm = AppState::normalize_graph_name(graph_name);
+        resolver_spaces.read().get(&norm).map(|sp| {
+            (sp.storage.clone(), sp.schema.clone(), sp.executor.clone())
+        })
+    });
+    let client_flight_svc = GdbClientFlightService::new(storage_p0.clone(), schema.clone(), executor.clone())
+        .with_space_resolver(space_resolver);
 
     println!("\x1b[1;32m[+] Client Flight Server (Fast Ingestion/Query):\x1b[0m Listening on {}", client_flight_addr);
     println!("\x1b[1;33m[ Ready to process openCypher / GQL / CALL queries ]\x1b[0m\n");
@@ -478,6 +521,71 @@ mod tests {
             .json(&serde_json::json!({ "queries": ["SHOW SCHEMA;"], "local_only": true }))
             .send().await.unwrap();
         assert_eq!(b_res.status(), 200);
+
+        // 10. v0.6.0: Graph Spaces isolation, HNSW Vector Index, and Pregel Telemetry
+        let c_res = client.post(format!("{}/query", base))
+            .json(&serde_json::json!({ "query": "CREATE GRAPH IF NOT EXISTS fraud_space;", "local_only": true }))
+            .send().await.unwrap();
+        assert_eq!(c_res.status(), 200);
+
+        let ddl_res = client.post(format!("{}/query", base))
+            .json(&serde_json::json!({
+                "query": "CREATE VERTEX Doc (title STRING, emb VECTOR(4)); CREATE VECTOR INDEX ON Doc(emb); CREATE EDGE CITES ();",
+                "graph": "fraud_space",
+                "local_only": true
+            }))
+            .send().await.unwrap();
+        assert_eq!(ddl_res.status(), 200);
+
+        let ins_res = client.post(format!("{}/query", base))
+            .json(&serde_json::json!({
+                "query": "INSERT VERTEX Doc (id, title, emb) VALUES (1, 'A', [1.0, 0.0, 0.0, 0.0]), (2, 'B', [0.9, 0.1, 0.0, 0.0]), (3, 'C', [0.0, 1.0, 0.0, 0.0]); INSERT EDGE CITES FROM 1 TO 2; INSERT EDGE CITES FROM 2 TO 3;",
+                "graph": "fraud_space",
+                "local_only": true
+            }))
+            .send().await.unwrap();
+        assert_eq!(ins_res.status(), 200);
+
+        // Verify HNSW similarity search inside fraud_space
+        let vec_res = client.post(format!("{}/query", base))
+            .json(&serde_json::json!({
+                "query": "CALL vector.similaritySearch('Doc', 'emb', [1.0, 0.0, 0.0, 0.0], 2, 'cosine') YIELD vertex_id, score;",
+                "graph": "fraud_space",
+                "local_only": true
+            }))
+            .send().await.unwrap();
+        assert_eq!(vec_res.status(), 200);
+        let vec_json: serde_json::Value = vec_res.json().await.unwrap();
+        assert_eq!(vec_json["status"], "ok");
+        assert_eq!(vec_json["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(vec_json["rows"][0][0], 1);
+
+        // Verify default space is isolated (has 0 Doc vertices)
+        let def_schema = client.get(format!("{}/schema?graph=default", base)).send().await.unwrap();
+        let def_json: serde_json::Value = def_schema.json().await.unwrap();
+        assert_eq!(def_json["vertices"].as_array().unwrap().len(), 0);
+
+        let fraud_schema = client.get(format!("{}/schema?graph=fraud_space", base)).send().await.unwrap();
+        let fraud_json: serde_json::Value = fraud_schema.json().await.unwrap();
+        assert_eq!(fraud_json["vertices"].as_array().unwrap().len(), 1);
+        assert_eq!(fraud_json["vertex_counts"]["Doc"], 3);
+
+        // Verify Pregel telemetry
+        let pr_res = client.post(format!("{}/query", base))
+            .json(&serde_json::json!({
+                "query": "CALL algo.pageRank() YIELD vertex_id, score;",
+                "graph": "fraud_space",
+                "local_only": true
+            }))
+            .send().await.unwrap();
+        assert_eq!(pr_res.status(), 200);
+        let pr_json: serde_json::Value = pr_res.json().await.unwrap();
+        assert!(pr_json["pregel"].is_object());
+
+        let pregel_status = client.get(format!("{}/pregel/status", base)).send().await.unwrap();
+        assert_eq!(pregel_status.status(), 200);
+        let ps_json: serde_json::Value = pregel_status.json().await.unwrap();
+        assert_eq!(ps_json["graph_space"], "fraud_space");
 
         handle.abort();
     }

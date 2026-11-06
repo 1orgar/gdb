@@ -38,6 +38,21 @@ pub fn eval_expr(
                 }
                 entity.insert("properties".to_string(), serde_json::Value::Object(props_map));
                 Ok(DataValue::String(serde_json::Value::Object(entity).to_string()))
+            } else if let Some(edge) = row.edges.get(var) {
+                let mut entity = serde_json::Map::new();
+                entity.insert("src".to_string(), serde_json::json!(edge.src.as_u64()));
+                entity.insert("dst".to_string(), serde_json::json!(edge.dst.as_u64()));
+                entity.insert("rank".to_string(), serde_json::json!(edge.rank));
+                let mut props_map = serde_json::Map::new();
+                if let Some(all_props) = storage.get_all_edge_properties(edge) {
+                    for (k, v) in all_props {
+                        if let Ok(jv) = serde_json::to_value(&v) {
+                            props_map.insert(k, jv);
+                        }
+                    }
+                }
+                entity.insert("properties".to_string(), serde_json::Value::Object(props_map));
+                Ok(DataValue::String(serde_json::Value::Object(entity).to_string()))
             } else {
                 Err(GdbError::Execution(format!("Unbound variable: {}", var)))
             }
@@ -58,6 +73,18 @@ pub fn eval_expr(
                     return Ok(DataValue::String(format!("Label_{}", label_id.0)));
                 }
                 let val = storage.get_vertex_property(vid, label_id, property);
+                Ok(val.unwrap_or(DataValue::Null))
+            } else if let Some(edge) = row.edges.get(variable) {
+                if property == "src" || property == "_src" {
+                    return Ok(DataValue::Int64(edge.src.as_u64() as i64));
+                }
+                if property == "dst" || property == "_dst" {
+                    return Ok(DataValue::Int64(edge.dst.as_u64() as i64));
+                }
+                if property == "rank" || property == "_rank" {
+                    return Ok(DataValue::Int64(edge.rank));
+                }
+                let val = storage.get_edge_property(edge, property);
                 Ok(val.unwrap_or(DataValue::Null))
             } else {
                 Err(GdbError::Execution(format!("Unbound vertex variable in property: {}", variable)))

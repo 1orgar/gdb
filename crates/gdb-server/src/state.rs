@@ -160,6 +160,8 @@ pub struct QueryRequest {
     pub query: String,
     #[serde(default)]
     pub local_only: Option<bool>,
+    #[serde(default)]
+    pub graph: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -168,22 +170,29 @@ pub struct BatchRequest {
     pub script: Option<String>,
     #[serde(default)]
     pub local_only: Option<bool>,
+    #[serde(default)]
+    pub graph: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReplicationPayload {
     pub query: String,
+    #[serde(default)]
+    pub graph: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ResourcesParams {
     pub local: Option<bool>,
+    pub graph: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StorageOutEdgesRequest {
     pub vids: Vec<u64>,
     pub edge_type: Option<u32>,
+    #[serde(default)]
+    pub graph: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -216,6 +225,84 @@ pub struct StorageVertexPropertiesRequest {
     pub vids: Vec<u64>,
     pub label_id: Option<u32>,
     pub properties: Option<Vec<String>>,
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SuperstepRecord {
+    pub superstep: usize,
+    pub active_vertices: usize,
+    pub messages_exchanged: usize,
+    pub bytes_shuffled: usize,
+    pub max_delta: f64,
+    pub elapsed_ms: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PregelTelemetry {
+    pub algorithm: String,
+    pub graph_space: String,
+    pub status: String,
+    pub current_superstep: usize,
+    pub max_supersteps: usize,
+    pub active_vertices: usize,
+    pub total_vertices: usize,
+    pub total_edges: usize,
+    pub messages_exchanged: usize,
+    pub bytes_shuffled: usize,
+    pub convergence_delta: f64,
+    pub tolerance: f64,
+    pub replication_factor: u32,
+    pub shards_participating: usize,
+    pub elapsed_ms: f64,
+    pub engine_mode: String,
+    pub supersteps: Vec<SuperstepRecord>,
+}
+
+impl Default for PregelTelemetry {
+    fn default() -> Self {
+        Self {
+            algorithm: "algo.pageRank".to_string(),
+            graph_space: "default".to_string(),
+            status: "IDLE".to_string(),
+            current_superstep: 0,
+            max_supersteps: 20,
+            active_vertices: 0,
+            total_vertices: 0,
+            total_edges: 0,
+            messages_exchanged: 0,
+            bytes_shuffled: 0,
+            convergence_delta: 0.0,
+            tolerance: 1e-6,
+            replication_factor: 1,
+            shards_participating: 1,
+            elapsed_ms: 0.0,
+            engine_mode: "Distributed Pregel / BSP + Metal GPU".to_string(),
+            supersteps: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GraphSpace {
+    pub name: String,
+    pub schema: Arc<RwLock<GraphSchema>>,
+    pub storage: Arc<PartitionStorageEngine>,
+    pub executor: Arc<QueryExecutor>,
+    pub global_csr_cache: Arc<RwLock<Option<(u64, Arc<gdb_storage::ChunkedCsr>)>>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GraphSpaceSummary {
+    pub name: String,
+    pub active: bool,
+    pub vertex_labels: usize,
+    pub edge_types: usize,
+    pub total_vertices: usize,
+    pub total_edges: usize,
+    pub csr_edges: usize,
+    pub delta_edges: usize,
 }
 
 #[derive(Clone)]
@@ -248,6 +335,149 @@ pub struct AppState {
     pub gpu_max_vram_mb: usize,
     pub s3_manager: Option<Arc<S3StorageManager>>,
     pub s3_bucket: Option<String>,
+    pub global_csr_cache: Arc<RwLock<Option<(u64, Arc<gdb_storage::ChunkedCsr>)>>>,
+    pub spaces: Arc<RwLock<std::collections::HashMap<String, Arc<GraphSpace>>>>,
+    pub active_space: Arc<RwLock<String>>,
+    pub pregel_status: Arc<RwLock<PregelTelemetry>>,
+}
+
+impl AppState {
+    pub fn normalize_graph_name(raw: &str) -> String {
+        let trimmed = raw
+            .trim()
+            .trim_start_matches("gdb://")
+            .trim_matches('/');
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default_graph") {
+            "default".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    pub fn current_graph_name(&self) -> String {
+        self.active_space.read().clone()
+    }
+
+    pub fn resolve_space(&self, requested: Option<&str>) -> Arc<GraphSpace> {
+        let target_name = match requested {
+            Some(s) if !s.trim().is_empty() => Self::normalize_graph_name(s),
+            _ => self.active_space.read().clone(),
+        };
+
+        if let Some(space) = self.spaces.read().get(&target_name) {
+            return space.clone();
+        }
+        if let Some(default_space) = self.spaces.read().get("default") {
+            return default_space.clone();
+        }
+
+        Arc::new(GraphSpace {
+            name: "default".to_string(),
+            schema: self.schema.clone(),
+            storage: self.storage.clone(),
+            executor: self.executor.clone(),
+            global_csr_cache: self.global_csr_cache.clone(),
+        })
+    }
+
+    pub fn with_graph_space(&self, requested: Option<&str>) -> AppState {
+        let space = self.resolve_space(requested);
+        let mut cloned = self.clone();
+        cloned.schema = space.schema.clone();
+        cloned.storage = space.storage.clone();
+        cloned.executor = space.executor.clone();
+        cloned.global_csr_cache = space.global_csr_cache.clone();
+        cloned
+    }
+
+    pub fn create_graph_space(&self, raw_name: &str, if_not_exists: bool) -> Result<Arc<GraphSpace>, String> {
+        let name = Self::normalize_graph_name(raw_name);
+        {
+            let guard = self.spaces.read();
+            if let Some(existing) = guard.get(&name) {
+                if if_not_exists {
+                    return Ok(existing.clone());
+                }
+                return Err(format!("Graph space '{}' already exists", name));
+            }
+        }
+
+        let schema = Arc::new(RwLock::new(GraphSchema::new(&name)));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let mut exec = QueryExecutor::new(schema.clone(), storage.clone());
+        exec.gpu = self.executor.gpu.clone();
+        exec.remote_expander = self.executor.remote_expander.clone();
+        exec.remote_property_resolver = self.executor.remote_property_resolver.clone();
+
+        let space = Arc::new(GraphSpace {
+            name: name.clone(),
+            schema,
+            storage,
+            executor: Arc::new(exec),
+            global_csr_cache: Arc::new(RwLock::new(None)),
+        });
+
+        self.spaces.write().insert(name, space.clone());
+        Ok(space)
+    }
+
+    pub fn drop_graph_space(&self, raw_name: &str, if_exists: bool) -> Result<bool, String> {
+        let name = Self::normalize_graph_name(raw_name);
+        if name == "default" {
+            return Err("Cannot drop the default system graph space".to_string());
+        }
+        let removed = self.spaces.write().remove(&name).is_some();
+        if !removed && !if_exists {
+            return Err(format!("Graph space '{}' does not exist", name));
+        }
+        if *self.active_space.read() == name {
+            *self.active_space.write() = "default".to_string();
+        }
+        Ok(removed)
+    }
+
+    pub fn use_graph_space(&self, raw_name: &str) -> Result<String, String> {
+        let name = Self::normalize_graph_name(raw_name);
+        if !self.spaces.read().contains_key(&name) {
+            return Err(format!(
+                "Graph space '{}' does not exist. Create it first with CREATE GRAPH {};",
+                name, name
+            ));
+        }
+        *self.active_space.write() = name.clone();
+        Ok(name)
+    }
+
+    pub fn list_graph_spaces(&self) -> Vec<GraphSpaceSummary> {
+        let active = self.active_space.read().clone();
+        let guard = self.spaces.read();
+        let mut list: Vec<GraphSpaceSummary> = guard
+            .values()
+            .map(|sp| {
+                let sc = sp.schema.read();
+                GraphSpaceSummary {
+                    name: sp.name.clone(),
+                    active: sp.name == active,
+                    vertex_labels: sc.list_vertex_schemas().len(),
+                    edge_types: sc.list_edge_schemas().len(),
+                    total_vertices: sp.storage.total_vertices(),
+                    total_edges: sp.storage.total_edges(),
+                    csr_edges: sp.storage.csr_edges(),
+                    delta_edges: sp.storage.delta_edges(),
+                }
+            })
+            .collect();
+        list.sort_by(|a, b| {
+            if a.name == "default" {
+                std::cmp::Ordering::Less
+            } else if b.name == "default" {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+        list
+    }
 }
 
 #[cfg(test)]

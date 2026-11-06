@@ -372,4 +372,32 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 3);
     }
+
+    #[test]
+    fn test_edge_properties_and_gpu_dispatch() {
+        let schema = Arc::new(RwLock::new(GraphSchema::new("edge_props_gpu")));
+        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+        let gpu = Arc::new(gdb_gpu::GpuDispatcher::new(true, 0, 1));
+        let executor = QueryExecutor::with_gpu(schema, storage.clone(), gpu.clone());
+
+        executor.execute(parse("CREATE VERTEX Node (name STRING, emb VECTOR(4))").unwrap()).unwrap();
+        executor.execute(parse("CREATE EDGE LINK (weight FLOAT64)").unwrap()).unwrap();
+
+        executor.execute(parse("INSERT VERTEX Node (id, name, emb) VALUES (1, 'N1', [1.0, 0.0, 0.0, 0.0]), (2, 'N2', [0.8, 0.6, 0.0, 0.0]), (3, 'N3', [0.0, 1.0, 0.0, 0.0])").unwrap()).unwrap();
+        executor.execute(parse("INSERT EDGE LINK (weight) VALUES (1, 2, 0): (0.95), (2, 3, 0): (0.25)").unwrap()).unwrap();
+        storage.compact();
+
+        // Filter & project edge property r.weight
+        let q = parse("MATCH (a:Node)-[r:LINK]->(b:Node) WHERE r.weight > 0.5 RETURN a.name, b.name, r.weight").unwrap();
+        let res = executor.execute(q).unwrap();
+        let batch = res.batch.unwrap();
+        assert_eq!(batch.num_rows(), 1);
+
+        // GPU-accelerated PageRank and Vector Similarity Search
+        let pr_res = executor.execute(parse("CALL algo.pageRank({max_iter: 10}) YIELD vertex_id, score").unwrap()).unwrap();
+        assert_eq!(pr_res.rows_affected, 3);
+        let vec_res = executor.execute(parse("CALL vector.similaritySearch({label: 'Node', property: 'emb', query: [1.0, 0.0, 0.0, 0.0], k: 2}) YIELD node, similarity").unwrap()).unwrap();
+        assert_eq!(vec_res.rows_affected, 2);
+        assert!(gpu.total_dispatches() >= 2);
+    }
 }

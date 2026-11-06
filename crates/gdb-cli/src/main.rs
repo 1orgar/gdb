@@ -3,8 +3,14 @@ use gdb_core::schema::GraphSchema;
 use gdb_planner::QueryExecutor;
 use gdb_storage::PartitionStorageEngine;
 use parking_lot::RwLock;
-use reedline::{DefaultPrompt, Reedline, Signal};
+use reedline::{
+    ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder, Prompt, PromptEditMode,
+    PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    Span, Suggestion, default_emacs_keybindings,
+};
 use serde_json::Value;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -17,6 +23,10 @@ struct CliArgs {
     /// GDB Cluster HTTP REST endpoint URL
     #[arg(long, default_value = "http://127.0.0.1:8847")]
     endpoint: String,
+
+    /// Target Graph Space / Namespace
+    #[arg(short = 'g', long, default_value = "default")]
+    graph: String,
 
     /// Execute a single query and exit
     #[arg(short = 'e', long = "execute")]
@@ -31,14 +41,172 @@ struct CliArgs {
     local: bool,
 }
 
+struct GdbPrompt {
+    active_graph: Arc<RwLock<String>>,
+}
+
+impl Prompt for GdbPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Owned(format!("gdb ({})", self.active_graph.read()))
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("> ")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed("... ")
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: PromptHistorySearch,
+    ) -> Cow<'_, str> {
+        let prefix = match history_search.status {
+            PromptHistorySearchStatus::Passing => "",
+            PromptHistorySearchStatus::Failing => "failing ",
+        };
+        Cow::Owned(format!("({}reverse-search: {}) ", prefix, history_search.term))
+    }
+}
+
+pub struct GdbCompleter {
+    dynamic_terms: Arc<RwLock<Vec<String>>>,
+}
+
+impl GdbCompleter {
+    pub fn new(dynamic_terms: Arc<RwLock<Vec<String>>>) -> Self {
+        Self { dynamic_terms }
+    }
+
+    fn base_keywords() -> &'static [&'static str] {
+        &[
+            "MATCH",
+            "WHERE",
+            "RETURN",
+            "WITH",
+            "ORDER BY",
+            "LIMIT",
+            "SKIP",
+            "DISTINCT",
+            "CREATE VERTEX",
+            "CREATE EDGE",
+            "CREATE GRAPH",
+            "CREATE INDEX ON",
+            "CREATE VECTOR INDEX ON",
+            "USE GRAPH",
+            "DROP GRAPH",
+            "DROP VERTEX",
+            "DROP EDGE",
+            "DROP INDEX ON",
+            "SHOW GRAPHS",
+            "SHOW SCHEMA",
+            "SHOW VERTICES",
+            "SHOW EDGES",
+            "SHOW CLUSTER",
+            "SHOW RESOURCES",
+            "SHOW GPU",
+            "INSERT VERTEX",
+            "INSERT EDGE",
+            "DELETE EDGE",
+            "MERGE VERTEX",
+            "ANALYZE GRAPH",
+            "EXPLAIN",
+            "CALL algo.pageRank",
+            "CALL algo.louvain",
+            "CALL algo.wcc",
+            "CALL algo.scc",
+            "CALL algo.triangleCount",
+            "CALL algo.kCore",
+            "CALL algo.betweenness",
+            "CALL algo.closeness",
+            "CALL algo.degree",
+            "CALL algo.sssp",
+            "CALL algo.bfs",
+            "CALL algo.lpa",
+            "CALL algo.similarity",
+            "CALL algo.node2vec",
+            "CALL vector.similaritySearch",
+            "YIELD",
+            "VALUES",
+            "FROM",
+            "TO",
+            "compact",
+            "snapshot",
+            "help",
+            "exit",
+            "quit",
+        ]
+    }
+}
+
+impl Completer for GdbCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        let slice = &line[..pos.min(line.len())];
+        let trimmed_start_idx = slice.len() - slice.trim_start().len();
+        let full_prefix = &slice[trimmed_start_idx..];
+
+        let word_start = slice
+            .rfind(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ':' | ',' | '[' | ']'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let word_prefix = &slice[word_start..];
+        if full_prefix.is_empty() && word_prefix.is_empty() {
+            return Vec::new();
+        }
+        let full_lower = full_prefix.to_lowercase();
+        let word_lower = word_prefix.to_lowercase();
+
+        let mut candidates: Vec<String> = Self::base_keywords()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        candidates.extend(self.dynamic_terms.read().iter().cloned());
+        candidates.sort();
+        candidates.dedup();
+
+        let mut out = Vec::new();
+        for c in candidates {
+            let c_lower = c.to_lowercase();
+            if !full_lower.is_empty() && c.contains(' ') && c_lower.starts_with(&full_lower) {
+                out.push(Suggestion {
+                    value: c,
+                    description: None,
+                    style: None,
+                    extra: None,
+                    span: Span::new(trimmed_start_idx, pos),
+                    append_whitespace: true,
+                });
+            } else if !word_lower.is_empty() && c_lower.starts_with(&word_lower) {
+                out.push(Suggestion {
+                    value: c,
+                    description: None,
+                    style: None,
+                    extra: None,
+                    span: Span::new(word_start, pos),
+                    append_whitespace: true,
+                });
+            }
+        }
+        out
+    }
+}
+
 enum ClientMode {
     Cluster {
         endpoint: String,
         client: reqwest::blocking::Client,
+        active_graph: Arc<RwLock<String>>,
     },
     Local {
         executor: QueryExecutor,
         storage: Arc<PartitionStorageEngine>,
+        active_graph: Arc<RwLock<String>>,
+        spaces: HashMap<String, (Arc<RwLock<GraphSchema>>, Arc<PartitionStorageEngine>, QueryExecutor)>,
     },
 }
 
@@ -320,7 +488,7 @@ fn execute_query(
     let upper = input.trim_end_matches(';').trim().to_uppercase();
     if upper == "SHOW CLUSTER" || upper == ":CLUSTER" || upper == "CLUSTER" {
         match mode {
-            ClientMode::Cluster { client, endpoint } => show_cluster(client, endpoint),
+            ClientMode::Cluster { client, endpoint, .. } => show_cluster(client, endpoint),
             ClientMode::Local { .. } => {
                 println!("\x1b[1;33mCurrently in local standalone mode. Use ':connect <url>' to attach to a cluster.\x1b[0m");
             }
@@ -330,9 +498,9 @@ fn execute_query(
 
     if upper == "SHOW RESOURCES" || upper == ":RESOURCES" || upper == "RESOURCES" {
         match mode {
-            ClientMode::Cluster { client, endpoint } => show_resources(client, endpoint),
-            ClientMode::Local { storage, .. } => {
-                println!("\n\x1b[1;36m=== Local Storage Resources ===\x1b[0m");
+            ClientMode::Cluster { client, endpoint, .. } => show_resources(client, endpoint),
+            ClientMode::Local { storage, active_graph, .. } => {
+                println!("\n\x1b[1;36m=== Local Storage Resources (Graph: {}) ===\x1b[0m", active_graph.read());
                 println!("  CSR Edges:       {}", storage.csr_edges());
                 println!("  MemTable Edges:  {}", storage.delta_edges());
                 println!("  Total Edges:     {}\n", storage.total_edges());
@@ -343,7 +511,7 @@ fn execute_query(
 
     if upper == "SHOW GPU" || upper == ":GPU" || upper == "GPU" {
         match mode {
-            ClientMode::Cluster { client, endpoint } => show_gpu(client, endpoint),
+            ClientMode::Cluster { client, endpoint, .. } => show_gpu(client, endpoint),
             ClientMode::Local { .. } => {
                 let disp = gdb_gpu::GpuDispatcher::disabled();
                 println!("\n\x1b[1;36m=== Local Hardware Acceleration ===\x1b[0m");
@@ -358,12 +526,10 @@ fn execute_query(
 
     if input.starts_with(":connect ") {
         let mut raw_url = input.trim_start_matches(":connect ").trim().to_string();
-        // Auto-fix double colon typo (e.g. "localhost::8847" -> "localhost:8847")
         if raw_url.contains("::") && !raw_url.contains('[') {
             println!("\x1b[1;33m[*] Notice: Detected '::' typo in URL, normalizing to single ':'\x1b[0m");
             raw_url = raw_url.replace("::", ":");
         }
-        // Auto-prepend http:// if protocol scheme is omitted
         if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
             raw_url = format!("http://{}", raw_url);
         }
@@ -374,9 +540,14 @@ fn execute_query(
         match client.get(&health_url).send() {
             Ok(resp) if resp.status().is_success() => {
                 println!("\x1b[1;32m[✓] Successfully connected to GDB Cluster at {}\x1b[0m", clean_url);
+                let prev_graph = match mode {
+                    ClientMode::Cluster { active_graph, .. } => active_graph.clone(),
+                    ClientMode::Local { active_graph, .. } => active_graph.clone(),
+                };
                 *mode = ClientMode::Cluster {
                     endpoint: clean_url,
                     client,
+                    active_graph: prev_graph,
                 };
             }
             Ok(resp) => {
@@ -390,13 +561,18 @@ fn execute_query(
     }
 
     match mode {
-        ClientMode::Cluster { client, endpoint } => {
+        ClientMode::Cluster { client, endpoint, active_graph } => {
             let start = std::time::Instant::now();
             let query_url = format!("{}/query", endpoint.trim_end_matches('/'));
-            let payload = serde_json::json!({ "query": input });
+            let cur_graph = active_graph.read().clone();
+            let payload = serde_json::json!({
+                "query": input,
+                "graph": cur_graph,
+            });
 
             let resp = client
                 .post(&query_url)
+                .header("X-GDB-Graph", &cur_graph)
                 .json(&payload)
                 .send()?;
 
@@ -404,6 +580,11 @@ fn execute_query(
             let client_elapsed = start.elapsed();
 
             if data["status"] == "ok" {
+                if let Some(new_active) = data.get("active_graph").and_then(|v| v.as_str()) {
+                    if !new_active.is_empty() {
+                        *active_graph.write() = new_active.to_string();
+                    }
+                }
                 let server_us = data["elapsed_us"].as_u64().unwrap_or(0);
                 let columns: Vec<String> = data["columns"]
                     .as_array()
@@ -437,7 +618,7 @@ fn execute_query(
                 eprintln!("\x1b[1;31mError: {}\x1b[0m", err);
             }
         }
-        ClientMode::Local { executor, storage } => {
+        ClientMode::Local { executor, storage, active_graph, spaces } => {
             if input.eq_ignore_ascii_case("compact") || input.eq_ignore_ascii_case("compact;") {
                 let start = std::time::Instant::now();
                 storage.compact();
@@ -449,6 +630,41 @@ fn execute_query(
             let stmts = gdb_parser::split_statements(input);
             for stmt_str in stmts {
                 let stmt = gdb_parser::parse(&stmt_str)?;
+                match &stmt {
+                    gdb_parser::ast::Statement::CreateGraph { name, .. } => {
+                        if !spaces.contains_key(name) {
+                            let sc = Arc::new(RwLock::new(GraphSchema::new(name)));
+                            let st = Arc::new(PartitionStorageEngine::new(0, sc.clone()));
+                            let ex = QueryExecutor::new(sc.clone(), st.clone());
+                            spaces.insert(name.clone(), (sc, st, ex));
+                        }
+                        println!("\x1b[1;32mCreated graph space '{}' (took {:?})\x1b[0m", name, start.elapsed());
+                        continue;
+                    }
+                    gdb_parser::ast::Statement::UseGraph { name } => {
+                        if let Some((sc, st, _)) = spaces.get(name) {
+                            *active_graph.write() = name.clone();
+                            *storage = st.clone();
+                            *executor = QueryExecutor::new(sc.clone(), st.clone());
+                            println!("\x1b[1;32mSwitched active graph space to '{}' (took {:?})\x1b[0m", name, start.elapsed());
+                            continue;
+                        } else {
+                            return Err(format!("Graph space '{}' does not exist", name).into());
+                        }
+                    }
+                    gdb_parser::ast::Statement::DropGraph { name, .. } => {
+                        if name == "default" {
+                            return Err("Cannot drop default graph space".into());
+                        }
+                        spaces.remove(name);
+                        if *active_graph.read() == *name {
+                            *active_graph.write() = "default".to_string();
+                        }
+                        println!("\x1b[1;32mDropped graph space '{}' (took {:?})\x1b[0m", name, start.elapsed());
+                        continue;
+                    }
+                    _ => {}
+                }
                 let res = executor.execute(stmt)?;
                 if let Some(batch) = res.batch {
                     arrow::util::pretty::print_batches(&[batch])?;
@@ -478,6 +694,10 @@ pub(crate) fn handle_repl_input(
         println!("  SHOW CLUSTER              - Display cluster topology, roles & node latencies");
         println!("  SHOW RESOURCES            - Display in-memory usage (CSR, MemTable, Vertices, Edges)");
         println!("  SHOW GPU                  - Display hardware GPU acceleration status & kernels");
+        println!("  SHOW GRAPHS               - List all Graph Spaces / Namespaces");
+        println!("  CREATE GRAPH <name>       - Create isolated Graph Space");
+        println!("  USE GRAPH <name>          - Switch active Graph Space in session");
+        println!("  DROP GRAPH <name>         - Drop Graph Space");
         println!("  :connect <http://host:port> - Switch target cluster endpoint");
         println!("  compact                   - Force CSR compaction on target");
         println!("  exit / quit               - Exit console");
@@ -510,6 +730,31 @@ pub(crate) fn handle_repl_input(
     Ok(true)
 }
 
+fn new_local_mode(graph_name: &str) -> (ClientMode, Arc<RwLock<String>>) {
+    let active_graph = Arc::new(RwLock::new(graph_name.to_string()));
+    let schema = Arc::new(RwLock::new(GraphSchema::new(graph_name)));
+    let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
+    let executor = QueryExecutor::new(schema.clone(), storage.clone());
+    let mut spaces = HashMap::new();
+    spaces.insert(
+        graph_name.to_string(),
+        (
+            schema.clone(),
+            storage.clone(),
+            QueryExecutor::new(schema, storage.clone()),
+        ),
+    );
+    (
+        ClientMode::Local {
+            executor,
+            storage,
+            active_graph: active_graph.clone(),
+            spaces,
+        },
+        active_graph,
+    )
+}
+
 pub(crate) fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("\x1b[1;36m");
     println!("   ______ ____   ____   ");
@@ -524,14 +769,13 @@ pub(crate) fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(5))
         .build()?;
 
+    let active_graph = Arc::new(RwLock::new(args.graph.clone()));
+
     let mut mode = if args.local {
         println!("\x1b[1;33m[*] Starting in local standalone in-memory mode (--local)\x1b[0m\n");
-        let schema = Arc::new(RwLock::new(GraphSchema::new("social")));
-        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
-        let executor = QueryExecutor::new(schema, storage.clone());
-        ClientMode::Local { executor, storage }
+        let (m, _) = new_local_mode(&args.graph);
+        m
     } else {
-        // Probe cluster health
         let health_url = format!("{}/health", args.endpoint.trim_end_matches('/'));
         match client.get(&health_url).send() {
             Ok(resp) if resp.status().is_success() => {
@@ -544,13 +788,14 @@ pub(crate) fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
                     args.endpoint
                 );
                 println!(
-                    "    \x1b[1;32m[+]\x1b[0m Active Node: \x1b[1;33mNode #{} ({})\x1b[0m | Status: \x1b[1;32mUP\x1b[0m\n",
-                    node_id, role
+                    "    \x1b[1;32m[+]\x1b[0m Active Node: \x1b[1;33mNode #{} ({})\x1b[0m | Graph Space: \x1b[1;36m{}\x1b[0m | Status: \x1b[1;32mUP\x1b[0m\n",
+                    node_id, role, args.graph
                 );
 
                 ClientMode::Cluster {
                     endpoint: args.endpoint.clone(),
                     client,
+                    active_graph: active_graph.clone(),
                 }
             }
             _ => {
@@ -561,21 +806,17 @@ pub(crate) fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
                 println!("    Falling back to local in-memory standalone mode.");
                 println!("    Use \x1b[1;36m:connect <url>\x1b[0m or \x1b[1;36mSHOW CLUSTER\x1b[0m to connect when cluster is online.\n");
 
-                let schema = Arc::new(RwLock::new(GraphSchema::new("social")));
-                let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
-                let executor = QueryExecutor::new(schema, storage.clone());
-                ClientMode::Local { executor, storage }
+                let (m, _) = new_local_mode(&args.graph);
+                m
             }
         }
     };
 
-    // Non-interactive: Execute from string
     if let Some(query) = args.execute {
         execute_query(&mut mode, &query)?;
         return Ok(());
     }
 
-    // Non-interactive: Execute from file
     if let Some(file_path) = args.file {
         let f = File::open(&file_path)?;
         let reader = BufReader::new(f);
@@ -599,11 +840,42 @@ pub(crate) fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Interactive REPL Mode
-    println!("Type \x1b[1;33m'help'\x1b[0m for instructions, \x1b[1;33m'SHOW CLUSTER'\x1b[0m for node status, \x1b[1;33m'exit'\x1b[0m to quit.\n");
+    // Interactive REPL Mode with Tab-Completion & Active Graph Prompt
+    println!("Type \x1b[1;33m'help'\x1b[0m for instructions, \x1b[1;33m'Tab'\x1b[0m for completion, \x1b[1;33m'USE GRAPH <name>'\x1b[0m to switch spaces, \x1b[1;33m'exit'\x1b[0m to quit.\n");
 
-    let mut line_editor = Reedline::create();
-    let prompt = DefaultPrompt::default();
+    let dynamic_terms = Arc::new(RwLock::new(vec![
+        "default".to_string(),
+        "User".to_string(),
+        "Person".to_string(),
+        "Document".to_string(),
+        "FOLLOWS".to_string(),
+        "KNOWS".to_string(),
+    ]));
+    let completer = Box::new(GdbCompleter::new(dynamic_terms));
+    let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_string()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    let edit_mode = Box::new(Emacs::new(keybindings));
+
+    let mut line_editor = Reedline::create()
+        .with_completer(completer)
+        .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+        .with_edit_mode(edit_mode);
+
+    let prompt_graph_ref = match &mode {
+        ClientMode::Cluster { active_graph, .. } => active_graph.clone(),
+        ClientMode::Local { active_graph, .. } => active_graph.clone(),
+    };
+    let prompt = GdbPrompt {
+        active_graph: prompt_graph_ref,
+    };
 
     loop {
         let sig = line_editor.read_line(&prompt);
@@ -662,10 +934,7 @@ mod tests {
 
     #[test]
     fn test_local_query_execution() {
-        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
-        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
-        let executor = QueryExecutor::new(schema, storage.clone());
-        let mut mode = ClientMode::Local { executor, storage };
+        let (mut mode, active_graph) = new_local_mode("default");
 
         // Empty and comments
         assert!(execute_query(&mut mode, "").is_ok());
@@ -676,6 +945,12 @@ mod tests {
         assert!(execute_query(&mut mode, "SHOW RESOURCES").is_ok());
         assert!(execute_query(&mut mode, "SHOW GPU").is_ok());
         assert!(execute_query(&mut mode, "SHOW CLUSTER").is_ok());
+
+        // Graph Spaces in Local Mode
+        assert!(execute_query(&mut mode, "CREATE GRAPH epinions;").is_ok());
+        assert!(execute_query(&mut mode, "USE GRAPH epinions;").is_ok());
+        assert_eq!(*active_graph.read(), "epinions");
+        assert!(execute_query(&mut mode, "SHOW GRAPHS;").is_ok());
 
         // DDL
         assert!(execute_query(&mut mode, "CREATE VERTEX Node (val INT64);").is_ok());
@@ -691,6 +966,12 @@ mod tests {
 
         // Error handling
         assert!(execute_query(&mut mode, "INVALID SQL").is_err());
+
+        // Completer test
+        let mut comp = GdbCompleter::new(Arc::new(RwLock::new(vec!["epinions".to_string()])));
+        let suggestions = comp.complete("CALL algo.pa", 12);
+        assert!(!suggestions.is_empty());
+        assert_eq!(suggestions[0].value, "CALL algo.pageRank");
     }
 
     #[test]
@@ -702,10 +983,7 @@ mod tests {
         writeln!(file, "MATCH (i:Item) RETURN i.cost;").unwrap();
         file.flush().unwrap();
 
-        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
-        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
-        let executor = QueryExecutor::new(schema, storage.clone());
-        let mut mode = ClientMode::Local { executor, storage };
+        let (mut mode, _) = new_local_mode("test");
 
         let f = File::open(file.path()).unwrap();
         let reader = BufReader::new(f);
@@ -725,7 +1003,6 @@ mod tests {
             .build()
             .unwrap();
 
-        // Direct show_* functions with dummy endpoint
         show_cluster(&client, "http://127.0.0.1:19999");
         show_resources(&client, "http://127.0.0.1:19999");
         show_gpu(&client, "http://127.0.0.1:19999");
@@ -733,18 +1010,16 @@ mod tests {
         let mut mode = ClientMode::Cluster {
             endpoint: "http://127.0.0.1:19999".to_string(),
             client,
+            active_graph: Arc::new(RwLock::new("default".to_string())),
         };
 
-        // Cluster inspect commands
         assert!(execute_query(&mut mode, ":CLUSTER").is_ok());
         assert!(execute_query(&mut mode, ":RESOURCES").is_ok());
         assert!(execute_query(&mut mode, ":GPU").is_ok());
 
-        // Connect command with :: normalization
         assert!(execute_query(&mut mode, ":connect http://127.0.0.1::8847").is_ok());
         assert!(execute_query(&mut mode, ":connect 127.0.0.1:8847").is_ok());
 
-        // Compact & query error on offline cluster
         let _ = execute_query(&mut mode, "compact");
         let _ = execute_query(&mut mode, "MATCH (n) RETURN n;");
     }
@@ -777,19 +1052,23 @@ mod tests {
         show_resources(&client, &endpoint);
         show_gpu(&client, &endpoint);
 
+        let active_graph = Arc::new(RwLock::new("default".to_string()));
         let mut mode = ClientMode::Cluster {
             endpoint: endpoint.clone(),
             client,
+            active_graph: active_graph.clone(),
         };
 
-        // Query execution against real server
         assert!(execute_query(&mut mode, "SHOW SCHEMA;").is_ok());
+        assert!(execute_query(&mut mode, "CREATE GRAPH analytics_space;").is_ok());
+        assert!(execute_query(&mut mode, "USE GRAPH analytics_space;").is_ok());
+        assert_eq!(*active_graph.read(), "analytics_space");
+        assert!(execute_query(&mut mode, "SHOW GRAPHS;").is_ok());
         assert!(execute_query(&mut mode, "compact").is_ok());
         assert!(execute_query(&mut mode, ":CLUSTER").is_ok());
         assert!(execute_query(&mut mode, ":RESOURCES").is_ok());
         assert!(execute_query(&mut mode, ":GPU").is_ok());
     }
-
 
     #[test]
     fn test_cli_args_parsing() {
@@ -797,16 +1076,14 @@ mod tests {
         assert!(args.local);
         assert_eq!(args.execute.unwrap(), "SHOW RESOURCES");
 
-        let args2 = CliArgs::parse_from(&["gdb-cli", "--endpoint", "http://127.0.0.1:9000"]);
+        let args2 = CliArgs::parse_from(&["gdb-cli", "--endpoint", "http://127.0.0.1:9000", "--graph", "epinions"]);
         assert_eq!(args2.endpoint, "http://127.0.0.1:9000");
+        assert_eq!(args2.graph, "epinions");
     }
 
     #[test]
     fn test_handle_repl_input() {
-        let schema = Arc::new(RwLock::new(GraphSchema::new("test")));
-        let storage = Arc::new(PartitionStorageEngine::new(0, schema.clone()));
-        let executor = QueryExecutor::new(schema, storage.clone());
-        let mut mode = ClientMode::Local { executor, storage };
+        let (mut mode, _) = new_local_mode("test");
 
         assert_eq!(handle_repl_input(&mut mode, "").unwrap(), true);
         assert_eq!(handle_repl_input(&mut mode, "   ").unwrap(), true);
@@ -819,16 +1096,15 @@ mod tests {
 
     #[test]
     fn test_run_cli_executions() {
-        // 1. Run with execute string in local mode
         let args_exec = CliArgs {
             endpoint: "http://127.0.0.1:8847".into(),
+            graph: "default".into(),
             local: true,
             execute: Some("SHOW RESOURCES".into()),
             file: None,
         };
         assert!(run_cli(args_exec).is_ok());
 
-        // 2. Run with file batch in local mode
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "CREATE VERTEX Test (v INT64);").unwrap();
         writeln!(file, "INSERT VERTEX Test (id, v) VALUES (1, 1);").unwrap();
@@ -836,15 +1112,16 @@ mod tests {
 
         let args_file = CliArgs {
             endpoint: "http://127.0.0.1:8847".into(),
+            graph: "default".into(),
             local: true,
             execute: None,
             file: Some(file.path().to_path_buf()),
         };
         assert!(run_cli(args_file).is_ok());
 
-        // 3. Run with offline cluster fallback
         let args_fallback = CliArgs {
             endpoint: "http://127.0.0.1:19999".into(),
+            graph: "default".into(),
             local: false,
             execute: Some("SHOW GPU".into()),
             file: None,

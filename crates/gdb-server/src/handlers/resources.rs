@@ -21,15 +21,86 @@ pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-pub async fn handle_schema(State(state): State<AppState>) -> impl IntoResponse {
-    let schema = state.schema.read();
+pub async fn handle_schema(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(params): Query<ResourcesParams>,
+) -> impl IntoResponse {
+    let header_graph = headers
+        .get("x-gdb-graph")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let requested_graph = params.graph.or(header_graph);
+    let scoped = state.with_graph_space(requested_graph.as_deref());
+    let schema = scoped.schema.read();
     let vertices = schema.list_vertex_schemas();
     let edges = schema.list_edge_schemas();
+
+    let mut vertex_counts = serde_json::Map::new();
+    let mut vertex_indexes = serde_json::Map::new();
+    for vs in &vertices {
+        let cnt = scoped
+            .storage
+            .get_property_table(vs.label_id)
+            .map(|t| t.len())
+            .unwrap_or(0);
+        vertex_counts.insert(vs.label.clone(), serde_json::json!(cnt));
+        let mut idxs = schema.get_indexes(&vs.label);
+        for p in &vs.properties {
+            if matches!(p.data_type, gdb_core::schema::DataType::Vector(_)) {
+                let hnsw_tag = format!("{} (HNSW)", p.name);
+                if !idxs.contains(&hnsw_tag) && !idxs.contains(&p.name) {
+                    idxs.push(hnsw_tag);
+                }
+            }
+        }
+        vertex_indexes.insert(vs.label.clone(), serde_json::json!(idxs));
+    }
+
     Json(serde_json::json!({
         "status": "ok",
         "graph": schema.name,
+        "active_graph": state.current_graph_name(),
         "vertices": vertices,
         "edges": edges,
+        "vertex_counts": vertex_counts,
+        "vertex_indexes": vertex_indexes,
+        "total_vertices": scoped.storage.total_vertices(),
+        "total_edges": scoped.storage.total_edges(),
+    }))
+}
+
+pub async fn handle_graphs(State(state): State<AppState>) -> impl IntoResponse {
+    let spaces = state.list_graph_spaces();
+    Json(serde_json::json!({
+        "status": "ok",
+        "active_graph": state.current_graph_name(),
+        "graphs": spaces,
+    }))
+}
+
+pub async fn handle_pregel_status(State(state): State<AppState>) -> impl IntoResponse {
+    let t = state.pregel_status.read().clone();
+    Json(serde_json::json!({
+        "status": "completed",
+        "algorithm": t.algorithm,
+        "graph_space": t.graph_space,
+        "current_superstep": t.current_superstep,
+        "max_supersteps": t.max_supersteps,
+        "active_vertices": t.active_vertices,
+        "vertices_processed": t.total_vertices,
+        "edges_processed": t.total_edges,
+        "total_messages": t.messages_exchanged,
+        "messages_exchanged": t.messages_exchanged,
+        "total_bytes": t.bytes_shuffled,
+        "bytes_shuffled": t.bytes_shuffled,
+        "convergence_delta": t.convergence_delta,
+        "tolerance": t.tolerance,
+        "elapsed_ms": t.elapsed_ms,
+        "elapsed_us": (t.elapsed_ms * 1000.0) as u64,
+        "execution_mode": t.engine_mode,
+        "supersteps": t.supersteps,
+        "pregel": t,
     }))
 }
 
@@ -87,6 +158,7 @@ pub async fn handle_resources(
     State(state): State<AppState>,
     Query(params): Query<ResourcesParams>,
 ) -> impl IntoResponse {
+    let state = state.with_graph_space(params.graph.as_deref());
     let csr_edges = state.storage.csr_edges();
     let memtable_edges = state.storage.delta_edges();
     let total_edges = state.storage.total_edges();
@@ -207,7 +279,10 @@ pub async fn handle_resources(
         "gpu_device": state.gpu_device,
         "gpu_backend": state.gpu_backend,
         "gpu_threshold": state.gpu_threshold,
-        "gpu_max_vram_mb": state.gpu_max_vram_mb
+        "gpu_max_vram_mb": state.gpu_max_vram_mb,
+        "active_graph": state.current_graph_name(),
+        "graphs_count": state.spaces.read().len(),
+        "pregel": state.pregel_status.read().clone()
     }))
 }
 
@@ -230,6 +305,13 @@ pub async fn handle_gpu(State(state): State<AppState>) -> impl IntoResponse {
         "None (CPU Fallback)"
     };
 
+    let gpu_dispatches = state
+        .executor
+        .gpu
+        .as_ref()
+        .map(|g| g.total_dispatches())
+        .unwrap_or(0);
+
     Json(serde_json::json!({
         "enabled": state.gpu_enabled,
         "device_id": state.gpu_device,
@@ -239,13 +321,16 @@ pub async fn handle_gpu(State(state): State<AppState>) -> impl IntoResponse {
         "memory_model": memory_model,
         "paging_strategy": paging_strategy,
         "active": state.gpu_enabled,
+        "gpu_dispatches": gpu_dispatches,
         "status": if state.gpu_enabled { "Active" } else { "Disabled (pass --enable-gpu)" },
         "supported_kernels": [
-            "Parallel BFS Frontier Expansion",
-            "Vectorized PageRank Iteration",
-            "Cosine / Jaccard Graph Kernel",
-            "Parallel Vector Similarity Search (SIMD/GPU)",
-            "Multi-Hop Traversal Wavefront BFS",
+            "Parallel BFS Frontier Expansion (parallel_bfs_step)",
+            "Pull-Based PageRank SpMV (parallel_pagerank_pull)",
+            "Weakly Connected Components (parallel_wcc_step)",
+            "Sorted Adjacency Triangle Intersection (parallel_triangle_step)",
+            "Single-Source Shortest Path (parallel_bfs_step)",
+            "In-Degree Histogram Kernel (parallel_degree_in)",
+            "Parallel Vector Similarity Search (parallel_vector_similarity)",
             "Windowed Out-Of-Core CSR Streaming"
         ]
     }))

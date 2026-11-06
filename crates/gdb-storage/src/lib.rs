@@ -1,11 +1,13 @@
 pub mod csr;
 pub mod delta;
 pub mod engine;
+pub mod hnsw;
 pub mod properties;
 
 pub use csr::ChunkedCsr;
 pub use delta::{DeltaMemTable, MvccEdge};
 pub use engine::{GraphStatistics, PartitionStorageEngine};
+pub use hnsw::HnswIndex;
 pub use properties::VertexPropertyTable;
 
 #[cfg(test)]

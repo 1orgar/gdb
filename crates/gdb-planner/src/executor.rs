@@ -32,6 +32,7 @@ pub trait RemoteEdgeExpander: Send + Sync {
         }
         map
     }
+    fn clear_cache(&self) {}
 }
 
 pub trait RemotePropertyResolver: Send + Sync {
@@ -363,6 +364,63 @@ impl QueryExecutor {
                     rows_affected: count,
                 })
             }
+            Statement::CreateGraph { name, .. } => {
+                Ok(QueryResult {
+                    message: format!("Created graph space '{}'", name),
+                    batch: None,
+                    rows_affected: 1,
+                })
+            }
+            Statement::DropGraph { name, .. } => {
+                Ok(QueryResult {
+                    message: format!("Dropped graph space '{}'", name),
+                    batch: None,
+                    rows_affected: 1,
+                })
+            }
+            Statement::UseGraph { name } => {
+                Ok(QueryResult {
+                    message: format!("Switched active graph space to '{}'", name),
+                    batch: None,
+                    rows_affected: 0,
+                })
+            }
+            Statement::ShowGraphs => {
+                let schema_guard = self.schema.read();
+                let g_name = if schema_guard.name.is_empty() {
+                    "default".to_string()
+                } else {
+                    schema_guard.name.clone()
+                };
+                let v_labels = schema_guard.list_vertex_schemas().len() as i64;
+                let e_types = schema_guard.list_edge_schemas().len() as i64;
+                let edges = self.storage.total_edges() as i64;
+
+                let batch_schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("graph_name", ArrowDataType::Utf8, false),
+                    Field::new("active", ArrowDataType::Utf8, false),
+                    Field::new("vertex_labels", ArrowDataType::Int64, false),
+                    Field::new("edge_types", ArrowDataType::Int64, false),
+                    Field::new("total_edges", ArrowDataType::Int64, false),
+                ]));
+
+                let batch = RecordBatch::try_new(
+                    batch_schema,
+                    vec![
+                        Arc::new(StringArray::from(vec![g_name])),
+                        Arc::new(StringArray::from(vec!["*".to_string()])),
+                        Arc::new(Int64Array::from(vec![v_labels])),
+                        Arc::new(Int64Array::from(vec![e_types])),
+                        Arc::new(Int64Array::from(vec![edges])),
+                    ],
+                )?;
+
+                Ok(QueryResult {
+                    message: "Registered graph spaces: 1".to_string(),
+                    batch: Some(batch),
+                    rows_affected: 1,
+                })
+            }
             Statement::InsertVertex { label, id, properties } => {
                 let label_id = {
                     let schema = self.schema.read();
@@ -418,7 +476,7 @@ impl QueryExecutor {
                     rows_affected: 1,
                 })
             }
-            Statement::InsertEdge { edge_type, src, dst, rank, .. } => {
+            Statement::InsertEdge { edge_type, src, dst, rank, properties } => {
                 let et = {
                     let schema = self.schema.read();
                     schema
@@ -429,7 +487,11 @@ impl QueryExecutor {
 
                 let ver = self.storage.next_commit_version();
                 let edge = EdgeId::new(src, et, rank, dst);
-                self.storage.insert_edge(edge, ver);
+                let props_map: HashMap<String, DataValue> = properties.into_iter().collect();
+                self.storage.insert_edge_with_properties(edge, ver, props_map);
+                if let Some(ref remote) = self.remote_expander {
+                    remote.clear_cache();
+                }
                 Ok(QueryResult {
                     message: format!("Inserted edge {:?}", edge),
                     batch: None,
@@ -447,9 +509,13 @@ impl QueryExecutor {
 
                 let count = edges.len();
                 let ver = self.storage.next_commit_version();
-                for (src, dst, rank, _props) in edges {
+                for (src, dst, rank, props) in edges {
                     let edge = EdgeId::new(src, et, rank, dst);
-                    self.storage.insert_edge(edge, ver);
+                    let props_map: HashMap<String, DataValue> = props.into_iter().collect();
+                    self.storage.insert_edge_with_properties(edge, ver, props_map);
+                }
+                if let Some(ref remote) = self.remote_expander {
+                    remote.clear_cache();
                 }
                 Ok(QueryResult {
                     message: format!("Inserted {} edges", count),
@@ -469,6 +535,9 @@ impl QueryExecutor {
                 let ver = self.storage.next_commit_version();
                 let edge = EdgeId::new(src, et, rank, dst);
                 self.storage.delete_edge(edge, ver);
+                if let Some(ref remote) = self.remote_expander {
+                    remote.clear_cache();
+                }
                 Ok(QueryResult {
                     message: format!("Deleted edge {:?}", edge),
                     batch: None,
@@ -1106,13 +1175,36 @@ impl QueryExecutor {
                         None
                     };
 
+                    let mut missing_vids = Vec::new();
+                    if self.remote_expander.is_some() {
+                        let mut seen = std::collections::HashSet::new();
+                        for r in &current_rows {
+                            if let Some(&(src_vid, _)) = r.vertices.get(&prev_var) {
+                                if seen.insert(src_vid) {
+                                    if self.storage.get_out_edges(src_vid, edge_type, snapshot).is_empty() {
+                                        missing_vids.push(src_vid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let remote_map = if !missing_vids.is_empty() {
+                        if let Some(ref remote) = self.remote_expander {
+                            remote.batch_get_out_edges(&missing_vids, edge_type)
+                        } else {
+                            HashMap::new()
+                        }
+                    } else {
+                        HashMap::new()
+                    };
+
                     let mut next_hop_rows = Vec::new();
                     for r in current_rows {
                         if let Some(&(src_vid, _)) = r.vertices.get(&prev_var) {
                             let mut out_edges = self.storage.get_out_edges(src_vid, edge_type, snapshot);
                             if out_edges.is_empty() {
-                                if let Some(ref remote) = self.remote_expander {
-                                    out_edges = remote.get_out_edges(src_vid, edge_type);
+                                if let Some(re) = remote_map.get(&src_vid) {
+                                    out_edges = re.clone();
                                 }
                             }
                             for e in out_edges {
@@ -1438,7 +1530,10 @@ impl QueryExecutor {
                 let max_depth = max_hops.unwrap_or(15);
                 let csr = self.storage.current_csr();
                 let use_gpu = if let Some(ref gpu) = self.gpu {
-                    gpu.enabled && csr.edge_count() >= gpu.threshold_edges
+                    self.remote_expander.is_none()
+                        && *min_hops <= 1
+                        && gpu.enabled
+                        && csr.edge_count() >= gpu.threshold_edges
                 } else {
                     false
                 };
@@ -1466,44 +1561,71 @@ impl QueryExecutor {
                             }
                         }
 
-                        let mut queue = std::collections::VecDeque::new();
-                        queue.push_back((start_vid, 0usize, std::collections::HashSet::new(), None));
+                        let mut current_frontier: Vec<(VertexId, std::collections::HashSet<EdgeId>, Option<EdgeId>)> =
+                            vec![(start_vid, std::collections::HashSet::new(), None)];
+                        let mut emitted_targets: std::collections::HashSet<(VertexId, Option<EdgeId>)> =
+                            std::collections::HashSet::new();
 
-                        while let Some((curr_vid, depth, visited_edges, last_edge)) = queue.pop_front() {
-                            if depth >= *min_hops {
-                                let mut new_row = row.clone();
-                                if let (Some(ev), Some(le)) = (edge_var, last_edge) {
-                                    new_row.edges.insert(ev.clone(), le);
-                                }
-                                let curr_lid = (*dst_label)
-                                    .or_else(|| self.storage.get_vertex_label(curr_vid))
-                                    .unwrap_or(LabelId(1));
-                                new_row.vertices.insert(dst_var.clone(), (curr_vid, curr_lid));
-                                output_rows.push(new_row);
+                        for depth in 0..max_depth {
+                            if current_frontier.is_empty() {
+                                break;
                             }
 
-                            if depth < max_depth {
-                                let edges = if let Some(cached) = bfs_cache.get(&curr_vid) {
-                                    cached.clone()
-                                } else {
-                                    let mut e = self.storage.get_out_edges(curr_vid, *edge_type, snapshot);
-                                    if e.is_empty() {
-                                        if let Some(ref remote) = self.remote_expander {
-                                            e = remote.get_out_edges(curr_vid, *edge_type);
-                                        }
+                            let mut missing_vids = Vec::new();
+                            for (curr_vid, _, _) in &current_frontier {
+                                if !bfs_cache.contains_key(curr_vid) {
+                                    let local_e = self.storage.get_out_edges(*curr_vid, *edge_type, snapshot);
+                                    if !local_e.is_empty() || self.remote_expander.is_none() {
+                                        bfs_cache.insert(*curr_vid, local_e);
+                                    } else {
+                                        missing_vids.push(*curr_vid);
                                     }
-                                    bfs_cache.insert(curr_vid, e.clone());
-                                    e
-                                };
+                                }
+                            }
+                            if !missing_vids.is_empty() {
+                                missing_vids.sort_unstable();
+                                missing_vids.dedup();
+                                if let Some(ref remote) = self.remote_expander {
+                                    let fetched = remote.batch_get_out_edges(&missing_vids, *edge_type);
+                                    for vid in missing_vids {
+                                        let e = fetched.get(&vid).cloned().unwrap_or_default();
+                                        bfs_cache.insert(vid, e);
+                                    }
+                                }
+                            }
 
+                            let next_depth = depth + 1;
+                            let mut next_frontier = Vec::new();
+                            let mut seen_next_depth = std::collections::HashSet::new();
+
+                            for (curr_vid, visited_edges, _) in current_frontier {
+                                let edges = bfs_cache.get(&curr_vid).cloned().unwrap_or_default();
                                 for edge in edges {
                                     if !visited_edges.contains(&edge) {
-                                        let mut next_visited = visited_edges.clone();
-                                        next_visited.insert(edge);
-                                        queue.push_back((edge.dst, depth + 1, next_visited, Some(edge)));
+                                        if next_depth >= *min_hops && edge.dst != start_vid {
+                                            let emit_key = (edge.dst, edge_var.as_ref().map(|_| edge));
+                                            if emitted_targets.insert(emit_key) {
+                                                let mut new_row = row.clone();
+                                                if let Some(ev) = edge_var {
+                                                    new_row.edges.insert(ev.clone(), edge);
+                                                }
+                                                let curr_lid = (*dst_label)
+                                                    .or_else(|| self.storage.get_vertex_label(edge.dst))
+                                                    .unwrap_or(LabelId(1));
+                                                new_row.vertices.insert(dst_var.clone(), (edge.dst, curr_lid));
+                                                output_rows.push(new_row);
+                                            }
+                                        }
+                                        if next_depth < max_depth && seen_next_depth.insert(edge.dst) {
+                                            let mut next_visited = visited_edges.clone();
+                                            next_visited.insert(edge);
+                                            next_frontier.push((edge.dst, next_visited, Some(edge)));
+                                        }
                                     }
                                 }
                             }
+
+                            current_frontier = next_frontier;
                         }
                     }
                 }
@@ -1637,6 +1759,16 @@ impl QueryExecutor {
         args: HashMap<String, DataValue>,
         yield_items: Vec<String>,
     ) -> GdbResult<QueryResult> {
+        self.execute_call_with_csr(algorithm, args, yield_items, None)
+    }
+
+    pub fn execute_call_with_csr(
+        &self,
+        algorithm: &str,
+        args: HashMap<String, DataValue>,
+        yield_items: Vec<String>,
+        override_csr: Option<Arc<gdb_storage::ChunkedCsr>>,
+    ) -> GdbResult<QueryResult> {
         let algo_lower = algorithm.to_lowercase();
 
         let edge_type_filter: Option<u32> = match args
@@ -1680,67 +1812,75 @@ impl QueryExecutor {
             None
         };
 
-        if self.storage.delta_edges() > 0 {
-            self.storage.compact();
-        }
+        let raw_csr = if let Some(custom_csr) = override_csr {
+            custom_csr
+        } else {
+            if self.storage.delta_edges() > 0 {
+                self.storage.compact();
+            }
+            self.storage.current_csr()
+        };
 
-        let raw_csr = self.storage.current_csr();
         let csr = if let Some(et) = edge_type_filter {
             Arc::new(raw_csr.filter_by_edge_type(et))
         } else {
             raw_csr
         };
 
+        let gpu_ref = self.gpu.as_deref();
+
         let batch = match algo_lower.as_str() {
             "algo.pagerank" => {
-                let damping = match args.get("damping") {
+                let damping = match args.get("damping").or_else(|| args.get("damping_factor")) {
                     Some(DataValue::Float64(f)) => *f,
                     Some(DataValue::Int64(i)) => *i as f64,
                     _ => 0.85,
                 };
-                let max_iter = match args.get("max_iter") {
+                let max_iter = match args.get("max_iter").or_else(|| args.get("iterations")) {
                     Some(DataValue::Int64(i)) => *i as usize,
                     _ => 20,
                 };
                 let tolerance = match args.get("tolerance") {
                     Some(DataValue::Float64(f)) => *f,
-                    _ => 1e-5,
+                    _ => 1e-6,
                 };
-                AnalyticsEngine::run_pagerank(&csr, damping, max_iter, tolerance)?
+                AnalyticsEngine::run_pagerank_with_gpu(&csr, damping, max_iter, tolerance, gpu_ref)?
             }
-            "algo.wcc" => AnalyticsEngine::run_wcc(&csr)?,
+            "algo.wcc" => AnalyticsEngine::run_wcc_with_gpu(&csr, gpu_ref)?,
             "algo.scc" => AnalyticsEngine::run_scc(&csr)?,
             "algo.louvain" => {
                 let max_iter = match args.get("max_iter") {
                     Some(DataValue::Int64(i)) => *i as usize,
                     _ => 10,
                 };
-                AnalyticsEngine::run_louvain(&csr, max_iter)?
+                AnalyticsEngine::run_louvain_with_gpu(&csr, max_iter, gpu_ref)?
             }
             "algo.lpa" => {
                 let max_iter = match args.get("max_iter") {
                     Some(DataValue::Int64(i)) => *i as usize,
                     _ => 10,
                 };
-                AnalyticsEngine::run_lpa(&csr, max_iter)?
+                AnalyticsEngine::run_lpa_with_gpu(&csr, max_iter, gpu_ref)?
             }
-            "algo.kcore" => AnalyticsEngine::run_kcore(&csr)?,
-            "algo.trianglecount" | "algo.triangles" => AnalyticsEngine::run_triangle_count(&csr)?,
+            "algo.kcore" => AnalyticsEngine::run_kcore_with_gpu(&csr, gpu_ref)?,
+            "algo.trianglecount" | "algo.triangles" => {
+                AnalyticsEngine::run_triangle_count_with_gpu(&csr, gpu_ref)?
+            }
             "algo.betweenness" => {
                 let norm = match args.get("normalized") {
                     Some(DataValue::Boolean(b)) => *b,
                     _ => true,
                 };
-                AnalyticsEngine::run_betweenness(&csr, norm)?
+                AnalyticsEngine::run_betweenness_with_gpu(&csr, norm, gpu_ref)?
             }
-            "algo.closeness" => AnalyticsEngine::run_closeness(&csr)?,
-            "algo.degree" => AnalyticsEngine::run_degree(&csr)?,
+            "algo.closeness" => AnalyticsEngine::run_closeness_with_gpu(&csr, gpu_ref)?,
+            "algo.degree" => AnalyticsEngine::run_degree_with_gpu(&csr, gpu_ref)?,
             "algo.sssp" => {
                 let source = match args.get("source") {
                     Some(DataValue::Int64(i)) => VertexId(*i as u64),
                     _ => VertexId(1),
                 };
-                AnalyticsEngine::run_sssp(&csr, source)?
+                AnalyticsEngine::run_sssp_with_gpu(&csr, source, gpu_ref)?
             }
             "algo.similarity" | "algo.jaccard" => {
                 let node1 = match args.get("node1") {
@@ -1762,7 +1902,10 @@ impl QueryExecutor {
                     Some(DataValue::Int64(i)) => *i as usize,
                     _ => 10,
                 };
-                let num_walks = match args.get("num_walks") {
+                let num_walks = match args
+                    .get("num_walks")
+                    .or_else(|| args.get("walks_per_vertex"))
+                {
                     Some(DataValue::Int64(i)) => *i as usize,
                     _ => 10,
                 };
@@ -1797,20 +1940,53 @@ impl QueryExecutor {
                 };
                 let query_vec: Vec<f32> = match args.get("query").or_else(|| args.get("embedding")) {
                     Some(DataValue::Vector(v)) => v.clone(),
-                    Some(DataValue::List(l)) => l.iter().filter_map(|x| match x {
-                        DataValue::Float64(f) => Some(*f as f32),
-                        DataValue::Int64(i) => Some(*i as f32),
-                        _ => None,
-                    }).collect(),
+                    Some(DataValue::List(l)) => l
+                        .iter()
+                        .filter_map(|x| match x {
+                            DataValue::Float64(f) => Some(*f as f32),
+                            DataValue::Int64(i) => Some(*i as f32),
+                            _ => None,
+                        })
+                        .collect(),
                     _ => Vec::new(),
                 };
 
                 let label_id = {
                     let schema = self.schema.read();
-                    schema.get_vertex_schema(&label).map(|s| s.label_id).unwrap_or(LabelId(1))
+                    schema
+                        .get_vertex_schema(&label)
+                        .map(|s| s.label_id)
+                        .unwrap_or(LabelId(1))
                 };
 
-                let results = self.storage.vector_similarity_search(label_id, &property, &query_vec, k, &metric);
+                let has_explicit_hnsw = self.storage.has_vertex_index(label_id, &property);
+                let results = if has_explicit_hnsw {
+                    self.storage
+                        .vector_similarity_search(label_id, &property, &query_vec, k, &metric)
+                } else if let Some(gpu) = gpu_ref {
+                    let (cand_vids, flat_vecs) =
+                        self.storage
+                            .extract_vectors_for_label(label_id, &property, query_vec.len());
+                    if !cand_vids.is_empty() {
+                        if let Ok(scored_indices) =
+                            gpu.vector_similarity(&flat_vecs, query_vec.len(), &query_vec, k, &metric)
+                        {
+                            scored_indices
+                                .into_iter()
+                                .filter_map(|(idx, s)| cand_vids.get(idx).map(|&vid| (vid, s)))
+                                .collect()
+                        } else {
+                            self.storage
+                                .vector_similarity_search(label_id, &property, &query_vec, k, &metric)
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    self.storage
+                        .vector_similarity_search(label_id, &property, &query_vec, k, &metric)
+                };
+
                 let mut vids = Vec::with_capacity(results.len());
                 let mut sims = Vec::with_capacity(results.len());
                 for (vid, sim) in results {
@@ -1828,7 +2004,12 @@ impl QueryExecutor {
                 ];
                 RecordBatch::try_new(arrow_schema, cols)?
             }
-            other => return Err(GdbError::Execution(format!("Unknown graph algorithm: {}", other))),
+            other => {
+                return Err(GdbError::Execution(format!(
+                    "Unknown graph algorithm: {}",
+                    other
+                )))
+            }
         };
 
         let batch = if let Some(lid) = label_filter {
@@ -1873,6 +2054,13 @@ impl QueryExecutor {
         };
 
         let num_rows = final_batch.num_rows();
+        let final_batch = match args.get("limit") {
+            Some(DataValue::Int64(l)) if *l >= 0 => {
+                let lim = (*l as usize).min(num_rows);
+                final_batch.slice(0, lim)
+            }
+            _ => final_batch,
+        };
         Ok(QueryResult {
             message: format!("Algorithm {} completed ({} rows)", algorithm, num_rows),
             batch: Some(final_batch),

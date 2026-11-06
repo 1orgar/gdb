@@ -105,5 +105,53 @@ mod tests {
         // Triangles
         let tri_res = dispatcher.triangle_count(&csr).unwrap();
         assert_eq!(tri_res.len(), 3);
+        for (_, t) in &tri_res {
+            assert_eq!(*t, 1);
+        }
+
+        // Triangles with LCC
+        let tri_lcc = dispatcher.triangle_count_with_lcc(&csr).unwrap();
+        assert_eq!(tri_lcc.len(), 3);
+        for (_, t, lcc) in &tri_lcc {
+            assert_eq!(*t, 1);
+            assert!((*lcc - 1.0).abs() < 1e-6);
+        }
+
+        // SSSP
+        let sssp_res = dispatcher.sssp(&csr, VertexId(1)).unwrap();
+        assert_eq!(sssp_res.len(), 3);
+
+        // Degree
+        let deg_res = dispatcher.degree(&csr).unwrap();
+        assert_eq!(deg_res.len(), 3);
+        for (_, in_d, out_d, tot_d) in deg_res {
+            assert_eq!(in_d, 1);
+            assert_eq!(out_d, 1);
+            assert_eq!(tot_d, 2);
+        }
+
+        // K-Core, LPA, Betweenness, Closeness
+        let kcore_res = dispatcher.kcore(&csr).unwrap();
+        assert_eq!(kcore_res.len(), 3);
+        for (_, k) in kcore_res {
+            assert_eq!(k, 2);
+        }
+
+        let lpa_res = dispatcher.lpa(&csr, 10).unwrap();
+        assert_eq!(lpa_res.len(), 3);
+
+        let bet_res = dispatcher.betweenness(&csr, true).unwrap();
+        assert_eq!(bet_res.len(), 3);
+
+        let close_res = dispatcher.closeness(&csr).unwrap();
+        assert_eq!(close_res.len(), 3);
+
+        // Vector similarity on GPU
+        let vecs = vec![1.0f32, 0.0, 0.0, 1.0];
+        let sim_res = dispatcher.vector_similarity(&vecs, 2, &[1.0, 0.0], 2, "cosine").unwrap();
+        assert_eq!(sim_res.len(), 2);
+        assert_eq!(sim_res[0].0, 0);
+        assert!((sim_res[0].1 - 1.0).abs() < 1e-5);
+        assert!(dispatcher.total_dispatches() >= 8);
     }
 }

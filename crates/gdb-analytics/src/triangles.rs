@@ -1,5 +1,6 @@
 use gdb_core::VertexId;
 use gdb_storage::ChunkedCsr;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -8,67 +9,47 @@ pub struct TriangleMetric {
     pub clustering_coefficient: f64,
 }
 
-/// Computes Triangle Count and Local Clustering Coefficient (LCC) for all vertices.
+/// Computes Triangle Count and Local Clustering Coefficient (LCC) in parallel across all vertices.
 pub fn triangle_count(csr: &ChunkedCsr) -> HashMap<VertexId, TriangleMetric> {
     let num_v = csr.vertex_count();
     if num_v == 0 {
         return HashMap::new();
     }
 
-    // Pre-extract sorted neighbor index lists for each vertex (undirected projection)
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_v];
-    for u in 0..num_v {
-        let start = csr.offsets[u] as usize;
-        let end = csr.offsets[u + 1] as usize;
-        let actual_end = end.min(csr.targets.len());
+    let adj = csr.build_undirected_adj();
 
-        for off in start..actual_end {
-            let target_raw = csr.targets[off];
-            if let Some(&v_idx) = csr.vertex_map.get(&target_raw) {
-                let v = v_idx as usize;
-                if u != v {
-                    adj[u].push(v);
-                    adj[v].push(u);
+    let triangles: Vec<u64> = (0..num_v)
+        .into_par_iter()
+        .map(|u| {
+            let u_neighbors = &adj[u];
+            let deg = u_neighbors.len();
+            let mut count = 0u64;
+
+            for i in 0..deg {
+                let v = u_neighbors[i] as usize;
+                let v_neighbors = &adj[v];
+
+                let mut p1 = i + 1;
+                let mut p2 = 0;
+
+                while p1 < deg && p2 < v_neighbors.len() {
+                    let w1 = u_neighbors[p1];
+                    let w2 = v_neighbors[p2];
+
+                    if w1 == w2 {
+                        count += 1;
+                        p1 += 1;
+                        p2 += 1;
+                    } else if w1 < w2 {
+                        p1 += 1;
+                    } else {
+                        p2 += 1;
+                    }
                 }
             }
-        }
-    }
-    for u in 0..num_v {
-        adj[u].sort_unstable();
-        adj[u].dedup();
-    }
-
-    let mut triangles = vec![0u64; num_v];
-
-    // For each vertex u, count triangles by intersecting adjacency lists
-    for u in 0..num_v {
-        let u_neighbors = &adj[u];
-        let deg = u_neighbors.len();
-
-        for i in 0..deg {
-            let v = u_neighbors[i];
-            let v_neighbors = &adj[v];
-
-            // Intersect u_neighbors and v_neighbors using two-pointer sweep
-            let mut p1 = i + 1;
-            let mut p2 = 0;
-
-            while p1 < deg && p2 < v_neighbors.len() {
-                let w1 = u_neighbors[p1];
-                let w2 = v_neighbors[p2];
-
-                if w1 == w2 {
-                    triangles[u] += 1;
-                    p1 += 1;
-                    p2 += 1;
-                } else if w1 < w2 {
-                    p1 += 1;
-                } else {
-                    p2 += 1;
-                }
-            }
-        }
-    }
+            count
+        })
+        .collect();
 
     let mut result = HashMap::with_capacity(num_v);
     for u in 0..num_v {

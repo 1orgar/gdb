@@ -9,7 +9,7 @@ pub struct DegreeMetric {
     pub total_degree: u32,
 }
 
-/// Computes In-Degree, Out-Degree and Total Degree for every vertex.
+/// Computes In-Degree, Out-Degree and Total Degree for every vertex using O(1) dense indexing.
 pub fn degree_centrality(csr: &ChunkedCsr) -> HashMap<VertexId, DegreeMetric> {
     let num_v = csr.vertex_count();
     if num_v == 0 {
@@ -21,15 +21,13 @@ pub fn degree_centrality(csr: &ChunkedCsr) -> HashMap<VertexId, DegreeMetric> {
 
     for u in 0..num_v {
         let start = csr.offsets[u] as usize;
-        let end = csr.offsets[u + 1] as usize;
-        let actual_end = end.min(csr.targets.len());
+        let end = (csr.offsets[u + 1] as usize).min(csr.targets.len());
 
-        out_degrees[u] = actual_end.saturating_sub(start) as u32;
+        out_degrees[u] = end.saturating_sub(start) as u32;
 
-        for off in start..actual_end {
-            let target_raw = csr.targets[off];
-            if let Some(&v_idx) = csr.vertex_map.get(&target_raw) {
-                in_degrees[v_idx as usize] += 1;
+        for off in start..end {
+            if let Some(v_idx) = csr.dense_target_at(off) {
+                in_degrees[v_idx] += 1;
             }
         }
     }

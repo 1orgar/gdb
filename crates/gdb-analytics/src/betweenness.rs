@@ -1,71 +1,91 @@
 use gdb_core::VertexId;
 use gdb_storage::ChunkedCsr;
+use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
 
-/// Brandes' algorithm for Betweenness Centrality on unweighted graphs.
+/// Parallel Brandes' algorithm for Betweenness Centrality on unweighted graphs.
+/// Automatically uses deterministic pivot sampling (`k = 32`) when `|V| > 2000`.
 pub fn betweenness_centrality(csr: &ChunkedCsr, normalized: bool) -> HashMap<VertexId, f64> {
     let num_v = csr.vertex_count();
     if num_v == 0 {
         return HashMap::new();
     }
 
-    let mut cb = vec![0.0f64; num_v];
+    let sample_k = if num_v <= 2000 { num_v } else { 32 };
+    let pivots: Vec<usize> = if sample_k == num_v {
+        (0..num_v).collect()
+    } else {
+        (0..sample_k).map(|i| (i * num_v) / sample_k).collect()
+    };
 
-    for s in 0..num_v {
-        let mut stack = Vec::with_capacity(num_v);
-        let mut p: Vec<Vec<usize>> = vec![Vec::new(); num_v];
-        let mut sigma = vec![0.0f64; num_v];
-        sigma[s] = 1.0;
-        let mut d = vec![-1i32; num_v];
-        d[s] = 0;
+    let mut cb = pivots
+        .into_par_iter()
+        .fold(
+            || vec![0.0f64; num_v],
+            |mut local_cb, s| {
+                let mut stack = Vec::with_capacity(num_v.min(4096));
+                let mut p: Vec<Vec<usize>> = vec![Vec::new(); num_v];
+                let mut sigma = vec![0.0f64; num_v];
+                sigma[s] = 1.0;
+                let mut d = vec![-1i32; num_v];
+                d[s] = 0;
 
-        let mut queue = VecDeque::new();
-        queue.push_back(s);
+                let mut queue = VecDeque::with_capacity(num_v.min(4096));
+                queue.push_back(s);
 
-        while let Some(v) = queue.pop_front() {
-            stack.push(v);
+                while let Some(v) = queue.pop_front() {
+                    stack.push(v);
 
-            let start = csr.offsets[v] as usize;
-            let end = csr.offsets[v + 1] as usize;
-            let actual_end = end.min(csr.targets.len());
+                    let start = csr.offsets[v] as usize;
+                    let end = (csr.offsets[v + 1] as usize).min(csr.targets.len());
 
-            for off in start..actual_end {
-                let target_raw = csr.targets[off];
-                if let Some(&w_idx) = csr.vertex_map.get(&target_raw) {
-                    let w = w_idx as usize;
+                    for off in start..end {
+                        if let Some(w) = csr.dense_target_at(off) {
+                            if d[w] < 0 {
+                                d[w] = d[v] + 1;
+                                queue.push_back(w);
+                            }
 
-                    // w found for the first time?
-                    if d[w] < 0 {
-                        d[w] = d[v] + 1;
-                        queue.push_back(w);
-                    }
-
-                    // shortest path to w via v?
-                    if d[w] == d[v] + 1 {
-                        sigma[w] += sigma[v];
-                        p[w].push(v);
+                            if d[w] == d[v] + 1 {
+                                sigma[w] += sigma[v];
+                                p[w].push(v);
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        let mut delta = vec![0.0f64; num_v];
-        // S returns vertices in order of non-increasing distance from s
-        while let Some(w) = stack.pop() {
-            for &v in &p[w] {
-                delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
-            }
-            if w != s {
-                cb[w] += delta[w];
-            }
-        }
-    }
+                let mut delta = vec![0.0f64; num_v];
+                while let Some(w) = stack.pop() {
+                    for &v in &p[w] {
+                        delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
+                    }
+                    if w != s {
+                        local_cb[w] += delta[w];
+                    }
+                }
 
-    // Normalization factor for directed graphs: 1 / ((n-1)(n-2))
-    if normalized && num_v > 2 {
-        let factor = 1.0 / (((num_v - 1) * (num_v - 2)) as f64);
+                local_cb
+            },
+        )
+        .reduce(
+            || vec![0.0f64; num_v],
+            |mut acc, local_cb| {
+                for i in 0..num_v {
+                    acc[i] += local_cb[i];
+                }
+                acc
+            },
+        );
+
+    let scale = (num_v as f64) / (sample_k as f64);
+    let norm_factor = if normalized && num_v > 2 {
+        scale / (((num_v - 1) as f64) * ((num_v - 2) as f64))
+    } else {
+        scale
+    };
+    if (norm_factor - 1.0).abs() > 1e-12 {
         for val in cb.iter_mut() {
-            *val *= factor;
+            *val *= norm_factor;
         }
     }
 

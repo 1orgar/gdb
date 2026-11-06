@@ -178,6 +178,104 @@ def main():
         if run_test("Graph ML Node2Vec Embeddings", test_node2vec):
             passed += 1
 
+        # 7. Louvain Community Detection
+        def test_louvain():
+            setup_small_graph()
+            res = q("CALL algo.louvain({max_iter: 10}) YIELD vertex_id, community_id;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            comms = {int(r[0]): int(r[1]) for r in res}
+            return comms[1] == comms[2] and comms[3] == comms[4], f"Communities: {comms}"
+
+        total += 1
+        if run_test("Louvain Community Detection", test_louvain):
+            passed += 1
+
+        # 8. Label Propagation (LPA)
+        def test_lpa():
+            setup_small_graph()
+            res = q("CALL algo.lpa({max_iter: 10}) YIELD vertex_id, community_id;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            comms = {int(r[0]): int(r[1]) for r in res}
+            return comms[1] == comms[2] == comms[3], f"LPA Communities: {comms}"
+
+        total += 1
+        if run_test("Label Propagation (LPA)", test_lpa):
+            passed += 1
+
+        # 9. K-Core Decomposition
+        def test_kcore():
+            setup_small_graph()
+            res = q("CALL algo.kcore() YIELD vertex_id, coreness;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            cores = {int(r[0]): int(r[1]) for r in res}
+            # {1,2,3} form a 2-core, node 4 has degree 1 -> 1-core
+            ok = cores[1] == 2 and cores[2] == 2 and cores[3] == 2 and cores[4] == 1
+            return ok, f"Cores: {cores}"
+
+        total += 1
+        if run_test("K-Core Decomposition", test_kcore):
+            passed += 1
+
+        # 10. Degree Centrality
+        def test_degree():
+            setup_small_graph()
+            res = q("CALL algo.degree() YIELD vertex_id, in_degree, out_degree, total_degree;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            deg = {int(r[0]): (int(r[1]), int(r[2]), int(r[3])) for r in res}
+            ok = deg[3] == (1, 2, 3) and deg[4] == (1, 0, 1)
+            return ok, f"Degrees (in,out,total): {deg}"
+
+        total += 1
+        if run_test("Degree Centrality", test_degree):
+            passed += 1
+
+        # 11. Betweenness Centrality
+        def test_betweenness():
+            setup_small_graph()
+            res = q("CALL algo.betweenness({normalized: false}) YIELD vertex_id, betweenness;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            bc = {int(r[0]): float(r[1]) for r in res}
+            # Node 3 bridges {1,2} to {4} and 2->3->1
+            ok = bc[3] > bc[4] and bc[4] == 0.0
+            return ok, f"Betweenness: {bc}"
+
+        total += 1
+        if run_test("Betweenness Centrality", test_betweenness):
+            passed += 1
+
+        # 12. Harmonic Closeness Centrality
+        def test_closeness():
+            setup_small_graph()
+            res = q("CALL algo.closeness() YIELD vertex_id, closeness;")
+            if not res.is_ok or len(res) != 4:
+                return False, f"Expected 4 rows, got {len(res) if res.is_ok else res.error}"
+            cc = {int(r[0]): round(float(r[1]), 4) for r in res}
+            # Node 3 reaches 1 and 4 at dist 1, and 2 at dist 2 -> (1 + 1 + 0.5)/3 = 2.5/3 = 0.8333
+            # Node 4 is a sink -> closeness 0.0
+            ok = abs(cc[3] - 0.8333) < 0.01 and cc[4] == 0.0
+            return ok, f"Closeness: {cc}"
+
+        total += 1
+        if run_test("Harmonic Closeness Centrality", test_closeness):
+            passed += 1
+
+        # 13. Node Similarity (Jaccard / Cosine)
+        def test_similarity():
+            setup_small_graph()
+            res = q("CALL algo.similarity({node1: 1, node2: 3}) YIELD node1, node2, jaccard, cosine, common_neighbors;")
+            if not res.is_ok or len(res) != 1:
+                return False, f"Expected 1 row, got {len(res) if res.is_ok else res.error}"
+            return True, f"Similarity(1,3): jaccard={res.rows[0][2]}, common={res.rows[0][4]}"
+
+        total += 1
+        if run_test("Jaccard & Cosine Node Similarity", test_similarity):
+            passed += 1
+
         if not args.keep_schema:
             teardown_schema(client)
 

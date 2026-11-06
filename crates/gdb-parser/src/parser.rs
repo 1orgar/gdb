@@ -506,6 +506,16 @@ impl Parser {
                 }
                 Ok(Statement::AnalyzeGraph)
             }
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("USE") => {
+                self.advance();
+                if let Some(Token::Ident(target)) = self.peek() {
+                    if target.eq_ignore_ascii_case("GRAPH") || target.eq_ignore_ascii_case("SPACE") {
+                        self.advance();
+                    }
+                }
+                let name = self.expect_ident()?;
+                Ok(Statement::UseGraph { name })
+            }
             Some(other) => Err(GdbError::Parser(format!("Unexpected leading token: {:?}", other))),
             None => Err(GdbError::Parser("Empty query".into())),
         }?;
@@ -540,6 +550,10 @@ impl Parser {
                     let key = self.expect_ident()?;
                     self.expect(&Token::Colon)?;
                     let val = self.parse_literal()?;
+                    let lower = key.to_lowercase();
+                    if lower != key {
+                        args.insert(lower, val.clone());
+                    }
                     args.insert(key, val);
                     if self.peek() == Some(&Token::Comma) {
                         self.advance();
@@ -559,6 +573,10 @@ impl Parser {
                         let key = self.expect_ident()?;
                         self.expect(&Token::Colon)?;
                         let val = self.parse_literal()?;
+                        let lower = key.to_lowercase();
+                        if lower != key {
+                            args.insert(lower, val.clone());
+                        }
                         args.insert(key, val);
                     } else {
                         let val = self.parse_literal()?;
@@ -645,7 +663,47 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Statement::CreateIndex { label, property })
             }
-            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, TAG, EDGE, or INDEX after CREATE, found {:?}", other))),
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("VECTOR") => {
+                self.advance();
+                self.expect(&Token::Index)?;
+                if self.peek() == Some(&Token::On) {
+                    self.advance();
+                }
+                if self.peek() == Some(&Token::Colon) {
+                    self.advance();
+                }
+                let label = self.expect_ident()?;
+                self.expect(&Token::LParen)?;
+                let property = self.expect_ident()?;
+                self.expect(&Token::RParen)?;
+                Ok(Statement::CreateIndex { label, property })
+            }
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("GRAPH") || s.eq_ignore_ascii_case("SPACE") => {
+                self.advance();
+                let mut if_not_exists = false;
+                if let Some(Token::Ident(w1)) = self.peek() {
+                    if w1.eq_ignore_ascii_case("IF") {
+                        self.advance();
+                        if let Some(Token::Ident(w2)) = self.peek() {
+                            if w2.eq_ignore_ascii_case("NOT") {
+                                self.advance();
+                            }
+                        }
+                        if let Some(Token::Ident(w3)) = self.peek() {
+                            if w3.eq_ignore_ascii_case("EXISTS") {
+                                self.advance();
+                            }
+                        }
+                        if_not_exists = true;
+                    }
+                }
+                let name = self.expect_ident()?;
+                Ok(Statement::CreateGraph {
+                    name,
+                    if_not_exists,
+                })
+            }
+            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, TAG, EDGE, INDEX, or GRAPH after CREATE, found {:?}", other))),
             None => Err(GdbError::Parser("Unexpected EOF after CREATE".into())),
         }
     }
@@ -677,7 +735,24 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Statement::DropIndex { label, property })
             }
-            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, TAG, EDGE, or INDEX after DROP, found {:?}", other))),
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("GRAPH") || s.eq_ignore_ascii_case("SPACE") => {
+                self.advance();
+                let mut if_exists = false;
+                if let Some(Token::Ident(w1)) = self.peek() {
+                    if w1.eq_ignore_ascii_case("IF") {
+                        self.advance();
+                        if let Some(Token::Ident(w2)) = self.peek() {
+                            if w2.eq_ignore_ascii_case("EXISTS") {
+                                self.advance();
+                            }
+                        }
+                        if_exists = true;
+                    }
+                }
+                let name = self.expect_ident()?;
+                Ok(Statement::DropGraph { name, if_exists })
+            }
+            Some(other) => Err(GdbError::Parser(format!("Expected VERTEX, TAG, EDGE, INDEX, or GRAPH after DROP, found {:?}", other))),
             None => Err(GdbError::Parser("Unexpected EOF after DROP".into())),
         }
     }
@@ -815,6 +890,7 @@ impl Parser {
                     "TAGS" | "VERTICES" => Ok(Statement::ShowVertexLabels),
                     "EDGES" => Ok(Statement::ShowEdgeTypes),
                     "INDEXES" => Ok(Statement::ShowSchema),
+                    "GRAPHS" | "GRAPH" | "SPACES" | "NAMESPACES" => Ok(Statement::ShowGraphs),
                     _ => Err(GdbError::Parser(format!("Unknown SHOW target: {}", s_upper))),
                 }
             }
@@ -941,6 +1017,20 @@ impl Parser {
             Some(Token::Edge) => {
                 self.advance();
                 let edge_type = self.expect_ident()?;
+                let mut prop_names = Vec::new();
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) {
+                        prop_names.push(self.expect_ident()?);
+                        if self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                }
+
                 let mut all_edges = Vec::new();
 
                 if self.peek() == Some(&Token::Values) {
@@ -960,7 +1050,25 @@ impl Parser {
                                 }
                             }
                             self.expect(&Token::RParen)?;
-                            all_edges.push((src, dst, rank, Vec::new()));
+                            let mut edge_props = Vec::new();
+                            if self.peek() == Some(&Token::Colon) {
+                                self.advance();
+                                self.expect(&Token::LParen)?;
+                                let mut vals = Vec::new();
+                                while self.peek() != Some(&Token::RParen) {
+                                    vals.push(self.parse_literal()?);
+                                    if self.peek() == Some(&Token::Comma) {
+                                        self.advance();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                self.expect(&Token::RParen)?;
+                                for (k, v) in prop_names.iter().zip(vals.into_iter()) {
+                                    edge_props.push((k.clone(), v));
+                                }
+                            }
+                            all_edges.push((src, dst, rank, edge_props));
                         } else {
                             let src = self.parse_vertex_id()?;
                             if self.peek() == Some(&Token::RArrow) {
@@ -970,21 +1078,38 @@ impl Parser {
                             }
                             let dst = self.parse_vertex_id()?;
                             let mut rank = 0i64;
+                            let mut edge_props = Vec::new();
                             if self.peek() == Some(&Token::Colon) {
                                 self.advance();
                                 if self.peek() == Some(&Token::LParen) {
                                     self.advance();
-                                    if let Some(Token::IntLit(r)) = self.peek() {
-                                        rank = *r;
-                                        self.advance();
+                                    if prop_names.is_empty() {
+                                        if let Some(Token::IntLit(r)) = self.peek() {
+                                            rank = *r;
+                                            self.advance();
+                                        }
+                                        self.expect(&Token::RParen)?;
+                                    } else {
+                                        let mut vals = Vec::new();
+                                        while self.peek() != Some(&Token::RParen) {
+                                            vals.push(self.parse_literal()?);
+                                            if self.peek() == Some(&Token::Comma) {
+                                                self.advance();
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        self.expect(&Token::RParen)?;
+                                        for (k, v) in prop_names.iter().zip(vals.into_iter()) {
+                                            edge_props.push((k.clone(), v));
+                                        }
                                     }
-                                    self.expect(&Token::RParen)?;
                                 } else if let Some(Token::IntLit(r)) = self.peek() {
                                     rank = *r;
                                     self.advance();
                                 }
                             }
-                            all_edges.push((src, dst, rank, Vec::new()));
+                            all_edges.push((src, dst, rank, edge_props));
                         }
 
                         if self.peek() == Some(&Token::Comma) {

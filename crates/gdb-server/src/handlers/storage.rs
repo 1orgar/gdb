@@ -11,6 +11,7 @@ pub async fn handle_storage_out_edges(
     State(state): State<AppState>,
     Json(payload): Json<StorageOutEdgesRequest>,
 ) -> Json<HashMap<u64, Vec<EdgeDto>>> {
+    let state = state.with_graph_space(payload.graph.as_deref());
     let et = payload.edge_type.map(EdgeType);
     let snapshot = state.storage.latest_version();
     let mut results: HashMap<u64, Vec<EdgeDto>> = HashMap::new();
@@ -24,10 +25,34 @@ pub async fn handle_storage_out_edges(
     Json(results)
 }
 
+pub async fn handle_storage_all_edges(
+    State(state): State<AppState>,
+) -> Json<Vec<EdgeDto>> {
+    let state = state.with_graph_space(None);
+    let edges = state.storage.get_all_active_edges();
+    Json(edges.into_iter().map(EdgeDto::from).collect())
+}
+
+pub async fn handle_storage_all_edges_bin(
+    State(state): State<AppState>,
+) -> Vec<u8> {
+    let state = state.with_graph_space(None);
+    let edges = state.storage.get_all_active_edges();
+    let mut buf = Vec::with_capacity(edges.len() * 28);
+    for e in edges {
+        buf.extend_from_slice(&e.src.0.to_le_bytes());
+        buf.extend_from_slice(&e.edge_type.0.to_le_bytes());
+        buf.extend_from_slice(&e.rank.to_le_bytes());
+        buf.extend_from_slice(&e.dst.0.to_le_bytes());
+    }
+    buf
+}
+
 pub async fn handle_storage_vertex_properties(
     State(state): State<AppState>,
     Json(payload): Json<StorageVertexPropertiesRequest>,
 ) -> Json<HashMap<u64, HashMap<String, DataValue>>> {
+    let state = state.with_graph_space(payload.graph.as_deref());
     let mut results: HashMap<u64, HashMap<String, DataValue>> = HashMap::new();
     let prop_filter: Option<HashSet<String>> = payload.properties.map(|p| p.into_iter().collect());
 
@@ -50,25 +75,58 @@ pub async fn handle_replicate(
     State(state): State<AppState>,
     Json(payload): Json<ReplicationPayload>,
 ) -> Json<serde_json::Value> {
+    let state = state.with_graph_space(payload.graph.as_deref());
     let q = payload.query.trim();
     if q.eq_ignore_ascii_case("compact") || q.eq_ignore_ascii_case("compact;") {
         state.storage.compact();
+        *state.global_csr_cache.write() = None;
+        if let Some(ref remote) = state.executor.remote_expander {
+            remote.clear_cache();
+        }
         state.compactions_count.fetch_add(1, Ordering::Relaxed);
         return Json(serde_json::json!({ "status": "ok", "message": "Replicated compaction applied" }));
     }
 
     match gdb_parser::parse(q) {
-        Ok(stmt) => match state.executor.execute(stmt) {
-            Ok(res) => Json(serde_json::json!({ "status": "ok", "message": res.message })),
-            Err(e) => Json(serde_json::json!({ "status": "error", "error": e.to_string() })),
-        },
+        Ok(stmt) => {
+            match &stmt {
+                gdb_parser::ast::Statement::CreateGraph { name, if_not_exists } => {
+                    let _ = state.create_graph_space(name, *if_not_exists);
+                    return Json(serde_json::json!({ "status": "ok", "message": format!("Replicated CREATE GRAPH '{}'", name) }));
+                }
+                gdb_parser::ast::Statement::DropGraph { name, if_exists } => {
+                    let _ = state.drop_graph_space(name, *if_exists);
+                    return Json(serde_json::json!({ "status": "ok", "message": format!("Replicated DROP GRAPH '{}'", name) }));
+                }
+                gdb_parser::ast::Statement::UseGraph { name } => {
+                    let _ = state.use_graph_space(name);
+                    return Json(serde_json::json!({ "status": "ok", "message": format!("Replicated USE GRAPH '{}'", name) }));
+                }
+                _ => {}
+            }
+            match state.executor.execute(stmt) {
+                Ok(res) => {
+                    *state.global_csr_cache.write() = None;
+                    if let Some(ref remote) = state.executor.remote_expander {
+                        remote.clear_cache();
+                    }
+                    Json(serde_json::json!({ "status": "ok", "message": res.message }))
+                }
+                Err(e) => Json(serde_json::json!({ "status": "error", "error": e.to_string() })),
+            }
+        }
         Err(e) => Json(serde_json::json!({ "status": "error", "error": e.to_string() })),
     }
 }
 
 pub async fn handle_compact(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let state = state.with_graph_space(None);
     let start = Instant::now();
     state.storage.compact();
+    *state.global_csr_cache.write() = None;
+    if let Some(ref remote) = state.executor.remote_expander {
+        remote.clear_cache();
+    }
     state.compactions_count.fetch_add(1, Ordering::Relaxed);
 
     // Replicate compaction to all other peers in the ring
@@ -83,6 +141,7 @@ pub async fn handle_compact(State(state): State<AppState>) -> Json<serde_json::V
 }
 
 pub async fn handle_snapshot(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let state = state.with_graph_space(None);
     if let Some(s3) = &state.s3_manager {
         let ver = state.storage.next_commit_version();
         state.storage.compact();
@@ -123,24 +182,24 @@ mod tests {
         let (_addr, handle, state) = create_test_server(temp_dir.path().to_path_buf()).await.unwrap();
 
         // 1. handle_storage_out_edges with empty vids
-        let req = StorageOutEdgesRequest { vids: vec![], edge_type: None };
+        let req = StorageOutEdgesRequest { vids: vec![], edge_type: None, graph: None };
         let resp = handle_storage_out_edges(State(state.clone()), Json(req)).await;
         let json_val = serde_json::to_value(resp.0).unwrap();
         assert!(json_val.as_object().unwrap().is_empty());
 
         // 2. handle_storage_vertex_properties with empty vids
-        let req = StorageVertexPropertiesRequest { vids: vec![], label_id: None, properties: None };
+        let req = StorageVertexPropertiesRequest { vids: vec![], label_id: None, properties: None, graph: None };
         let resp = handle_storage_vertex_properties(State(state.clone()), Json(req)).await;
         let json_val = serde_json::to_value(resp.0).unwrap();
         assert!(json_val.as_object().unwrap().is_empty());
 
         // 3. handle_replicate compaction
-        let req = ReplicationPayload { query: "compact".to_string() };
+        let req = ReplicationPayload { query: "compact".to_string(), graph: None };
         let resp = handle_replicate(State(state.clone()), Json(req)).await;
         assert_eq!(resp.0["status"], "ok");
 
         // 4. handle_replicate invalid query
-        let req = ReplicationPayload { query: "INVALID QUERY SYNTAX".to_string() };
+        let req = ReplicationPayload { query: "INVALID QUERY SYNTAX".to_string(), graph: None };
         let resp = handle_replicate(State(state.clone()), Json(req)).await;
         assert_eq!(resp.0["status"], "error");
 

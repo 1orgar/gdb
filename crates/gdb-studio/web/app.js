@@ -1,3 +1,6 @@
+    let activeGraphSpace = 'default';
+    let lastFetchedSchema = null;
+
     function splitStatements(text) {
       const stmts = [];
       let current = '';
@@ -87,10 +90,16 @@
           const resp = await fetch('/api/query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: q, endpoint: endpoint })
+            body: JSON.stringify({ query: q, endpoint: endpoint, graph: activeGraphSpace })
           });
           const data = await resp.json();
           lastData = data;
+          if (data.active_graph) {
+            activeGraphSpace = data.active_graph;
+          }
+          if (data.pregel) {
+            updatePregelUI(data.pregel);
+          }
 
           if (data.status !== 'ok') {
             document.getElementById('stat-status').textContent = `Error (Step ${i + 1}/${stmts.length})`;
@@ -154,10 +163,19 @@
         const resp = await fetch('/api/query', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: query, endpoint: endpoint })
+          body: JSON.stringify({ query: query, endpoint: endpoint, graph: activeGraphSpace })
         });
         const data = await resp.json();
         const duration = (performance.now() - startTime).toFixed(1);
+
+        if (data.active_graph) {
+          activeGraphSpace = data.active_graph;
+          const sel = document.getElementById('graph-space-select');
+          if (sel) sel.value = activeGraphSpace;
+        }
+        if (data.pregel) {
+          updatePregelUI(data.pregel);
+        }
 
         document.getElementById('stat-status').textContent = data.status === 'ok' ? 'OK' : 'Error';
         document.getElementById('stat-time').textContent = `${(data.elapsed_us ? (data.elapsed_us / 1000).toFixed(2) : duration)} ms`;
@@ -206,9 +224,10 @@
           sync3DGraph();
         }
 
-        const isDdl = /^\s*(create|drop|alter)\s+(vertex|edge|tag|index)/i.test(query);
+        const isDdl = /^\s*(create|drop|alter|use)\s+(vertex|edge|tag|index|vector|graph)/i.test(query);
         if (isDdl && data.status === 'ok') {
-          fetchSchema();
+          await fetchGraphSpaces();
+          await fetchSchema();
         }
 
         // Add to history
@@ -717,6 +736,8 @@
         }, 50);
       } else if (viewName === 'schema') {
         fetchSchema();
+      } else if (viewName === 'analytics') {
+        fetchPregelStatus();
       } else if (viewName === 'cluster') {
         fetchClusterStatus();
       } else if (viewName === 'resources') {
@@ -1343,12 +1364,15 @@
         const resp = await fetch('/api/query', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: query, endpoint: endpoint })
+          body: JSON.stringify({ query: query, endpoint: endpoint, graph: activeGraphSpace })
         });
         const data = await resp.json();
         if (data.status !== 'ok') {
           alert('DDL Error: ' + (data.error || JSON.stringify(data)));
           return false;
+        }
+        if (data.active_graph) {
+          activeGraphSpace = data.active_graph;
         }
         addHistory(query, true);
         return true;
@@ -1356,6 +1380,272 @@
         alert('Network Error: ' + err.message);
         return false;
       }
+    }
+
+    // Graph Spaces Management (v0.6.0)
+    async function fetchGraphSpaces() {
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      try {
+        const resp = await fetch(`/api/graphs?endpoint=${encodeURIComponent(endpoint)}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const spaces = data.graphs || [];
+        const sel = document.getElementById('graph-space-select');
+        if (!sel) return;
+        const currentVal = activeGraphSpace || data.active_graph || 'default';
+        sel.innerHTML = '';
+        spaces.forEach(g => {
+          const opt = document.createElement('option');
+          opt.value = g.name;
+          opt.textContent = `${g.name} (${g.vertices || 0}V, ${g.edges || 0}E)`;
+          opt.style.background = 'var(--bg-card)';
+          opt.style.color = 'var(--text-bright)';
+          if (g.name === currentVal) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        const spaceBadge = document.getElementById('schema-space-badge');
+        if (spaceBadge) spaceBadge.textContent = `Space: ${activeGraphSpace}`;
+        const pregelSpace = document.getElementById('pregel-graph-space-label');
+        if (pregelSpace) pregelSpace.textContent = `Graph Space: ${activeGraphSpace}`;
+      } catch (e) {
+        console.error('Failed to fetch graph spaces:', e);
+      }
+    }
+
+    async function onGraphSpaceSelectChange(spaceName) {
+      if (!spaceName) return;
+      activeGraphSpace = spaceName;
+      await executeQueryDirect(`USE GRAPH ${spaceName};`);
+      await fetchGraphSpaces();
+      await fetchSchema();
+      await fetchResources();
+    }
+
+    function openCreateGraphModal() {
+      const input = document.getElementById('new-graph-space-name');
+      if (input) input.value = '';
+      openModal('modal-create-graph');
+      if (input) input.focus();
+    }
+
+    async function submitCreateGraphSpace() {
+      const name = (document.getElementById('new-graph-space-name').value || '').trim();
+      if (!name) {
+        alert('Please enter a graph space name.');
+        return;
+      }
+      closeModal('modal-create-graph');
+      const ok = await executeQueryDirect(`CREATE GRAPH IF NOT EXISTS ${name};`);
+      if (ok) {
+        activeGraphSpace = name;
+        await executeQueryDirect(`USE GRAPH ${name};`);
+        await fetchGraphSpaces();
+        await fetchSchema();
+        await fetchResources();
+      }
+    }
+
+    async function dropCurrentGraphSpace() {
+      if (!activeGraphSpace || activeGraphSpace === 'default') {
+        alert('Cannot drop the default graph space.');
+        return;
+      }
+      if (!confirm(`Drop graph space "${activeGraphSpace}" and all its isolated vertices, edges, and schemas?`)) {
+        return;
+      }
+      const target = activeGraphSpace;
+      activeGraphSpace = 'default';
+      await executeQueryDirect(`DROP GRAPH IF EXISTS ${target};`);
+      await fetchGraphSpaces();
+      await fetchSchema();
+      await fetchResources();
+    }
+
+    // Visual Graph Analytics & Distributed Pregel Monitor (v0.6.0)
+    async function fetchPregelStatus() {
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      try {
+        const resp = await fetch(`/api/pregel?endpoint=${encodeURIComponent(endpoint)}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          updatePregelUI(data);
+        }
+      } catch (e) {
+        console.error('Failed to fetch pregel status:', e);
+      }
+    }
+
+    function updatePregelUI(p) {
+      if (!p) return;
+      const algoVal = document.getElementById('pregel-algo-val');
+      if (algoVal) algoVal.textContent = (p.algorithm || 'IDLE').toUpperCase();
+      const modeSub = document.getElementById('pregel-mode-sub');
+      if (modeSub) modeSub.textContent = `Mode: ${p.execution_mode || p.engine_mode || 'BSP'} | Space: ${p.graph_space || activeGraphSpace}`;
+      const stepsVal = document.getElementById('pregel-steps-val');
+      if (stepsVal) stepsVal.textContent = `${p.current_superstep || 0} / ${p.max_supersteps || 0}`;
+      const timeSub = document.getElementById('pregel-time-sub');
+      const totalMs = p.elapsed_ms != null ? Number(p.elapsed_ms) : ((p.elapsed_us || 0) / 1000);
+      if (timeSub) timeSub.textContent = `Total time: ${totalMs.toFixed(2)} ms`;
+      const msgVal = document.getElementById('pregel-messages-val');
+      const totalMsgs = p.total_messages != null ? p.total_messages : (p.messages_exchanged || 0);
+      if (msgVal) msgVal.textContent = `${totalMsgs.toLocaleString()} msgs`;
+      const bytesSub = document.getElementById('pregel-bytes-sub');
+      const totalBytes = p.total_bytes != null ? p.total_bytes : (p.bytes_shuffled || 0);
+      if (bytesSub) bytesSub.textContent = `${(totalBytes / 1024).toFixed(1)} KB exchanged across ring`;
+      const deltaVal = document.getElementById('pregel-delta-val');
+      if (deltaVal) deltaVal.textContent = Number(p.convergence_delta || 0).toFixed(6);
+      const veSub = document.getElementById('pregel-v-e-sub');
+      const totV = p.vertices_processed != null ? p.vertices_processed : (p.total_vertices || 0);
+      const totE = p.edges_processed != null ? p.edges_processed : (p.total_edges || 0);
+      if (veSub) veSub.textContent = `${totV.toLocaleString()} vertices | ${totE.toLocaleString()} edges`;
+
+      const pct = p.max_supersteps > 0 ? Math.min(100, Math.round((p.current_superstep / p.max_supersteps) * 100)) : 100;
+      const bar = document.getElementById('pregel-progress-bar');
+      if (bar) bar.style.width = `${pct}%`;
+      const pctLabel = document.getElementById('pregel-progress-pct');
+      if (pctLabel) pctLabel.textContent = `${pct}% (${p.status || 'completed'})`;
+
+      const tbody = document.getElementById('pregel-supersteps-tbody');
+      if (tbody && Array.isArray(p.supersteps) && p.supersteps.length > 0) {
+        tbody.innerHTML = '';
+        p.supersteps.forEach(s => {
+          const sMsgs = s.messages_exchanged != null ? s.messages_exchanged : (s.messages_sent || 0);
+          const sBytes = s.bytes_shuffled != null ? s.bytes_shuffled : (s.bytes_exchanged || 0);
+          const sMs = s.elapsed_ms != null ? Number(s.elapsed_ms) : ((s.elapsed_us || 0) / 1000);
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td style="font-weight:700; color:var(--accent);">Superstep #${s.superstep}</td>
+            <td>${(s.active_vertices || 0).toLocaleString()}</td>
+            <td><code>${sMsgs.toLocaleString()}</code></td>
+            <td><code>${(sBytes / 1024).toFixed(2)} KB</code></td>
+            <td style="color:var(--success); font-family:monospace;">${Number(s.max_delta || 0).toFixed(6)}</td>
+            <td>${sMs.toFixed(2)} ms</td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+    }
+
+    function resetVisualAnalyticsColors() {
+      if (typeof clearAnalyticsOverlay === 'function') {
+        clearAnalyticsOverlay();
+      }
+      const badge = document.getElementById('analytics-overlay-badge');
+      if (badge) badge.style.display = 'none';
+    }
+
+    async function runVisualAlgorithm(algoKey) {
+      const endpoint = document.getElementById('cluster-url').value.trim();
+      const edgeFilterEl = document.getElementById('analytics-edge-filter');
+      const edgeType = edgeFilterEl ? edgeFilterEl.value.trim() : '';
+      const edgeArg = edgeType ? `{edge_type: '${edgeType}'}` : '';
+
+      let query = '';
+      if (algoKey === 'pagerank') {
+        query = `CALL algo.pageRank(${edgeArg}) YIELD vertex_id, score;`;
+      } else if (algoKey === 'louvain') {
+        query = `CALL algo.louvain(${edgeArg}) YIELD vertex_id, community;`;
+      } else if (algoKey === 'wcc') {
+        query = `CALL algo.wcc(${edgeArg}) YIELD vertex_id, component;`;
+      } else if (algoKey === 'lpa') {
+        query = `CALL algo.labelPropagation(${edgeArg}) YIELD vertex_id, community;`;
+      } else if (algoKey === 'kcore') {
+        query = `CALL algo.kCore(${edgeArg}) YIELD vertex_id, coreness;`;
+      } else if (algoKey === 'triangles') {
+        query = `CALL algo.triangleCount(${edgeArg}) YIELD vertex_id, triangles;`;
+      } else if (algoKey === 'betweenness') {
+        query = `CALL algo.betweenness(${edgeArg}) YIELD vertex_id, score;`;
+      } else if (algoKey === 'sssp') {
+        query = edgeType
+          ? `CALL algo.sssp(1, '${edgeType}') YIELD vertex_id, distance;`
+          : `CALL algo.sssp(1) YIELD vertex_id, distance;`;
+      }
+
+      if (!query) return;
+      document.getElementById('query-input').value = query;
+
+      try {
+        const resp = await fetch('/api/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query, endpoint: endpoint, graph: activeGraphSpace })
+        });
+        const data = await resp.json();
+        if (data.pregel) {
+          updatePregelUI(data.pregel);
+        } else {
+          await fetchPregelStatus();
+        }
+        renderTable(data);
+        document.getElementById('json-output').textContent = JSON.stringify(data, null, 2);
+
+        // If graph canvas has no edges loaded yet, fetch subgraph topology first so user sees colored connected graph
+        if (graphNodes.length === 0) {
+          const matchQ = edgeType
+            ? `MATCH (a)-[r:${edgeType}]->(b) RETURN id(a), id(b) LIMIT 150;`
+            : `MATCH (a)-[r]->(b) RETURN id(a), id(b) LIMIT 150;`;
+          const gResp = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: matchQ, endpoint: endpoint, graph: activeGraphSpace })
+          });
+          const gData = await gResp.json();
+          if (gData.graph && gData.graph.nodes.length > 0) {
+            buildGraph(gData.graph.nodes, gData.graph.edges);
+          } else if (data.graph && data.graph.nodes.length > 0) {
+            buildGraph(data.graph.nodes, data.graph.edges);
+          }
+        }
+
+        applyAlgorithmColoring(data, algoKey);
+        sync3DGraph();
+      } catch (e) {
+        console.error('Visual algorithm execution failed:', e);
+      }
+    }
+
+    function applyAlgorithmColoring(data, algoKey) {
+      if (!data || !Array.isArray(data.rows) || data.rows.length === 0) return;
+      if (typeof clearAnalyticsOverlay === 'function') clearAnalyticsOverlay();
+
+      const isCommunity = (algoKey === 'louvain' || algoKey === 'wcc' || algoKey === 'lpa' || algoKey === 'kcore');
+      const vals = [];
+      for (const r of data.rows) {
+        if (r.length >= 2) {
+          const v = Number(r[1]);
+          if (Number.isFinite(v)) vals.push(v);
+        }
+      }
+      const minVal = vals.length > 0 ? Math.min(...vals) : 0;
+      const maxVal = vals.length > 0 ? Math.max(...vals) : 1;
+      const span = Math.max(maxVal - minVal, 1e-9);
+
+      const heatColors = ['#1f6feb', '#388bfd', '#39c5bb', '#3fb950', '#d29922', '#f0883e', '#f85149', '#ff7b72'];
+
+      for (const r of data.rows) {
+        if (r.length < 2) continue;
+        const vid = String(r[0]);
+        const metric = Number(r[1]);
+        if (isCommunity) {
+          const cid = Math.abs(Math.trunc(metric));
+          const col = COLORS[cid % COLORS.length];
+          nodeColorOverrides.set(vid, col);
+          nodeBadgeOverrides.set(vid, `C#${cid}`);
+        } else {
+          const norm = Number.isFinite(metric) ? Math.max(0, Math.min(1, (metric - minVal) / span)) : 0;
+          const cIdx = Math.min(heatColors.length - 1, Math.floor(norm * (heatColors.length - 1)));
+          nodeColorOverrides.set(vid, heatColors[cIdx]);
+          nodeSizeOverrides.set(vid, Math.round(14 + norm * 14));
+          nodeBadgeOverrides.set(vid, Number.isInteger(metric) ? String(metric) : metric.toFixed(3));
+        }
+      }
+
+      const badge = document.getElementById('analytics-overlay-badge');
+      if (badge) {
+        badge.style.display = 'inline-block';
+        badge.textContent = `Colored: ${algoKey.toUpperCase()} (${data.rows.length} nodes)`;
+      }
+      if (typeof wakeSimulation === 'function') wakeSimulation(0.5);
     }
 
     // Modal Submissions
@@ -1455,6 +1745,11 @@
       if (ok) await fetchSchema();
     }
 
+    async function createVectorIndex(labelName, propName) {
+      const ok = await executeQueryDirect(`CREATE VECTOR INDEX ON :${labelName}(${propName});`);
+      if (ok) await fetchSchema();
+    }
+
     async function dropIndex(labelName, propName) {
       const ok = await executeQueryDirect(`DROP INDEX ON :${labelName}(${propName});`);
       if (ok) await fetchSchema();
@@ -1476,9 +1771,10 @@
     async function fetchSchema() {
       const endpoint = document.getElementById('cluster-url').value.trim();
       try {
-        const resp = await fetch(`/api/schema?endpoint=${encodeURIComponent(endpoint)}`);
+        const resp = await fetch(`/api/schema?endpoint=${encodeURIComponent(endpoint)}&graph=${encodeURIComponent(activeGraphSpace)}`);
         if (resp.ok) {
           const schema = await resp.json();
+          lastFetchedSchema = schema;
           renderSchemaUI(schema);
         }
       } catch (err) {
@@ -1486,9 +1782,172 @@
       }
     }
 
+    function filterSchemaExplorer() {
+      if (lastFetchedSchema) {
+        renderSchemaUI(lastFetchedSchema);
+      }
+    }
+
+    function renderSchemaErDiagram(schema, vSchemas, eSchemas) {
+      const svg = document.getElementById('schema-er-svg');
+      if (!svg) return;
+      const counts = schema.vertex_counts || {};
+      const width = 1000;
+      const height = 220;
+      svg.innerHTML = '';
+
+      if (vSchemas.length === 0 && eSchemas.length === 0) {
+        svg.innerHTML = `<text x="500" y="110" text-anchor="middle" fill="#8b949e" font-size="13" font-family="sans-serif">No schema entities defined in space [${activeGraphSpace}]. Create Vertex Tags &amp; Edge Types to visualize ER topology.</text>`;
+        return;
+      }
+
+      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+      defs.innerHTML = `<marker id="er-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#bc8cff"/></marker>`;
+      svg.appendChild(defs);
+
+      const nodePositions = [];
+      const n = Math.max(vSchemas.length, 1);
+      vSchemas.forEach((v, idx) => {
+        const x = (width / (n + 1)) * (idx + 1);
+        const y = idx % 2 === 0 ? 85 : 135;
+        nodePositions.push({ x, y, label: v.label || v.name, count: counts[v.label || v.name] || 0 });
+      });
+
+      // Draw relationships between tags
+      eSchemas.forEach((e, idx) => {
+        const eName = e.edge_type_name || e.name;
+        if (nodePositions.length >= 2) {
+          const src = nodePositions[idx % nodePositions.length];
+          const dst = nodePositions[(idx + 1) % nodePositions.length];
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', src.x + 55);
+          line.setAttribute('y1', src.y);
+          line.setAttribute('x2', dst.x - 55);
+          line.setAttribute('y2', dst.y);
+          line.setAttribute('stroke', '#bc8cff');
+          line.setAttribute('stroke-width', '2');
+          line.setAttribute('marker-end', 'url(#er-arrow)');
+          svg.appendChild(line);
+
+          const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          txt.setAttribute('x', (src.x + dst.x) / 2);
+          txt.setAttribute('y', (src.y + dst.y) / 2 - 8);
+          txt.setAttribute('text-anchor', 'middle');
+          txt.setAttribute('fill', '#d2a8ff');
+          txt.setAttribute('font-size', '11');
+          txt.setAttribute('font-family', 'monospace');
+          txt.textContent = `[:${eName}]`;
+          svg.appendChild(txt);
+        } else if (nodePositions.length === 1) {
+          const src = nodePositions[0];
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('d', `M ${src.x + 40} ${src.y - 20} C ${src.x + 110} ${src.y - 80}, ${src.x + 110} ${src.y + 80}, ${src.x + 40} ${src.y + 20}`);
+          path.setAttribute('fill', 'none');
+          path.setAttribute('stroke', '#bc8cff');
+          path.setAttribute('stroke-width', '2');
+          path.setAttribute('marker-end', 'url(#er-arrow)');
+          svg.appendChild(path);
+
+          const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          txt.setAttribute('x', src.x + 115);
+          txt.setAttribute('y', src.y + 4);
+          txt.setAttribute('fill', '#d2a8ff');
+          txt.setAttribute('font-size', '11');
+          txt.setAttribute('font-family', 'monospace');
+          txt.textContent = `[:${eName}]`;
+          svg.appendChild(txt);
+        }
+      });
+
+      // Draw vertex schema boxes
+      nodePositions.forEach(np => {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.style.cursor = 'pointer';
+        g.onclick = () => queryTag(np.label);
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', np.x - 55);
+        rect.setAttribute('y', np.y - 26);
+        rect.setAttribute('width', '110');
+        rect.setAttribute('height', '52');
+        rect.setAttribute('rx', '8');
+        rect.setAttribute('fill', '#161b22');
+        rect.setAttribute('stroke', '#58a6ff');
+        rect.setAttribute('stroke-width', '2');
+        g.appendChild(rect);
+
+        const t1 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t1.setAttribute('x', np.x);
+        t1.setAttribute('y', np.y - 4);
+        t1.setAttribute('text-anchor', 'middle');
+        t1.setAttribute('fill', '#f0f6fc');
+        t1.setAttribute('font-size', '12');
+        t1.setAttribute('font-weight', 'bold');
+        t1.setAttribute('font-family', 'monospace');
+        t1.textContent = np.label;
+        g.appendChild(t1);
+
+        const t2 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t2.setAttribute('x', np.x);
+        t2.setAttribute('y', np.y + 14);
+        t2.setAttribute('text-anchor', 'middle');
+        t2.setAttribute('fill', '#3fb950');
+        t2.setAttribute('font-size', '10');
+        t2.setAttribute('font-family', 'monospace');
+        t2.textContent = `${np.count.toLocaleString()} vertices`;
+        g.appendChild(t2);
+
+        svg.appendChild(g);
+      });
+    }
+
     function renderSchemaUI(schema) {
-      const vSchemas = schema.vertices || schema.vertex_schemas || [];
-      const eSchemas = schema.edges || schema.edge_schemas || [];
+      const rawVSchemas = schema.vertices || schema.vertex_schemas || [];
+      const rawESchemas = schema.edges || schema.edge_schemas || [];
+      const vertexCounts = schema.vertex_counts || {};
+      const vertexIndexes = schema.vertex_indexes || {};
+
+      // Populate Analytics Subgraph Edge Filter
+      const edgeFilterSel = document.getElementById('analytics-edge-filter');
+      if (edgeFilterSel) {
+        const prev = edgeFilterSel.value;
+        edgeFilterSel.innerHTML = '<option value="">All Edge Types (*)</option>';
+        rawESchemas.forEach(e => {
+          const eName = e.edge_type_name || e.name;
+          const opt = document.createElement('option');
+          opt.value = eName;
+          opt.textContent = `:${eName}`;
+          if (eName === prev) opt.selected = true;
+          edgeFilterSel.appendChild(opt);
+        });
+      }
+
+      const searchQ = ((document.getElementById('schema-search-input') || {}).value || '').trim().toLowerCase();
+      const filterKind = ((document.getElementById('schema-filter-kind') || {}).value || 'all');
+      const filterIndexed = ((document.getElementById('schema-filter-indexed') || {}).value || 'all');
+
+      const vSchemas = filterKind === 'edges' ? [] : rawVSchemas.filter(v => {
+        const lName = (v.label || v.name || '').toLowerCase();
+        const props = v.properties || [];
+        const matchSearch = !searchQ || lName.includes(searchQ) || props.some(p => (p.name || '').toLowerCase().includes(searchQ));
+        if (!matchSearch) return false;
+        if (filterIndexed === 'indexed') {
+          const idxSet = new Set(v.indexes || vertexIndexes[v.label || v.name] || []);
+          return idxSet.size > 0 || props.some(p => p.indexed || String(p.type || p.data_type || '').toUpperCase().includes('VECTOR'));
+        }
+        return true;
+      });
+
+      const eSchemas = filterKind === 'vertices' ? [] : rawESchemas.filter(e => {
+        const eName = (e.edge_type_name || e.name || '').toLowerCase();
+        const props = e.properties || [];
+        return !searchQ || eName.includes(searchQ) || props.some(p => (p.name || '').toLowerCase().includes(searchQ));
+      });
+
+      renderSchemaErDiagram(schema, vSchemas, eSchemas);
+
+      const spaceBadge = document.getElementById('schema-space-badge');
+      if (spaceBadge) spaceBadge.textContent = `Space: ${schema.graph || activeGraphSpace}`;
 
       // Update Badges
       const vBadge = document.getElementById('schema-total-tags-badge');
@@ -1557,13 +2016,15 @@
 
             const labelName = v.label || v.name;
             const labelId = v.label_id !== undefined ? v.label_id : '-';
-            const indexes = new Set(v.indexes || []);
+            const liveCount = vertexCounts[labelName] || 0;
+            const indexes = new Set(v.indexes || vertexIndexes[labelName] || []);
             const pk = v.primary_key || '';
             const props = v.properties || [];
 
             let propRows = '';
             props.forEach(p => {
               const pType = p.type || p.data_type || 'String';
+              const isVec = String(pType).toUpperCase().includes('VECTOR');
               const hasIdx = indexes.has(p.name) || p.indexed === true;
               const isPk = (p.name === pk);
               propRows += `
@@ -1572,13 +2033,15 @@
                   <td><span class="prop-type-badge">${pType}</span></td>
                   <td>
                     ${isPk ? '<span class="index-badge" style="background:rgba(210,153,34,0.15); color:var(--yellow); border-color:rgba(210,153,34,0.3);">🔑 PK</span> ' : ''}
-                    ${hasIdx ? '<span class="index-badge">⚡ INDEX</span>' : '<span style="color:var(--text-muted);">-</span>'}
+                    ${hasIdx ? `<span class="index-badge">${isVec ? '🎯 HNSW' : '⚡ INDEX'}</span>` : '<span style="color:var(--text-muted);">-</span>'}
                   </td>
                   <td style="text-align:right;">
                     <div style="display:inline-flex; gap:4px;">
                       ${hasIdx 
                         ? `<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Index" onclick="dropIndex('${labelName}', '${p.name}')">Drop Idx</button>`
-                        : `<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Create Secondary Index" onclick="createIndex('${labelName}', '${p.name}')">+ Index</button>`
+                        : (isVec
+                            ? `<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Create HNSW Vector Index" onclick="createVectorIndex('${labelName}', '${p.name}')">+ HNSW</button>`
+                            : `<button class="btn btn-secondary btn-sm" style="font-size:10px; padding:1px 6px;" title="Create Secondary Index" onclick="createIndex('${labelName}', '${p.name}')">+ Index</button>`)
                       }
                       <button class="btn btn-danger btn-sm" style="font-size:10px; padding:1px 6px;" title="Drop Property" onclick="dropVertexProperty('${labelName}', '${p.name}')">🗑</button>
                     </div>
@@ -1594,6 +2057,7 @@
                   <div>
                     <span style="font-size:14px; font-weight:700; color:var(--accent); font-family:monospace;">${labelName}</span>
                     <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">ID: ${labelId}</span>
+                    <span class="dash-badge green" style="font-size:9px; margin-left:6px;">${liveCount.toLocaleString()} vertices</span>
                   </div>
                 </div>
                 <div style="display:flex; gap:4px;">
@@ -1850,7 +2314,7 @@
     async function fetchResources() {
       const endpoint = document.getElementById('cluster-url').value.trim();
       try {
-        const resp = await fetch(`/api/resources?endpoint=${encodeURIComponent(endpoint)}`);
+        const resp = await fetch(`/api/resources?endpoint=${encodeURIComponent(endpoint)}&graph=${encodeURIComponent(activeGraphSpace)}`);
         if (resp.ok) {
           const data = await resp.json();
           updateResourcesUI(data);
@@ -2014,7 +2478,7 @@
         btn.innerHTML = '<span class="spinner"></span> Compacting...';
       }
       try {
-        const resp = await fetch(`/api/compact?endpoint=${encodeURIComponent(endpoint)}`, { method: 'POST' });
+        const resp = await fetch(`/api/compact?endpoint=${encodeURIComponent(endpoint)}&graph=${encodeURIComponent(activeGraphSpace)}`, { method: 'POST' });
         if (resp.ok) {
           if (alertBox) {
             alertBox.style.display = 'block';
@@ -2036,9 +2500,12 @@
     // Check Cluster Health on Load and periodic background refresh
     async function checkHealth() {
       await fetchClusterStatus();
+      await fetchGraphSpaces();
       await fetchSchema();
       if (currentView === 'resources') {
         await fetchResources();
+      } else if (currentView === 'analytics') {
+        await fetchPregelStatus();
       }
     }
     checkHealth();

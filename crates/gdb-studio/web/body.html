@@ -2,10 +2,18 @@
   <header>
     <div class="brand">
       <span>⚡ GDB STUDIO</span>
-      <span class="brand-badge">v0.5.8</span>
+      <span class="brand-badge">v0.6.0</span>
     </div>
 
     <div class="cluster-controls">
+      <div class="cluster-input-group" title="Active Graph Space (Multi-Tenancy Namespace)">
+        <label>GRAPH SPACE:</label>
+        <select id="graph-space-select" onchange="onGraphSpaceSelectChange(this.value)" style="background:transparent; border:none; color:var(--cyan); font-family:monospace; font-size:12px; font-weight:700; outline:none; cursor:pointer; padding-right:4px;">
+          <option value="default" style="background:var(--bg-card); color:var(--text-bright);">default</option>
+        </select>
+        <button class="btn btn-secondary btn-xs" style="padding:1px 6px; font-size:10px;" onclick="openCreateGraphModal()" title="Create New Graph Space">➕</button>
+        <button class="btn btn-secondary btn-xs" style="padding:1px 6px; font-size:10px;" onclick="dropCurrentGraphSpace()" title="Drop Selected Graph Space">🗑</button>
+      </div>
       <div class="cluster-input-group">
         <label>ENDPOINT:</label>
         <input type="text" id="cluster-url" value="http://localhost:8847" placeholder="http://host:port">
@@ -168,14 +176,14 @@
             </div>
           </div>
 
-          <!-- Category 4: Schema Catalog & DDL -->
+          <!-- Category 4: Schema Catalog, HNSW & Graph Spaces -->
           <div class="template-category" id="cat-schema">
             <div class="category-header" onclick="toggleTemplateCategory('schema')">
               <div class="category-title">
                 <span class="category-chevron" id="cat-chevron-schema">▾</span>
-                <span>📐 Schema Catalog &amp; DDL</span>
+                <span>📐 Schema, HNSW &amp; Graph Spaces</span>
               </div>
-              <span class="category-count">3</span>
+              <span class="category-count">7</span>
             </div>
             <div class="category-body" id="cat-body-schema">
               <div class="template-item" onclick="setQuery('CREATE VERTEX User (name STRING, age INT64, embedding VECTOR(128));')">
@@ -189,6 +197,22 @@
               <div class="template-item" onclick="setQuery('CREATE INDEX ON User(name);')">
                 <div class="template-title">Create Property Index</div>
                 <div class="template-query">CREATE INDEX ON User(name);</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CREATE VECTOR INDEX ON User(embedding);')">
+                <div class="template-title">Create HNSW Vector Index</div>
+                <div class="template-query">CREATE VECTOR INDEX ON User(embedding);</div>
+              </div>
+              <div class="template-item" onclick="setQuery('CREATE GRAPH IF NOT EXISTS fraud_detection;')">
+                <div class="template-title">Create Graph Space (Namespace)</div>
+                <div class="template-query">CREATE GRAPH IF NOT EXISTS fraud_detection;</div>
+              </div>
+              <div class="template-item" onclick="setQuery('USE GRAPH fraud_detection;')">
+                <div class="template-title">Switch Active Graph Space</div>
+                <div class="template-query">USE GRAPH fraud_detection;</div>
+              </div>
+              <div class="template-item" onclick="setQuery('SHOW GRAPHS;')">
+                <div class="template-title">List All Graph Spaces</div>
+                <div class="template-query">SHOW GRAPHS;</div>
               </div>
             </div>
           </div>
@@ -256,8 +280,9 @@
           <div class="nav-tabs">
             <div class="nav-tab active" id="tab-btn-graph" onclick="switchView('graph', this)">🕸️ Graph View</div>
             <div class="nav-tab" id="tab-btn-table" onclick="switchView('table', this)">📊 Table View</div>
+            <div class="nav-tab" id="tab-btn-analytics" onclick="switchView('analytics', this)">🧠 Analytics &amp; Pregel</div>
             <div class="nav-tab" id="tab-btn-plan" onclick="switchView('plan', this)">🔍 Plan / Explain</div>
-            <div class="nav-tab" id="tab-btn-schema" onclick="switchView('schema', this)">📐 Schema Manager</div>
+            <div class="nav-tab" id="tab-btn-schema" onclick="switchView('schema', this)">📐 Schema Explorer</div>
             <div class="nav-tab" id="tab-btn-cluster" onclick="switchView('cluster', this)">🌐 Cluster Ring</div>
             <div class="nav-tab" id="tab-btn-resources" onclick="switchView('resources', this)">⚡ Storage &amp; Resources</div>
             <div class="nav-tab" id="tab-btn-unity" onclick="switchView('unity', this)">🎮 3D Unity View</div>
@@ -293,6 +318,185 @@
             <thead><tr id="table-header"><th>No Data</th></tr></thead>
             <tbody id="table-body"><tr><td>Execute a query to view tabular results</td></tr></tbody>
           </table>
+        </div>
+
+        <!-- Visual Graph Analytics & Distributed Pregel Monitor Viewport -->
+        <div id="analytics-viewport" class="viewport" style="display:none; padding:20px; overflow-y:auto; background:var(--bg-darker);">
+          <div class="dashboard-container" style="max-width:1200px; margin:0 auto;">
+            <div class="dash-header">
+              <div class="dash-title">
+                <span>🧠 Visual Graph Analytics &amp; Distributed Pregel (BSP) Monitor</span>
+                <span id="pregel-status-badge" class="dash-badge green">BSP Engine Ready</span>
+                <span id="analytics-overlay-badge" class="dash-badge purple" style="display:none;">Canvas Colored</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <label style="font-size:11px; color:var(--text-muted); font-weight:600;">SUBGRAPH EDGE FILTER:</label>
+                <select id="analytics-edge-filter" class="form-input" style="width:150px; padding:4px 8px; font-size:11px;">
+                  <option value="">All Edge Types (*)</option>
+                </select>
+                <button class="btn btn-secondary btn-sm" onclick="resetVisualAnalyticsColors()">🎨 Reset Coloring</button>
+                <button class="btn btn-secondary btn-sm" onclick="fetchPregelStatus()">🔄 Refresh BSP</button>
+              </div>
+            </div>
+
+            <!-- Visual Graph Analytics One-Click Launchpad -->
+            <div class="dash-section">
+              <div class="dash-section-title">
+                <span>⚡ One-Click Visual Graph Algorithms (Auto-Coloring on 2D/3D Canvas)</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);">Executes algorithm &amp; maps communities / centrality scores directly onto graph nodes</span>
+              </div>
+              <div class="dash-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));">
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:var(--accent); font-size:13px;">🔥 PageRank Centrality</span>
+                      <span class="dash-badge blue" style="font-size:9px;">Centrality Heatmap</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Iterative influence scoring (damping=0.85, 20 supersteps). Scales node radius &amp; heatmap color.</div>
+                  </div>
+                  <button class="btn btn-primary btn-sm" onclick="runVisualAlgorithm('pagerank')">▶ Run &amp; Color by Score</button>
+                </div>
+
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:var(--purple); font-size:13px;">🧩 Louvain Communities</span>
+                      <span class="dash-badge purple" style="font-size:9px;">Cluster Palette</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Modularity-maximizing community detection. Colors each detected cluster distinctly.</div>
+                  </div>
+                  <button class="btn btn-primary btn-sm" style="background:#8957e5;" onclick="runVisualAlgorithm('louvain')">▶ Run &amp; Color Clusters</button>
+                </div>
+
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:var(--success); font-size:13px;">🔗 Connected Components (WCC)</span>
+                      <span class="dash-badge green" style="font-size:9px;">Component ID</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Weakly connected components via BSP min-label propagation across partitions.</div>
+                  </div>
+                  <button class="btn btn-primary btn-sm" style="background:#238636;" onclick="runVisualAlgorithm('wcc')">▶ Run &amp; Color Components</button>
+                </div>
+
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:var(--cyan); font-size:13px;">🏷️ Label Propagation (LPA)</span>
+                      <span class="dash-badge blue" style="font-size:9px;">Fast Community</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Near-linear time community detection by neighbor majority voting.</div>
+                  </div>
+                  <button class="btn btn-secondary btn-sm" onclick="runVisualAlgorithm('lpa')">▶ Run &amp; Color Labels</button>
+                </div>
+
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:#f0883e; font-size:13px;">🛡️ K-Core Decomposition</span>
+                      <span class="dash-badge" style="background:rgba(240,136,62,0.15); color:#f0883e; font-size:9px;">Coreness Shell</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Identifies tightly interlinked core subgraphs by iterative degree peeling.</div>
+                  </div>
+                  <button class="btn btn-secondary btn-sm" onclick="runVisualAlgorithm('kcore')">▶ Run &amp; Color Shells</button>
+                </div>
+
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:#d29922; font-size:13px;">📐 Triangle Count</span>
+                      <span class="dash-badge" style="background:rgba(210,153,34,0.15); color:#d29922; font-size:9px;">Local Clustering</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Counts 3-cliques per vertex to measure local density and clustering coefficient.</div>
+                  </div>
+                  <button class="btn btn-secondary btn-sm" onclick="runVisualAlgorithm('triangles')">▶ Run &amp; Color Density</button>
+                </div>
+
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:#f778ba; font-size:13px;">🌉 Betweenness Centrality</span>
+                      <span class="dash-badge" style="background:rgba(247,120,186,0.15); color:#f778ba; font-size:9px;">Bridge Nodes</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Brandes shortest-path centrality highlighting critical bridge vertices.</div>
+                  </div>
+                  <button class="btn btn-secondary btn-sm" onclick="runVisualAlgorithm('betweenness')">▶ Run &amp; Highlight Bridges</button>
+                </div>
+
+                <div class="dash-card" style="display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span style="font-weight:700; color:#79c0ff; font-size:13px;">🧭 Shortest Path (SSSP)</span>
+                      <span class="dash-badge blue" style="font-size:9px;">Distance Gradient</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Computes geodesic distance from source vertex #1 across all reachable hops.</div>
+                  </div>
+                  <button class="btn btn-secondary btn-sm" onclick="runVisualAlgorithm('sssp')">▶ Run &amp; Color Distance</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Distributed Pregel / BSP Superstep Telemetry -->
+            <div class="dash-section">
+              <div class="dash-section-title">
+                <span>📡 Distributed Pregel / BSP Superstep Tracker (Arrow Flight Shuffle)</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);" id="pregel-graph-space-label">Graph Space: default</span>
+              </div>
+
+              <div class="dash-grid">
+                <div class="dash-card">
+                  <div class="card-label">Last BSP Algorithm</div>
+                  <div class="card-value" id="pregel-algo-val" style="font-size:18px; color:var(--accent);">IDLE</div>
+                  <div class="card-subtext" id="pregel-mode-sub">Ready for distributed execution</div>
+                </div>
+                <div class="dash-card">
+                  <div class="card-label">Supersteps Executed</div>
+                  <div class="card-value" id="pregel-steps-val">0 / 0</div>
+                  <div class="card-subtext" id="pregel-time-sub">Total time: 0.0 ms</div>
+                </div>
+                <div class="dash-card">
+                  <div class="card-label">Arrow Flight Shuffle</div>
+                  <div class="card-value" id="pregel-messages-val">0 msgs</div>
+                  <div class="card-subtext" id="pregel-bytes-sub">0.0 KB exchanged across ring</div>
+                </div>
+                <div class="dash-card">
+                  <div class="card-label">Convergence Residual</div>
+                  <div class="card-value" id="pregel-delta-val" style="color:var(--success);">0.000000</div>
+                  <div class="card-subtext" id="pregel-v-e-sub">0 vertices | 0 edges</div>
+                </div>
+              </div>
+
+              <!-- Progress Bar -->
+              <div class="dash-card" style="margin-top:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                  <span style="font-size:11px; font-weight:700; color:var(--text-bright);" id="pregel-progress-label">Superstep Convergence Progress</span>
+                  <span style="font-size:11px; font-family:monospace; color:var(--cyan);" id="pregel-progress-pct">100%</span>
+                </div>
+                <div style="width:100%; height:8px; background:var(--bg-darker); border-radius:4px; overflow:hidden; border:1px solid var(--border);">
+                  <div id="pregel-progress-bar" style="width:0%; height:100%; background:linear-gradient(90deg, var(--accent), var(--purple)); transition:width 0.3s ease;"></div>
+                </div>
+              </div>
+
+              <!-- Superstep Breakdown Table -->
+              <div style="margin-top:14px;">
+                <table class="data-grid" style="width:100%;">
+                  <thead>
+                    <tr>
+                      <th>Superstep #</th>
+                      <th>Active Vertices</th>
+                      <th>Flight Shuffle Messages</th>
+                      <th>Network Shuffle Bytes</th>
+                      <th>Convergence Max Delta</th>
+                      <th>Step Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody id="pregel-supersteps-tbody">
+                    <tr><td colspan="6" style="text-align:center; color:var(--text-muted);">Execute any graph algorithm (e.g., PageRank, Louvain, WCC, SSSP) to inspect per-superstep BSP telemetry.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Plan / Explain Viewport -->
@@ -481,7 +685,8 @@
           <div class="dashboard-container" style="max-width:1200px; margin:0 auto;">
             <div class="dash-header">
               <div class="dash-title">
-                <span>📐 Database Schema Catalog &amp; DDL Manager</span>
+                <span>📐 Interactive Multi-Graph Schema Explorer &amp; DDL Manager</span>
+                <span id="schema-space-badge" class="dash-badge green">Space: default</span>
                 <span id="schema-total-tags-badge" class="dash-badge blue">0 Vertex Tags</span>
                 <span id="schema-total-edges-badge" class="dash-badge purple">0 Edge Types</span>
               </div>
@@ -489,6 +694,36 @@
                 <button class="btn btn-primary btn-sm" onclick="openCreateVertexModal()">➕ Create Vertex Tag</button>
                 <button class="btn btn-primary btn-sm" style="background:#8957e5;" onclick="openCreateEdgeModal()">➕ Create Edge Type</button>
                 <button class="btn btn-secondary btn-sm" onclick="fetchSchema()">🔄 Refresh Schema</button>
+              </div>
+            </div>
+
+            <!-- Interactive Filter Bar -->
+            <div class="dash-card" style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; padding:12px 16px;">
+              <div style="display:flex; align-items:center; gap:10px; flex:1; min-width:240px;">
+                <span style="font-size:14px;">🔍</span>
+                <input type="text" id="schema-search-input" class="form-input" placeholder="Filter by vertex label, edge type, or property name..." oninput="filterSchemaExplorer()" style="flex:1;" />
+              </div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <select id="schema-filter-kind" class="form-input" style="width:150px;" onchange="filterSchemaExplorer()">
+                  <option value="all">All Entities (Tags + Edges)</option>
+                  <option value="vertices">Vertex Tags Only</option>
+                  <option value="edges">Edge Types Only</option>
+                </select>
+                <select id="schema-filter-indexed" class="form-input" style="width:170px;" onchange="filterSchemaExplorer()">
+                  <option value="all">All Properties</option>
+                  <option value="indexed">Indexed / HNSW Only</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Visual Entity-Relationship Schema Diagram -->
+            <div class="dash-section">
+              <div class="dash-section-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>🗺️ Visual Entity-Relationship Diagram (Live Topology &amp; Vertex Counters)</span>
+                <span style="font-size:11px; font-weight:normal; color:var(--text-muted);">Click any entity node in the diagram to query sample instances</span>
+              </div>
+              <div class="dash-card" style="padding:0; overflow:hidden; background:#090d13;">
+                <svg id="schema-er-svg" width="100%" height="220" viewBox="0 0 1000 220" style="display:block;"></svg>
               </div>
             </div>
 
@@ -637,6 +872,7 @@
             <option value="INT64">INT64 (Integer)</option>
             <option value="FLOAT64">FLOAT64 (Float)</option>
             <option value="BOOLEAN">BOOLEAN (Bool)</option>
+            <option value="VECTOR(128)">VECTOR(128) (HNSW Embedding)</option>
           </select>
         </div>
       </div>
@@ -647,10 +883,31 @@
     </div>
   </div>
 
+  <!-- Modal: Create Graph Space -->
+  <div class="modal-overlay" id="modal-create-graph">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span>🌌 Create New Graph Space (Namespace)</span>
+        <button class="control-btn" style="width:20px;height:20px;" onclick="closeModal('modal-create-graph')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Graph Space Name</label>
+          <input type="text" class="form-input" id="new-graph-space-name" placeholder="e.g. fraud_detection, social_graph, rag_kb" />
+          <div style="font-size:10px; color:var(--text-muted); margin-top:4px;">Each Graph Space has physically isolated storage partitions, CSR cache, HNSW vector indexes, and schema catalog.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-create-graph')">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="submitCreateGraphSpace()">Create &amp; Switch</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Footer -->
   <footer>
     <div class="footer-left">
-      <span id="footer-version">GDB Studio v0.5.8</span>
+      <span id="footer-version">GDB Studio v0.6.0 (Hals)</span>
       <span id="footer-cluster-info">Cluster: Leaderless Ring (3 Peers)</span>
       <span id="footer-gpu-info">Acceleration: Metal / CUDA / CPU</span>
     </div>

@@ -4,6 +4,33 @@ All notable changes to **GDB** (Distributed High-Performance In-Memory Graph Dat
 
 ---
 
+## [0.6.0] - 2026-11-06 ("Hals")
+
+### 🚀 New Features
+- **Graph Spaces / Namespaces (Multi-Tenancy & Multi-Graph):**
+  - Added full DDL support for `CREATE GRAPH [IF NOT EXISTS] <name>;`, `SHOW GRAPHS;`, `USE [GRAPH] <name>;`, and `DROP GRAPH [IF EXISTS] <name>;`.
+  - Logical and physical isolation of `GraphSchema`, `PartitionStorageEngine`, WAL directories, CSR caches, and HNSW vector indexes per graph space.
+  - Multi-space request routing via `X-GDB-Graph: <name>` HTTP header, `"graph"` JSON field, `?graph=<name>` query parameter, and `gdb://<graph>/...` Arrow Flight tickets and descriptors.
+- **Native Multi-Layer HNSW Vector Graph Index (`gdb-storage`):**
+  - Implemented lock-free/concurrent multi-layer `HnswIndex` with greedy upper-layer traversal, `ef_construction`/`ef_search` beam search, precomputed L2 norms, and automatic maintenance on vertex mutations.
+  - Added `CREATE VECTOR INDEX ON :Label(property);` DDL and wired `CALL vector.similaritySearch(...)` to query the in-memory HNSW index first before falling back to GPU/SIMD scan.
+- **Distributed Pregel / BSP Superstep Telemetry & Analytics (`gdb-server`, `gdb-analytics`, `gdb-gpu`):**
+  - Full GPU Metal compute shaders and distributed BSP execution for all 9 core graph algorithms (BFS, SSSP, PageRank, WCC, Triangle Count, Degree Centrality, LPA, K-Core, Louvain, Betweenness).
+  - Added `/pregel/status` endpoint and per-query `"pregel"` telemetry tracking superstep count, active vertices, Arrow Flight shuffle messages/bytes, and convergence deltas.
+- **GDB Studio v0.6.0:**
+  - **Graph Spaces Switcher** in top navigation header with one-click switching, live vertex/edge counts, and modal creation/deletion.
+  - **Visual Graph Analytics & Distributed Pregel Monitor (`🧠 Analytics & Pregel`)** with one-click execution of PageRank, Louvain, WCC, LPA, K-Core, Triangles, Betweenness, and SSSP, subgraph `edge_type` filter, automatic community/centrality heatmap coloring on 2D/3D canvas, and live Pregel superstep progress table.
+  - **Interactive Multi-Graph Schema Explorer** with search/index filters, live per-label vertex counters, HNSW index creation buttons, and an interactive SVG Entity-Relationship diagram.
+- **GDB CLI v0.6.0:**
+  - Added `--graph <name>` CLI option, dynamic prompt `gdb (<active_graph>)> `, `USE GRAPH` session switching, and interactive `Tab` auto-completion (`GdbCompleter`) for Cypher keywords, `CALL algo.*` procedures, and graph spaces.
+- **Python SDK (`gdb-client 0.6.0`):**
+  - Added Graph Spaces management (`graph` init parameter, `list_graphs()`, `create_graph()`, `use_graph()`, `drop_graph()`, `pregel_status()`).
+  - Added official AI framework integrations in `gdb_client.integrations`:
+    - `langchain-gdb`: `GdbVectorStore`, `GdbGraphStore`, `GdbGraphQAChain`.
+    - `langgraph-gdb`: `GdbCheckpointSaver`, `GdbGraphRAGToolkit`.
+
+---
+
 ## [0.5.8] - 2026-10-17
 
 ### 🚀 New Features

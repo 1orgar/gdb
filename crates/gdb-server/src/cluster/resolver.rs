@@ -15,6 +15,10 @@ pub struct ClusterEdgeExpander {
 }
 
 impl RemoteEdgeExpander for ClusterEdgeExpander {
+    fn clear_cache(&self) {
+        self.cache.write().clear();
+    }
+
     fn get_out_edges(&self, vid: VertexId, edge_type: Option<EdgeType>) -> Vec<EdgeId> {
         let batch_map = self.batch_get_out_edges(&[vid], edge_type);
         batch_map.get(&vid).cloned().unwrap_or_default()
@@ -136,6 +140,9 @@ impl RemoteEdgeExpander for ClusterEdgeExpander {
 
         {
             let mut cache = self.cache.write();
+            if cache.len() > 50_000 {
+                cache.clear();
+            }
             for (vid_u64, edge_dtos) in fetched_map {
                 let vid = VertexId(vid_u64);
                 let edge_ids: Vec<EdgeId> = edge_dtos.into_iter().map(EdgeId::from).collect();
